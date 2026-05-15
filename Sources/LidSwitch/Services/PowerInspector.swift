@@ -5,13 +5,16 @@ enum PowerInspector {
         let battery = Shell.run("/usr/bin/pmset", ["-g", "batt"]).stdout
         let live = Shell.run("/usr/bin/pmset", ["-g", "live"]).stdout
         let custom = Shell.run("/usr/bin/pmset", ["-g", "custom"]).stdout
+        let helperInstalled = helperInstalled()
 
         return PowerSnapshot(
             source: parsePowerSource(from: battery),
             sleepDisabled: parseSleepDisabled(from: live),
             acIdleSleepMinutes: parseACIdleSleep(from: custom),
-            desiredEnabled: DesiredStateStore.read(),
-            helperInstalled: helperInstalled(),
+            batteryIdleSleepMinutes: parseBatteryIdleSleep(from: custom),
+            preferences: DesiredStateStore.readPreferences(),
+            helperInstalled: helperInstalled,
+            helperNeedsUpdate: helperNeedsUpdate(helperInstalled: helperInstalled),
             checkedAt: Date()
         )
     }
@@ -23,6 +26,16 @@ enum PowerInspector {
         }
 
         return FileManager.default.fileExists(atPath: AppPaths.launchDaemonPath)
+    }
+
+    static func helperNeedsUpdate(helperInstalled: Bool) -> Bool {
+        guard helperInstalled else {
+            return false
+        }
+
+        let result = Shell.run("/bin/cat", [AppPaths.rootHelperVersionPath])
+        let installedVersion = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return installedVersion != AppPaths.helperVersion
     }
 
     static func parsePowerSource(from output: String) -> PowerSource {
@@ -76,6 +89,37 @@ enum PowerInspector {
             }
 
             guard inACSection else {
+                continue
+            }
+
+            let parts = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" })
+            guard parts.first == "sleep", parts.count >= 2 else {
+                continue
+            }
+
+            return Int(parts[1])
+        }
+
+        return nil
+    }
+
+    static func parseBatteryIdleSleep(from output: String) -> Int? {
+        var inBatterySection = false
+
+        for line in output.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed == "Battery Power:" {
+                inBatterySection = true
+                continue
+            }
+
+            if trimmed == "AC Power:" {
+                inBatterySection = false
+                continue
+            }
+
+            guard inBatterySection else {
                 continue
             }
 

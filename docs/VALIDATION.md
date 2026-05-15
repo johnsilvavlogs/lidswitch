@@ -14,6 +14,9 @@ Current tests cover:
 - battery power and percentage parsing
 - `SleepDisabled` parsing
 - AC idle-sleep parsing
+- battery idle-sleep parsing
+- legacy and key/value preference parsing
+- AC-only and battery opt-in policy decisions
 
 ## Helper And Plist Linting
 
@@ -45,11 +48,13 @@ This checks:
 - `LidSwitch` process is running
 - LaunchDaemon is loaded
 - helper executable exists
-- desired state is `enabled`
-- `SleepDisabled` matches the current power source
-- battery sleep profile remains `1`
+- helper version is current
+- desired mode is `enabled`
+- battery opt-in is disabled for the safe default smoke
+- `SleepDisabled` matches the current power source and battery opt-in
+- battery sleep profile is not overridden when battery opt-in is disabled
 - menu bar item is exposed through Accessibility
-- panel text includes the primary toggle, battery-safety copy, and enabled status
+- panel text includes the primary toggle, battery opt-in toggle, battery-safety copy, and enabled status
 
 This smoke expects the app to be installed and enabled. It is part of the JTBD done gate.
 

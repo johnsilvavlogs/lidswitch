@@ -15,7 +15,7 @@ enum DebugCommands {
             print(PrivilegedHelperManager.diagnosticLaunchDaemonPlist())
             exit(0)
         case "--print-install-script":
-            print(PrivilegedHelperManager.diagnosticInstallScript(initiallyEnabled: true))
+            print(PrivilegedHelperManager.diagnosticInstallScript(initialPreferences: .acOnlyEnabled))
             exit(0)
         case "--print-uninstall-script":
             print(PrivilegedHelperManager.diagnosticUninstallScript())

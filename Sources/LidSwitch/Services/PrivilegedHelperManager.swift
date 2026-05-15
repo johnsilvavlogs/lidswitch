@@ -10,19 +10,19 @@ enum PrivilegedHelperManager {
         launchDaemonPlist()
     }
 
-    static func diagnosticInstallScript(initiallyEnabled: Bool) -> String {
-        installScript(initiallyEnabled: initiallyEnabled)
+    static func diagnosticInstallScript(initialPreferences: PowerPreferences) -> String {
+        installScript(initialPreferences: initialPreferences)
     }
 
     static func diagnosticUninstallScript() -> String {
         uninstallScript()
     }
 
-    static func install(initiallyEnabled: Bool) throws {
-        let script = installScript(initiallyEnabled: initiallyEnabled)
+    static func install(initialPreferences: PowerPreferences) throws {
+        let script = installScript(initialPreferences: initialPreferences)
         try runAsAdministrator(
             script,
-            prompt: "LidSwitch needs admin permission to install the AC-only lid-awake helper."
+            prompt: "LidSwitch needs admin permission to install the lid-awake helper."
         )
     }
 
@@ -41,6 +41,12 @@ enum PrivilegedHelperManager {
           original="$(/bin/cat \(shellQuote(AppPaths.rootOriginalACSleepPath)) | /usr/bin/tr -cd '0-9')"
           if [ -n "$original" ]; then
             /usr/bin/pmset -c sleep "$original"
+          fi
+        fi
+        if [ -f \(shellQuote(AppPaths.rootOriginalBatterySleepPath)) ]; then
+          original="$(/bin/cat \(shellQuote(AppPaths.rootOriginalBatterySleepPath)) | /usr/bin/tr -cd '0-9')"
+          if [ -n "$original" ]; then
+            /usr/bin/pmset -b sleep "$original"
           fi
         fi
         """
@@ -69,10 +75,9 @@ enum PrivilegedHelperManager {
         }
     }
 
-    private static func installScript(initiallyEnabled: Bool) -> String {
+    private static func installScript(initialPreferences: PowerPreferences) -> String {
         let userSupportDirectory = AppPaths.userSupportDirectory.path
         let desiredStateFile = AppPaths.desiredStateFile.path
-        let desiredState = initiallyEnabled ? "enabled" : "disabled"
         let uid = getuid()
         let gid = getgid()
 
@@ -81,6 +86,7 @@ enum PrivilegedHelperManager {
 
         root_dir=\(shellQuote(AppPaths.rootSupportDirectory))
         helper_path=\(shellQuote(AppPaths.rootHelperPath))
+        helper_version_path=\(shellQuote(AppPaths.rootHelperVersionPath))
         plist_path=\(shellQuote(AppPaths.launchDaemonPath))
         user_support_dir=\(shellQuote(userSupportDirectory))
         desired_state_file=\(shellQuote(desiredStateFile))
@@ -88,7 +94,9 @@ enum PrivilegedHelperManager {
         /bin/mkdir -p "$root_dir" "$user_support_dir"
         /usr/sbin/chown \(uid):\(gid) "$user_support_dir"
         /bin/chmod 0755 "$user_support_dir"
-        /usr/bin/printf '%s\\n' \(shellQuote(desiredState)) > "$desired_state_file"
+        /bin/cat > "$desired_state_file" <<'LIDSWITCH_STATE'
+        \(initialPreferences.storagePayload)
+        LIDSWITCH_STATE
         /usr/sbin/chown \(uid):\(gid) "$desired_state_file"
         /bin/chmod 0644 "$desired_state_file"
 
@@ -97,6 +105,10 @@ enum PrivilegedHelperManager {
         LIDSWITCH_HELPER
         /usr/sbin/chown root:wheel "$helper_path"
         /bin/chmod 0755 "$helper_path"
+
+        /usr/bin/printf '%s\\n' \(shellQuote(AppPaths.helperVersion)) > "$helper_version_path"
+        /usr/sbin/chown root:wheel "$helper_version_path"
+        /bin/chmod 0644 "$helper_version_path"
 
         /bin/cat > "$plist_path" <<'LIDSWITCH_PLIST'
         \(launchDaemonPlist())
@@ -121,10 +133,13 @@ enum PrivilegedHelperManager {
 
         plist_path=\(shellQuote(AppPaths.launchDaemonPath))
         original_ac_sleep=\(shellQuote(AppPaths.rootOriginalACSleepPath))
+        original_battery_sleep=\(shellQuote(AppPaths.rootOriginalBatterySleepPath))
         desired_state_file=\(shellQuote(desiredStateFile))
 
         /bin/mkdir -p "$(/usr/bin/dirname "$desired_state_file")"
-        /usr/bin/printf 'disabled\\n' > "$desired_state_file"
+        /bin/cat > "$desired_state_file" <<'LIDSWITCH_STATE'
+        \(PowerPreferences.disabled.storagePayload)
+        LIDSWITCH_STATE
         /usr/sbin/chown \(uid):\(gid) "$desired_state_file"
         /bin/chmod 0644 "$desired_state_file"
 
@@ -133,6 +148,12 @@ enum PrivilegedHelperManager {
           original="$(/bin/cat "$original_ac_sleep" | /usr/bin/tr -cd '0-9')"
           if [ -n "$original" ]; then
             /usr/bin/pmset -c sleep "$original"
+          fi
+        fi
+        if [ -f "$original_battery_sleep" ]; then
+          original="$(/bin/cat "$original_battery_sleep" | /usr/bin/tr -cd '0-9')"
+          if [ -n "$original" ]; then
+            /usr/bin/pmset -b sleep "$original"
           fi
         fi
 
@@ -150,15 +171,62 @@ enum PrivilegedHelperManager {
         state_file=\(shellQuote(stateFile))
         root_dir=\(shellQuote(AppPaths.rootSupportDirectory))
         original_ac_sleep=\(shellQuote(AppPaths.rootOriginalACSleepPath))
+        original_battery_sleep=\(shellQuote(AppPaths.rootOriginalBatterySleepPath))
 
         /bin/mkdir -p "$root_dir"
 
-        desired_state() {
-          if [ -f "$state_file" ]; then
-            /bin/cat "$state_file" | /usr/bin/tr -d '[:space:]'
-          else
-            /bin/echo disabled
+        preference() {
+          key="$1"
+          default_value="$2"
+
+          if [ ! -f "$state_file" ]; then
+            /bin/echo "$default_value"
+            return
           fi
+
+          legacy="$(/bin/cat "$state_file" | /usr/bin/tr -d '[:space:]')"
+          if [ "$legacy" = "enabled" ]; then
+            if [ "$key" = "mode" ]; then
+              /bin/echo enabled
+            else
+              /bin/echo disabled
+            fi
+            return
+          fi
+
+          if [ "$legacy" = "disabled" ]; then
+            /bin/echo disabled
+            return
+          fi
+
+          value="$(/usr/bin/awk -F= -v desired_key="$key" '
+            function trim(value) {
+              gsub(/^[ \\t]+|[ \\t]+$/, "", value)
+              return value
+            }
+
+            NF >= 2 {
+              field=tolower(trim($1))
+              value=tolower(trim($2))
+
+              if (desired_key == "mode" && (field == "mode" || field == "enabled" || field == "keepawake" || field == "keep-awake")) {
+                print value
+              }
+
+              if (desired_key == "battery" && (field == "battery" || field == "allowbattery" || field == "allow-battery" || field == "batterykeepawake" || field == "battery-keep-awake")) {
+                print value
+              }
+            }
+          ' "$state_file" | /usr/bin/tail -n 1)"
+
+          case "$value" in
+            enabled|enable|true|1|yes|on)
+              /bin/echo enabled
+              ;;
+            *)
+              /bin/echo "$default_value"
+              ;;
+          esac
         }
 
         current_ac_sleep() {
@@ -169,11 +237,28 @@ enum PrivilegedHelperManager {
           '
         }
 
+        current_battery_sleep() {
+          /usr/bin/pmset -g custom | /usr/bin/awk '
+            /^Battery Power:/ { battery=1; next }
+            /^AC Power:/ { battery=0; next }
+            battery && $1 == "sleep" { print $2; exit }
+          '
+        }
+
         remember_original_ac_sleep() {
           if [ ! -f "$original_ac_sleep" ]; then
             original="$(current_ac_sleep)"
             if [ -n "$original" ]; then
               /usr/bin/printf '%s\\n' "$original" > "$original_ac_sleep"
+            fi
+          fi
+        }
+
+        remember_original_battery_sleep() {
+          if [ ! -f "$original_battery_sleep" ]; then
+            original="$(current_battery_sleep)"
+            if [ -n "$original" ]; then
+              /usr/bin/printf '%s\\n' "$original" > "$original_battery_sleep"
             fi
           fi
         }
@@ -188,13 +273,38 @@ enum PrivilegedHelperManager {
           fi
         }
 
+        restore_original_battery_sleep() {
+          if [ -f "$original_battery_sleep" ]; then
+            original="$(/bin/cat "$original_battery_sleep" | /usr/bin/tr -cd '0-9')"
+            if [ -n "$original" ]; then
+              /usr/bin/pmset -b sleep "$original"
+            fi
+            /bin/rm -f "$original_battery_sleep"
+          fi
+        }
+
         sleep_disabled="$(/usr/bin/pmset -g live | /usr/bin/awk '/SleepDisabled/ { print $2; exit }')"
         power_source="$(/usr/bin/pmset -g batt)"
-        desired="$(desired_state)"
+        desired="$(preference mode disabled)"
+        battery_allowed="$(preference battery disabled)"
 
         if [ "$desired" = "enabled" ] && [[ "$power_source" == *"Now drawing from 'AC Power'"* ]]; then
           remember_original_ac_sleep
           /usr/bin/pmset -c sleep 0
+
+          if [ "$battery_allowed" = "enabled" ]; then
+            remember_original_battery_sleep
+            /usr/bin/pmset -b sleep 0
+          else
+            restore_original_battery_sleep
+          fi
+
+          if [ "$sleep_disabled" != "1" ]; then
+            /usr/bin/pmset -a disablesleep 1
+          fi
+        elif [ "$desired" = "enabled" ] && [[ "$power_source" == *"Now drawing from 'Battery Power'"* ]] && [ "$battery_allowed" = "enabled" ]; then
+          remember_original_battery_sleep
+          /usr/bin/pmset -b sleep 0
           if [ "$sleep_disabled" != "1" ]; then
             /usr/bin/pmset -a disablesleep 1
           fi
@@ -203,8 +313,11 @@ enum PrivilegedHelperManager {
             /usr/bin/pmset -a disablesleep 0
           fi
 
-          if [ "$desired" != "enabled" ]; then
+          if [ "$desired" = "disabled" ]; then
             restore_original_ac_sleep
+            restore_original_battery_sleep
+          elif [ "$battery_allowed" = "disabled" ]; then
+            restore_original_battery_sleep
           fi
         fi
         """

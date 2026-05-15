@@ -4,6 +4,7 @@ enum AppPaths {
     static let appName = "LidSwitch"
     static let bundleIdentifier = "com.johnsilva.LidSwitch"
     static let helperLabel = "com.johnsilva.lidswitch.helper"
+    static let helperVersion = "2"
 
     static var userSupportDirectory: URL {
         FileManager.default
@@ -17,6 +18,8 @@ enum AppPaths {
 
     static let rootSupportDirectory = "/Library/Application Support/LidSwitch"
     static let rootHelperPath = "/Library/Application Support/LidSwitch/lidswitch-helper"
+    static let rootHelperVersionPath = "/Library/Application Support/LidSwitch/helper-version"
     static let rootOriginalACSleepPath = "/Library/Application Support/LidSwitch/original-ac-sleep"
+    static let rootOriginalBatterySleepPath = "/Library/Application Support/LidSwitch/original-battery-sleep"
     static let launchDaemonPath = "/Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist"
 }

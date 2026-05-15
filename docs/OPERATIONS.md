@@ -18,6 +18,14 @@ The app appears in the macOS menu bar as a small power/bolt icon.
 
 After installation, future on/off toggles update only the user-owned desired-state file and do not require admin authorization.
 
+## Allow Battery Keep-Awake
+
+1. Turn on **Keep awake on power**.
+2. Turn on **Allow on battery**.
+3. Update the helper if the panel asks for it.
+
+This is intentionally opt-in. While enabled, LidSwitch may keep the Mac awake with the lid closed on battery power, which can drain the battery if the workload runs too long.
+
 ## Disable Without Uninstalling
 
 Turn off **Keep awake on power**.
@@ -25,7 +33,9 @@ Turn off **Keep awake on power**.
 Expected result:
 
 ```text
-~/Library/Application Support/LidSwitch/desired-state = disabled
+~/Library/Application Support/LidSwitch/desired-state:
+mode=disabled
+battery=disabled
 pmset -g live shows SleepDisabled 0
 ```
 
@@ -40,6 +50,7 @@ Restore does this:
 ```bash
 pmset -a disablesleep 0
 pmset -c sleep <saved-original-ac-sleep> # when available
+pmset -b sleep <saved-original-battery-sleep> # when available
 ```
 
 It uses a macOS administrator prompt because these are privileged power-management changes.
@@ -106,7 +117,7 @@ If the helper should be removed manually:
 sudo launchctl bootout system /Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist 2>/dev/null || true
 sudo rm -f /Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist
 sudo rm -rf "/Library/Application Support/LidSwitch"
-printf 'disabled\n' > "$HOME/Library/Application Support/LidSwitch/desired-state"
+printf 'mode=disabled\nbattery=disabled\n' > "$HOME/Library/Application Support/LidSwitch/desired-state"
 ```
 
 Prefer the in-app **Uninstall** control when possible because it also restores the saved AC sleep value.

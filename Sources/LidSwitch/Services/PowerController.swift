@@ -19,7 +19,7 @@ final class PowerController: ObservableObject {
     }
 
     var menuBarSymbol: String {
-        if snapshot.desiredEnabled && snapshot.source.isAC && snapshot.sleepDisabled {
+        if snapshot.desiredEnabled && snapshot.sleepDisabled {
             return "bolt.circle.fill"
         }
 
@@ -35,11 +35,52 @@ final class PowerController: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        applyPreferences(snapshot.preferences.withKeepAwakeEnabled(enabled))
+    }
+
+    func setBatteryEnabled(_ enabled: Bool) {
+        applyPreferences(snapshot.preferences.withBatteryKeepAwakeAllowed(enabled))
+    }
+
+    func updateHelper() {
+        guard !isBusy else {
+            return
+        }
+
+        let preferences = snapshot.preferences
+
+        isBusy = true
+        errorMessage = nil
+
+        Task.detached {
+            do {
+                try PrivilegedHelperManager.install(initialPreferences: preferences)
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                let nextSnapshot = PowerInspector.snapshot()
+                await MainActor.run {
+                    self.snapshot = nextSnapshot
+                    self.isBusy = false
+                }
+            } catch {
+                let nextSnapshot = PowerInspector.snapshot()
+                await MainActor.run {
+                    self.snapshot = nextSnapshot
+                    self.isBusy = false
+                    self.errorMessage = error.localizedDescription.isEmpty
+                        ? "Helper update did not complete."
+                        : error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func applyPreferences(_ preferences: PowerPreferences) {
         guard !isBusy else {
             return
         }
 
         let helperInstalled = snapshot.helperInstalled
+        let helperNeedsUpdate = snapshot.helperNeedsUpdate
         let sleepDisabled = snapshot.sleepDisabled
 
         isBusy = true
@@ -47,14 +88,14 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                if enabled {
-                    if helperInstalled {
-                        try DesiredStateStore.write(true)
+                if preferences.keepAwakeEnabled {
+                    if helperInstalled && !helperNeedsUpdate {
+                        try DesiredStateStore.write(preferences)
                     } else {
-                        try PrivilegedHelperManager.install(initiallyEnabled: true)
+                        try PrivilegedHelperManager.install(initialPreferences: preferences)
                     }
                 } else {
-                    try DesiredStateStore.write(false)
+                    try DesiredStateStore.write(.disabled)
                     if !helperInstalled && sleepDisabled {
                         try PrivilegedHelperManager.restoreSleepNow()
                     }
@@ -80,7 +121,7 @@ final class PowerController: ObservableObject {
     }
 
     func installHelper() {
-        setEnabled(true)
+        applyPreferences(snapshot.preferences.withKeepAwakeEnabled(true))
     }
 
     func restoreNow() {
@@ -93,7 +134,7 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try DesiredStateStore.write(false)
+                try DesiredStateStore.write(.disabled)
                 try PrivilegedHelperManager.restoreSleepNow()
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 let nextSnapshot = PowerInspector.snapshot()

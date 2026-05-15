@@ -1,15 +1,16 @@
 # LidSwitch
 
-LidSwitch is a minimal native macOS menu bar app for one job: keep a MacBook awake when it is connected to power and the lid is closed, while preserving normal sleep behavior on battery.
+LidSwitch is a minimal native macOS menu bar app for one job: keep a MacBook awake when the lid is closed. It defaults to the safer AC-only mode and includes an explicit battery opt-in for users who need processing to continue while unplugged.
 
 ![LidSwitch running](screenshots/lidswitch-working.png)
 
 ## What It Does
 
 - Adds a compact `MenuBarExtra` with one primary switch: **Keep awake on power**.
+- Adds a secondary **Allow on battery** switch that stays off unless explicitly enabled.
 - Shows live power source and sleep-override state.
 - Enables `SleepDisabled` only when the app is enabled and macOS reports AC Power.
-- Automatically clears `SleepDisabled` when the app is disabled or the Mac is on battery.
+- Automatically clears `SleepDisabled` on battery unless both switches are enabled.
 - Provides **Restore** and **Uninstall** controls from the menu bar panel.
 - Uses the standard macOS administrator prompt for privileged helper install, restore, and uninstall.
 
@@ -19,9 +20,10 @@ macOS exposes `disablesleep` as a system-wide power flag, not as a clean AC-only
 
 The helper behavior is intentionally conservative:
 
-- If desired state is `enabled` and power source is AC: set AC idle sleep to `0` and set `SleepDisabled` to `1`.
-- If power source is battery: set `SleepDisabled` to `0`.
-- If desired state is `disabled`: set `SleepDisabled` to `0` and restore the original AC idle-sleep value if LidSwitch saved one.
+- If keep-awake is enabled and power source is AC: set AC idle sleep to `0` and set `SleepDisabled` to `1`.
+- If keep-awake is enabled, battery opt-in is enabled, and power source is battery: set battery idle sleep to `0` and set `SleepDisabled` to `1`.
+- If power source is battery and battery opt-in is disabled: set `SleepDisabled` to `0`.
+- If keep-awake is disabled: set `SleepDisabled` to `0` and restore saved AC and battery idle-sleep values if LidSwitch saved them.
 
 The app never stores credentials. It delegates privileged work to macOS via the normal authorization dialog.
 
@@ -77,21 +79,30 @@ When enabled for the first time, LidSwitch installs:
 ```text
 /Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist
 /Library/Application Support/LidSwitch/lidswitch-helper
+/Library/Application Support/LidSwitch/helper-version
 /Library/Application Support/LidSwitch/original-ac-sleep
+/Library/Application Support/LidSwitch/original-battery-sleep
 ~/Library/Application Support/LidSwitch/desired-state
 ```
 
-The root-owned files are removed by **Uninstall**. The desired-state file is user-owned and stores only `enabled` or `disabled`.
+The root-owned files are removed by **Uninstall**. The desired-state file is user-owned and stores only the keep-awake mode and battery opt-in:
+
+```text
+mode=enabled
+battery=disabled
+```
+
+Legacy `enabled` and `disabled` files still read safely; legacy `enabled` means AC-only.
 
 ## Current Verified State
 
 The implementation was verified on macOS 26.3 with the app enabled while connected to AC power:
 
 - `SleepDisabled 1`
-- desired state `enabled`
+- desired state `mode=enabled`, `battery=disabled`
 - LaunchDaemon loaded as `com.johnsilva.lidswitch.helper`
 - battery power profile preserved with `sleep 1`
-- menu bar UI showed `Keeping awake on power`
+- menu bar UI showed `Keeping awake on power` and the battery opt-in control
 
 Proof is stored locally under:
 
