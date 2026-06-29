@@ -128,4 +128,119 @@ final class PowerInspectorTests: XCTestCase {
         XCTAssertTrue(batteryAllowed.batterySleepShouldBeNever)
         XCTAssertFalse(batteryAllowed.restoreBatterySleep)
     }
+
+    func testSnapshotWarnsWhenBatteryModeIsOffWhileOnBattery() {
+        let snapshot = PowerSnapshot(
+            source: .battery(percent: 91),
+            sleepDisabled: false,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 1,
+            preferences: .acOnlyEnabled,
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(snapshot.statusTitle, "Battery sleep allowed")
+        XCTAssertEqual(snapshot.statusDetail, "Battery mode is off. Closing the lid on battery will still sleep.")
+        XCTAssertTrue(snapshot.batterySleepAllowedNow)
+    }
+
+    func testSnapshotExplainsBatteryOverrideClearingWhenPolicyAndSystemDrift() {
+        let snapshot = PowerSnapshot(
+            source: .battery(percent: 70),
+            sleepDisabled: true,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 1,
+            preferences: .acOnlyEnabled,
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(snapshot.statusTitle, "Clearing battery override")
+        XCTAssertEqual(snapshot.statusDetail, "Battery mode is off. The helper is clearing the sleep override now.")
+        XCTAssertTrue(snapshot.batterySleepAllowedNow)
+    }
+
+    func testSnapshotStillShowsPluggedInProtectionWhenACOnlyIsActiveOnAC() {
+        let snapshot = PowerSnapshot(
+            source: .ac,
+            sleepDisabled: true,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 1,
+            preferences: .acOnlyEnabled,
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(snapshot.statusTitle, "Keeping awake when plugged in")
+        XCTAssertEqual(snapshot.statusDetail, "Lid-close sleep is blocked while charging. Battery lid-close sleep remains allowed.")
+        XCTAssertFalse(snapshot.batterySleepAllowedNow)
+    }
+
+    func testCurrentHelperArtifactsDoNotNeedUpdate() {
+        XCTAssertFalse(
+            PowerInspector.helperNeedsUpdate(
+                helperInstalled: true,
+                installedVersion: "\(AppPaths.helperVersion)\n",
+                installedHelperScript: PrivilegedHelperManager.diagnosticHelperScript(),
+                installedLaunchDaemonPlist: PrivilegedHelperManager.diagnosticLaunchDaemonPlist()
+            )
+        )
+    }
+
+    func testInstalledHelperArtifactsAllowShellTrailingNewline() {
+        XCTAssertFalse(
+            PowerInspector.helperNeedsUpdate(
+                helperInstalled: true,
+                installedVersion: "\(AppPaths.helperVersion)\n",
+                installedHelperScript: PrivilegedHelperManager.diagnosticHelperScript() + "\n",
+                installedLaunchDaemonPlist: PrivilegedHelperManager.diagnosticLaunchDaemonPlist() + "\n"
+            )
+        )
+    }
+
+    func testMissingLoadedHelperDoesNotShowUpdateInsteadOfInstall() {
+        XCTAssertFalse(
+            PowerInspector.helperNeedsUpdate(
+                helperInstalled: false,
+                installedVersion: "stale",
+                installedHelperScript: nil,
+                installedLaunchDaemonPlist: nil
+            )
+        )
+    }
+
+    func testStaleHelperArtifactsNeedUpdateEvenWhenVersionMatches() {
+        XCTAssertTrue(
+            PowerInspector.helperNeedsUpdate(
+                helperInstalled: true,
+                installedVersion: "\(AppPaths.helperVersion)\n",
+                installedHelperScript: "#!/bin/zsh\nexit 0\n",
+                installedLaunchDaemonPlist: PrivilegedHelperManager.diagnosticLaunchDaemonPlist()
+            )
+        )
+
+        XCTAssertTrue(
+            PowerInspector.helperNeedsUpdate(
+                helperInstalled: true,
+                installedVersion: "\(AppPaths.helperVersion)\n",
+                installedHelperScript: PrivilegedHelperManager.diagnosticHelperScript(),
+                installedLaunchDaemonPlist: "<plist><dict/></plist>\n"
+            )
+        )
+    }
+
+    func testStaleHelperVersionNeedsUpdate() {
+        XCTAssertTrue(
+            PowerInspector.helperNeedsUpdate(
+                helperInstalled: true,
+                installedVersion: "1\n",
+                installedHelperScript: PrivilegedHelperManager.diagnosticHelperScript(),
+                installedLaunchDaemonPlist: PrivilegedHelperManager.diagnosticLaunchDaemonPlist()
+            )
+        )
+    }
 }

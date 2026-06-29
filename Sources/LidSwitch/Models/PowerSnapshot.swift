@@ -61,8 +61,12 @@ struct PowerSnapshot: Equatable {
             return "Helper update needed"
         }
 
+        if desiredEnabled && isOnBattery && !batteryKeepAwakeEnabled {
+            return sleepDisabled ? "Clearing battery override" : "Battery sleep allowed"
+        }
+
         if desiredEnabled && source.isAC && sleepDisabled {
-            return "Keeping awake on power"
+            return "Keeping awake when plugged in"
         }
 
         if desiredEnabled && batteryKeepAwakeEnabled && isOnBattery && sleepDisabled {
@@ -82,7 +86,7 @@ struct PowerSnapshot: Equatable {
         }
 
         if desiredEnabled {
-            return "Armed for power"
+            return "Plug in to block lid sleep"
         }
 
         return "Normal sleep"
@@ -93,12 +97,20 @@ struct PowerSnapshot: Equatable {
             return "Update the helper so it can honor battery settings."
         }
 
+        if desiredEnabled && isOnBattery && !batteryKeepAwakeEnabled {
+            if sleepDisabled {
+                return "Battery mode is off. The helper is clearing the sleep override now."
+            }
+
+            return "Battery mode is off. Closing the lid on battery will still sleep."
+        }
+
         if desiredEnabled && source.isAC && sleepDisabled {
             if batteryKeepAwakeEnabled {
                 return "Lid-close sleep is blocked while charging. Battery mode is also allowed."
             }
 
-            return "Lid-close sleep is blocked while charging. Battery sleep stays normal."
+            return "Lid-close sleep is blocked while charging. Battery lid-close sleep remains allowed."
         }
 
         if desiredEnabled && batteryKeepAwakeEnabled && isOnBattery && sleepDisabled {
@@ -118,7 +130,7 @@ struct PowerSnapshot: Equatable {
         }
 
         if desiredEnabled {
-            return "Battery sleep remains allowed."
+            return "Only plugged-in mode is enabled. Battery lid-close sleep remains allowed."
         }
 
         if sleepDisabled {
@@ -128,10 +140,14 @@ struct PowerSnapshot: Equatable {
         return "No lid-awake override is active."
     }
 
-    private var isOnBattery: Bool {
+    var isOnBattery: Bool {
         if case .battery = source {
             return true
         }
         return false
+    }
+
+    var batterySleepAllowedNow: Bool {
+        desiredEnabled && isOnBattery && !batteryKeepAwakeEnabled
     }
 }

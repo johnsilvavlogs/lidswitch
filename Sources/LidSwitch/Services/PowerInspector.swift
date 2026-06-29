@@ -21,11 +21,7 @@ enum PowerInspector {
 
     static func helperInstalled() -> Bool {
         let launchd = Shell.run("/bin/launchctl", ["print", "system/\(AppPaths.helperLabel)"])
-        if launchd.exitCode == 0 {
-            return true
-        }
-
-        return FileManager.default.fileExists(atPath: AppPaths.launchDaemonPath)
+        return launchd.exitCode == 0
     }
 
     static func helperNeedsUpdate(helperInstalled: Bool) -> Bool {
@@ -34,8 +30,50 @@ enum PowerInspector {
         }
 
         let result = Shell.run("/bin/cat", [AppPaths.rootHelperVersionPath])
-        let installedVersion = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return installedVersion != AppPaths.helperVersion
+        return helperNeedsUpdate(
+            helperInstalled: helperInstalled,
+            installedVersion: result.stdout,
+            installedHelperScript: readFile(AppPaths.rootHelperPath),
+            installedLaunchDaemonPlist: readFile(AppPaths.launchDaemonPath)
+        )
+    }
+
+    static func helperNeedsUpdate(
+        helperInstalled: Bool,
+        installedVersion: String?,
+        installedHelperScript: String?,
+        installedLaunchDaemonPlist: String?
+    ) -> Bool {
+        guard helperInstalled else {
+            return false
+        }
+
+        guard installedVersion?.trimmingCharacters(in: .whitespacesAndNewlines) == AppPaths.helperVersion else {
+            return true
+        }
+
+        guard artifact(installedHelperScript, matches: PrivilegedHelperManager.diagnosticHelperScript()) else {
+            return true
+        }
+
+        guard artifact(installedLaunchDaemonPlist, matches: PrivilegedHelperManager.diagnosticLaunchDaemonPlist()) else {
+            return true
+        }
+
+        return false
+    }
+
+    private static func readFile(_ path: String) -> String? {
+        let result = Shell.run("/bin/cat", [path])
+        guard result.exitCode == 0 else {
+            return nil
+        }
+
+        return result.stdout
+    }
+
+    private static func artifact(_ installed: String?, matches expected: String) -> Bool {
+        installed?.trimmingCharacters(in: .newlines) == expected.trimmingCharacters(in: .newlines)
     }
 
     static func parsePowerSource(from output: String) -> PowerSource {

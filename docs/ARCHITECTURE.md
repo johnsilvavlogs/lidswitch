@@ -26,9 +26,10 @@ Sources/LidSwitch/Support/DebugCommands.swift
 `LidSwitchPanel` renders:
 
 - app identity and power source
-- primary `Keep awake on power` toggle
+- primary `Keep awake when plugged in` toggle
 - secondary `Allow on battery` opt-in toggle
 - live status text
+- explicit battery warning when AC-only mode is enabled while the Mac is on battery
 - `SleepDisabled`, AC sleep, and battery sleep summary
 - refresh, restore, install-helper, and uninstall actions depending on state
 
@@ -44,7 +45,7 @@ The UI uses SF Symbols, semantic colors, system controls, and an accessory-style
 - battery idle-sleep setting
 - keep-awake and battery opt-in preferences
 - helper installation status
-- helper version status
+- helper loaded, version, and installed-artifact freshness status
 
 `PowerSnapshot` turns raw system values into user-facing status labels.
 
@@ -111,7 +112,7 @@ Version `2` adds battery opt-in handling and writes:
 /Library/Application Support/LidSwitch/helper-version
 ```
 
-Older installed helpers show **Update Helper** in the menu bar panel.
+Older installed helpers, unloaded LaunchDaemons, or installed helper/plist content that no longer matches the generated current artifacts show **Install Helper** or **Update Helper** in the menu bar panel.
 
 ## Helper Decision Table
 

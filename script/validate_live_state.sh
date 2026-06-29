@@ -2,6 +2,8 @@
 set -euo pipefail
 
 APP_NAME="LidSwitch"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+APP_BINARY="$ROOT_DIR/dist/$APP_NAME.app/Contents/MacOS/$APP_NAME"
 HELPER_LABEL="com.johnsilva.lidswitch.helper"
 DESIRED_STATE="$HOME/Library/Application Support/LidSwitch/desired-state"
 HELPER="/Library/Application Support/LidSwitch/lidswitch-helper"
@@ -14,7 +16,13 @@ fail() {
   exit 1
 }
 
-pgrep -x "$APP_NAME" >/dev/null || fail "$APP_NAME process is not running"
+running_app_binary() {
+  pgrep -x "$APP_NAME" | while read -r pid; do
+    ps -p "$pid" -o comm= 2>/dev/null || true
+  done | grep -Fx "$APP_BINARY" | head -n 1
+}
+
+test "$(running_app_binary)" = "$APP_BINARY" || fail "$APP_NAME process from $APP_BINARY is not running"
 
 launchctl print "system/$HELPER_LABEL" >/dev/null || fail "$HELPER_LABEL is not loaded"
 test -x "$HELPER" || fail "helper executable is missing"
@@ -147,9 +155,9 @@ if [ -z "$panel" ]; then
   )"
 fi
 
-grep -q "Keep awake on power" <<<"$panel" || fail "menu panel missing primary toggle"
+grep -q "Keep awake when plugged in" <<<"$panel" || fail "menu panel missing primary toggle"
 grep -q "Allow on battery" <<<"$panel" || fail "menu panel missing battery opt-in toggle"
-grep -q "Battery sleep stays normal" <<<"$panel" || fail "menu panel missing battery safety copy"
-grep -Eq "Keeping awake on power|Armed for power" <<<"$panel" || fail "menu panel missing enabled status"
+grep -q "Battery lid-close sleep remains allowed" <<<"$panel" || fail "menu panel missing battery safety copy"
+grep -Eq "Keeping awake when plugged in|Plug in to block lid sleep|Battery sleep allowed|Clearing battery override" <<<"$panel" || fail "menu panel missing enabled status"
 
 echo "live state ok: desired=$desired battery=$battery_pref sleepDisabled=$sleep_disabled helperVersion=$installed_helper_version menuItem=$menu_item"

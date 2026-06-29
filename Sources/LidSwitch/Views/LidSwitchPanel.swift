@@ -52,16 +52,16 @@ struct LidSwitchPanel: View {
             )
         ) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Keep awake on power")
+                Text("Keep awake when plugged in")
                     .font(.subheadline.weight(.medium))
 
-                Text(controller.snapshot.batteryKeepAwakeEnabled ? "AC and battery allowed." : "Battery sleep stays normal.")
+                Text(controller.snapshot.batteryKeepAwakeEnabled ? "Also allowed on battery." : "Battery lid-close sleep remains allowed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .toggleStyle(.switch)
-        .accessibilityLabel("Keep awake on power")
+        .accessibilityLabel("Keep awake when plugged in")
         .accessibilityHint(enableToggleHint)
         .accessibilityValue(controller.snapshot.desiredEnabled ? "On" : "Off")
         .keyboardShortcut("k", modifiers: [.command])
@@ -114,6 +114,13 @@ struct LidSwitchPanel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if controller.snapshot.batterySleepAllowedNow {
+                Label("On battery now: closing the lid will sleep unless Allow on battery is on.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 10) {
                 Label(controller.snapshot.sleepDisabled ? "SleepDisabled on" : "SleepDisabled off", systemImage: "moon")
@@ -193,6 +200,10 @@ struct LidSwitchPanel: View {
             return controller.snapshot.source.isAC ? .green : .orange
         }
 
+        if controller.snapshot.batterySleepAllowedNow {
+            return .orange
+        }
+
         if controller.snapshot.desiredEnabled && controller.snapshot.source.isAC && controller.snapshot.sleepDisabled {
             return .green
         }
@@ -214,7 +225,15 @@ struct LidSwitchPanel: View {
         }
 
         if controller.snapshot.batteryKeepAwakeEnabled {
-            return "Risk: battery can drain with the lid closed."
+            if controller.snapshot.isOnBattery {
+                return "On now: lid-close sleep is blocked. Watch remaining charge."
+            }
+
+            return "Will also keep awake after unplugging. Battery can drain."
+        }
+
+        if controller.snapshot.isOnBattery {
+            return "Off now: lid close will sleep."
         }
 
         return "Off unless you explicitly allow it."
@@ -225,12 +244,12 @@ struct LidSwitchPanel: View {
             return "Prevents lid-close sleep while connected to power and while running on battery."
         }
 
-        return "Prevents lid-close sleep while connected to power. Battery sleep stays normal."
+        return "Prevents lid-close sleep while connected to power. Battery lid-close sleep remains allowed."
     }
 
     private var batteryToggleHint: String {
         if !controller.snapshot.desiredEnabled {
-            return "Turn on Keep awake on power before allowing battery mode."
+            return "Turn on Keep awake when plugged in before allowing battery mode."
         }
 
         return "Allows LidSwitch to prevent lid-close sleep while running from battery power."

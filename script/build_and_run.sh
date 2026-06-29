@@ -55,6 +55,12 @@ open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
+running_app_binary() {
+  pgrep -x "$APP_NAME" | while read -r pid; do
+    ps -p "$pid" -o comm= 2>/dev/null || true
+  done | grep -Fx "$APP_BINARY" | head -n 1
+}
+
 case "$MODE" in
   run)
     open_app
@@ -73,7 +79,7 @@ case "$MODE" in
   --verify|verify)
     open_app
     sleep 2
-    pgrep -x "$APP_NAME" >/dev/null
+    test "$(running_app_binary)" = "$APP_BINARY"
     ;;
   *)
     echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2

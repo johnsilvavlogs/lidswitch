@@ -13,14 +13,14 @@ The app appears in the macOS menu bar as a small power/bolt icon.
 ## Enable
 
 1. Open the LidSwitch menu bar item.
-2. Turn on **Keep awake on power**.
+2. Turn on **Keep awake when plugged in**.
 3. Accept the macOS administrator prompt on first install.
 
 After installation, future on/off toggles update only the user-owned desired-state file and do not require admin authorization.
 
 ## Allow Battery Keep-Awake
 
-1. Turn on **Keep awake on power**.
+1. Turn on **Keep awake when plugged in**.
 2. Turn on **Allow on battery**.
 3. Update the helper if the panel asks for it.
 
@@ -28,7 +28,7 @@ This is intentionally opt-in. While enabled, LidSwitch may keep the Mac awake wi
 
 ## Disable Without Uninstalling
 
-Turn off **Keep awake on power**.
+Turn off **Keep awake when plugged in**.
 
 Expected result:
 

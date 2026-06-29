@@ -6,11 +6,12 @@ LidSwitch is a minimal native macOS menu bar app for one job: keep a MacBook awa
 
 ## What It Does
 
-- Adds a compact `MenuBarExtra` with one primary switch: **Keep awake on power**.
+- Adds a compact `MenuBarExtra` with one primary switch: **Keep awake when plugged in**.
 - Adds a secondary **Allow on battery** switch that stays off unless explicitly enabled.
 - Shows live power source and sleep-override state.
 - Enables `SleepDisabled` only when the app is enabled and macOS reports AC Power.
 - Automatically clears `SleepDisabled` on battery unless both switches are enabled.
+- Warns clearly when the Mac is on battery and lid-close sleep is still allowed.
 - Provides **Restore** and **Uninstall** controls from the menu bar panel.
 - Uses the standard macOS administrator prompt for privileged helper install, restore, and uninstall.
 
@@ -102,7 +103,7 @@ The implementation was verified on macOS 26.3 with the app enabled while connect
 - desired state `mode=enabled`, `battery=disabled`
 - LaunchDaemon loaded as `com.johnsilva.lidswitch.helper`
 - battery power profile preserved with `sleep 1`
-- menu bar UI showed `Keeping awake on power` and the battery opt-in control
+- menu bar UI showed `Keeping awake when plugged in` and the battery opt-in control
 
 Proof is stored locally under:
 
