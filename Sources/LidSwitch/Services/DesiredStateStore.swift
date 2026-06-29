@@ -1,21 +1,37 @@
 import Foundation
 
 enum DesiredStateStore {
-    static func read() -> Bool {
+    static func readPreferences() -> PowerPreferences {
         guard let raw = try? String(contentsOf: AppPaths.desiredStateFile, encoding: .utf8) else {
-            return false
+            return .disabled
         }
 
-        return raw.trimmingCharacters(in: .whitespacesAndNewlines) == "enabled"
+        return PowerPreferences.parse(raw)
+    }
+
+    static func read() -> Bool {
+        readPreferences().keepAwakeEnabled
     }
 
     static func write(_ enabled: Bool) throws {
+        try write(
+            PowerPreferences(
+                keepAwakeEnabled: enabled,
+                allowBatteryKeepAwake: false
+            )
+        )
+    }
+
+    static func write(_ preferences: PowerPreferences) throws {
         try FileManager.default.createDirectory(
             at: AppPaths.userSupportDirectory,
             withIntermediateDirectories: true
         )
 
-        let value = enabled ? "enabled\n" : "disabled\n"
-        try value.write(to: AppPaths.desiredStateFile, atomically: true, encoding: .utf8)
+        try preferences.storagePayload.write(
+            to: AppPaths.desiredStateFile,
+            atomically: true,
+            encoding: .utf8
+        )
     }
 }

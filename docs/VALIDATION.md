@@ -14,6 +14,10 @@ Current tests cover:
 - battery power and percentage parsing
 - `SleepDisabled` parsing
 - AC idle-sleep parsing
+- battery idle-sleep parsing
+- legacy and key/value preference parsing
+- AC-only and battery opt-in policy decisions
+- status copy for plugged-in protection, battery sleep allowed, and policy/system drift
 
 ## Helper And Plist Linting
 
@@ -22,9 +26,11 @@ Current tests cover:
 .build/debug/LidSwitch --print-install-script | zsh -n /dev/stdin
 .build/debug/LidSwitch --print-uninstall-script | zsh -n /dev/stdin
 .build/debug/LidSwitch --print-plist | plutil -lint -
+.build/debug/LidSwitch --print-helper-status
 ```
 
 These checks validate generated artifacts without installing or modifying privileged system files.
+The helper-status diagnostic reports whether launchd sees the helper and whether the installed helper/plist content matches the generated current artifacts.
 
 ## App Bundle Launch
 
@@ -33,6 +39,7 @@ These checks validate generated artifacts without installing or modifying privil
 ```
 
 This builds the SwiftPM target, stages `dist/LidSwitch.app`, launches the app bundle, and confirms the process exists.
+The verification checks that the running `LidSwitch` process is the staged bundle from this repo, not another process with the same name.
 
 ## Live Product Smoke
 
@@ -43,13 +50,17 @@ This builds the SwiftPM target, stages `dist/LidSwitch.app`, launches the app bu
 This checks:
 
 - `LidSwitch` process is running
+- running `LidSwitch` binary path is this repo's staged app bundle
 - LaunchDaemon is loaded
 - helper executable exists
-- desired state is `enabled`
-- `SleepDisabled` matches the current power source
-- battery sleep profile remains `1`
+- helper version is current
+- desired mode is `enabled`
+- battery opt-in is disabled for the safe default smoke
+- `SleepDisabled` matches the current power source and battery opt-in
+- battery sleep profile is not overridden when battery opt-in is disabled
 - menu bar item is exposed through Accessibility
-- panel text includes the primary toggle, battery-safety copy, and enabled status
+- panel text includes the primary toggle, battery opt-in toggle, battery-safety copy, and enabled status
+- battery-on-AC-only state is represented as sleep allowed instead of protected
 
 This smoke expects the app to be installed and enabled. It is part of the JTBD done gate.
 

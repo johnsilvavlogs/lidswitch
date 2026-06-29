@@ -7,6 +7,8 @@ LidSwitch is a small SwiftPM macOS app with a SwiftUI menu bar surface and a gen
 ```text
 Sources/LidSwitch/App/LidSwitchApp.swift
 Sources/LidSwitch/Views/LidSwitchPanel.swift
+Sources/LidSwitch/Models/PowerPreferences.swift
+Sources/LidSwitch/Models/PowerPolicy.swift
 Sources/LidSwitch/Models/PowerSnapshot.swift
 Sources/LidSwitch/Services/PowerController.swift
 Sources/LidSwitch/Services/PowerInspector.swift
@@ -24,9 +26,11 @@ Sources/LidSwitch/Support/DebugCommands.swift
 `LidSwitchPanel` renders:
 
 - app identity and power source
-- primary `Keep awake on power` toggle
+- primary `Keep awake when plugged in` toggle
+- secondary `Allow on battery` opt-in toggle
 - live status text
-- `SleepDisabled` and AC sleep summary
+- explicit battery warning when AC-only mode is enabled while the Mac is on battery
+- `SleepDisabled`, AC sleep, and battery sleep summary
 - refresh, restore, install-helper, and uninstall actions depending on state
 
 The UI uses SF Symbols, semantic colors, system controls, and an accessory-style app bundle (`LSUIElement=true`) so the app lives in the menu bar without a Dock icon.
@@ -38,10 +42,14 @@ The UI uses SF Symbols, semantic colors, system controls, and an accessory-style
 - power source
 - `SleepDisabled`
 - AC idle-sleep setting
-- desired state
+- battery idle-sleep setting
+- keep-awake and battery opt-in preferences
 - helper installation status
+- helper loaded, version, and installed-artifact freshness status
 
 `PowerSnapshot` turns raw system values into user-facing status labels.
+
+`PowerPolicy` is the table-tested mirror of the helper decision rules. The root helper still performs privileged changes, but the Swift policy tests protect the AC-only default and the battery opt-in matrix from drift.
 
 ## System Inspection
 
@@ -67,11 +75,18 @@ The app stores the user's intent in:
 Accepted values:
 
 ```text
-enabled
+mode=enabled
+battery=disabled
+```
+
+Legacy values are still accepted:
+
+```text
+enabled   # treated as AC-only
 disabled
 ```
 
-This file is user-owned so turning the menu bar toggle on or off after helper installation does not need administrator authorization.
+This file is user-owned so turning menu bar toggles on or off after helper installation does not need administrator authorization.
 
 ## Privileged Helper
 
@@ -91,13 +106,23 @@ The LaunchDaemon is installed at:
 
 The helper runs at load and every 5 seconds. It exits quickly after reconciling state.
 
+Version `2` adds battery opt-in handling and writes:
+
+```text
+/Library/Application Support/LidSwitch/helper-version
+```
+
+Older installed helpers, unloaded LaunchDaemons, or installed helper/plist content that no longer matches the generated current artifacts show **Install Helper** or **Update Helper** in the menu bar panel.
+
 ## Helper Decision Table
 
-| Desired state | Power source | Action |
+| Keep awake | Battery opt-in | Power source | Action |
 | --- | --- | --- |
-| `enabled` | AC Power | remember AC sleep, set `pmset -c sleep 0`, set `pmset -a disablesleep 1` |
-| `enabled` | Battery Power | set `pmset -a disablesleep 0` |
-| `disabled` | Any | set `pmset -a disablesleep 0`, restore saved AC sleep |
+| enabled | disabled | AC Power | remember AC sleep, set `pmset -c sleep 0`, set `pmset -a disablesleep 1`, restore saved battery sleep if needed |
+| enabled | disabled | Battery Power | set `pmset -a disablesleep 0`, restore saved battery sleep |
+| enabled | enabled | AC Power | remember AC and battery sleep, set `pmset -c sleep 0`, set `pmset -b sleep 0`, set `pmset -a disablesleep 1` |
+| enabled | enabled | Battery Power | remember battery sleep, set `pmset -b sleep 0`, set `pmset -a disablesleep 1` |
+| disabled | any | Any | set `pmset -a disablesleep 0`, restore saved AC and battery sleep |
 
 ## Diagnostic Commands
 
