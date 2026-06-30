@@ -1,14 +1,36 @@
+# Build and package outputs
 .build/
 dist/
+DerivedData/
+*.xcresult
+*.dmg
+
+# Dependencies and test output
 node_modules/
-.codex/
-.jtbd-done-gate/
-.jtbd-done-gate.json
-.playwright-artifacts/
+coverage/
 playwright-report/
 test-results/
-.vercel/
-.env*.local
+.playwright-artifacts/
 npm-debug.log*
+
+# Local agent, validation, and hosting state
+.codex/
+.agents/
+.oracle/
+.claude/
+.cursor/
+.jtbd-done-gate/
+.jtbd-done-gate.json
+.vercel/
+work/
+tmp/
+.tmp/
+pkg/
+
+# Local secrets and OS metadata
+.env
+.env.*
+!.env.example
+!.env.sample
 .DS_Store
 ._*

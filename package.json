@@ -7,6 +7,7 @@
     "site:check": "node scripts/check-site.mjs && node scripts/check-contrast.mjs && node scripts/check-icons.mjs && node scripts/check-public-links.mjs",
     "links:check": "node scripts/check-public-links.mjs",
     "icons:check": "node scripts/check-icons.mjs",
+    "public:hygiene": "node scripts/check-public-hygiene.mjs",
     "site:test": "playwright test",
     "site:test:ci": "playwright test --reporter=list,json",
     "package:dmg": "./script/build_dmg.sh",

@@ -122,6 +122,7 @@ Run the release-oriented local checks:
 ```bash
 npm run scan:secrets
 npm run scan:secrets:test
+npm run public:hygiene
 ./script/build_dmg.sh --dry-run
 ./script/validate_dmg.sh
 ```
