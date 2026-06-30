@@ -1,4 +1,10 @@
 .build/
 dist/
+node_modules/
+.vercel/
+.env*.local
+npm-debug.log*
 .DS_Store
+._*
 .jtbd-done-gate/reports/
+.jtbd-done-gate/tmp/

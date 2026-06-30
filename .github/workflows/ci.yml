@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  site-and-docs:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install JS dependencies
+        run: npm ci
+      - name: Install Playwright browser
+        run: npx playwright install chromium
+      - name: Public secret scan
+        run: npm run scan:secrets
+      - name: Validate site
+        run: npm run validate:site
+      - name: DMG packaging dry run
+        run: ./script/build_dmg.sh --dry-run
+
+  native-macos:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift build
+        run: swift build
+      - name: Swift tests
+        run: swift test
+      - name: Helper scripts lint
+        run: |
+          .build/debug/LidSwitch --print-helper | zsh -n /dev/stdin
+          .build/debug/LidSwitch --print-install-script | zsh -n /dev/stdin
+          .build/debug/LidSwitch --print-uninstall-script | zsh -n /dev/stdin
+          .build/debug/LidSwitch --print-plist | plutil -lint -

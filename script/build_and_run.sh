@@ -11,8 +11,11 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+ICON_SOURCE="$ROOT_DIR/Resources/$APP_NAME.icns"
+ICON_FILE="$APP_NAME.icns"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -20,15 +23,23 @@ pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 BUILD_BINARY="$(/usr/bin/arch -arm64 swift build --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+
+if [ ! -f "$ICON_SOURCE" ]; then
+  echo "Missing app icon: $ICON_SOURCE" >&2
+  exit 1
+fi
+cp "$ICON_SOURCE" "$APP_RESOURCES/$ICON_FILE"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>CFBundleIconFile</key>
+  <string>$APP_NAME</string>
   <key>CFBundleExecutable</key>
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
@@ -49,7 +60,8 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-/usr/bin/codesign --force --sign - "$APP_BUNDLE" >/dev/null 2>&1 || true
+/usr/bin/xattr -cr "$APP_BUNDLE" 2>/dev/null || true
+/usr/bin/codesign --force --sign - "$APP_BUNDLE" >/dev/null
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

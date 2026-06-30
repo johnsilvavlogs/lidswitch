@@ -9,6 +9,7 @@
       "description": "Native macOS SwiftPM MenuBarExtra app changes.",
       "patterns": [
         "Package.swift",
+        "Resources/**",
         "Sources/**",
         "Tests/**",
         "script/**",
@@ -26,8 +27,34 @@
       "require_product_steps": true,
       "require_frontend_if_applicable": false
     },
+    "public-launch": {
+      "description": "Static landing page, Vercel config, docs, packaging, and public repo launch changes.",
+      "patterns": [
+        "README.md",
+        "LICENSE",
+        "docs/**",
+        "site/**",
+        "scripts/**",
+        "site-tests/**",
+        "package.json",
+        "package-lock.json",
+        "playwright.config.mjs",
+        "vercel.json",
+        ".vercelignore",
+        ".github/workflows/**",
+        ".jtbd-done-gate.json"
+      ],
+      "steps": [
+        "Site static claim check",
+        "Site Playwright UI",
+        "DMG packaging dry run",
+        "Open-source secret scan"
+      ],
+      "require_product_steps": true,
+      "require_frontend_if_applicable": true
+    },
     "full-release": {
-      "description": "All native macOS validation steps."
+      "description": "All native macOS and public-launch validation steps."
     }
   },
   "steps": [
@@ -64,7 +91,7 @@
       "kind": "product",
       "run": "./script/build_and_run.sh --verify",
       "profiles": ["native-macos", "full-release"],
-      "affects": ["Package.swift", "Sources/**", "script/build_and_run.sh"]
+      "affects": ["Package.swift", "Resources/**", "Sources/**", "script/build_and_run.sh"]
     },
     {
       "name": "Live menu bar power smoke",
@@ -72,6 +99,39 @@
       "run": "./script/validate_live_state.sh",
       "profiles": ["native-macos", "full-release"],
       "affects": ["Package.swift", "Sources/**", "script/**"]
+    },
+    {
+      "name": "Site static claim check",
+      "kind": "quality",
+      "run": "npm run site:check",
+      "profiles": ["public-launch", "full-release"],
+      "affects": ["site/**", "scripts/check-site.mjs", "scripts/check-icons.mjs", "scripts/check-public-links.mjs", "package.json", "package-lock.json", "vercel.json", "README.md", "docs/**", "screenshots/**"]
+    },
+    {
+      "name": "Site Playwright UI",
+      "kind": "ui",
+      "run": "PLAYWRIGHT_JSON_OUTPUT_FILE=\"$JTBD_DONE_GATE_REPORT_DIR/playwright-results.json\" npm run site:test",
+      "profiles": ["public-launch", "full-release"],
+      "affects": ["site/**", "site-tests/**", "playwright.config.mjs", "package.json", "package-lock.json"],
+      "expects": {
+        "format": "playwright-json",
+        "path": "{REPORT_DIR}/playwright-results.json",
+        "min_tests": 6
+      }
+    },
+    {
+      "name": "DMG packaging dry run",
+      "kind": "quality",
+      "run": "./script/build_dmg.sh --dry-run",
+      "profiles": ["public-launch", "full-release"],
+      "affects": ["script/build_dmg.sh", "docs/INSTALL.md", "docs/DISTRIBUTION.md", "README.md"]
+    },
+    {
+      "name": "Open-source secret scan",
+      "kind": "quality",
+      "run": "node scripts/scan-public-secrets.mjs",
+      "profiles": ["public-launch", "full-release"],
+      "affects": ["**/*"]
     }
   ],
   "report": {

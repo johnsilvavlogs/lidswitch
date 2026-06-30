@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LidSwitch - Close the lid. Let the job finish.</title>
+    <meta
+      name="description"
+      content="LidSwitch is a tiny open-source macOS menu bar utility for plugged-in lid-close work sessions. AC-only by default, battery opt-in when you mean it."
+    />
+    <meta name="theme-color" content="#13c96b" />
+    <meta property="og:title" content="LidSwitch - Close the lid. Let the job finish." />
+    <meta
+      property="og:description"
+      content="A free manual DMG for technical Mac users who want long builds, downloads, backups, and remote jobs to keep running while plugged in."
+    />
+    <link rel="icon" type="image/png" href="/assets/lidswitch-mark.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="launch-ribbon" role="note">
+      <span aria-hidden="true">↯</span>
+      Free manual DMG for technical friends. Open source. No App Store promises.
+    </div>
+
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="LidSwitch home">
+        <img class="brand-mark" src="/assets/lidswitch-mark.png" alt="" width="48" height="48" aria-hidden="true" />
+        <span>LidSwitch</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#why">Why</a>
+        <a href="#install">Install</a>
+        <a href="#safety">Safety</a>
+        <a href="https://github.com/johnsilvavlogs/lidswitch">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero section-shell" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Plugged-in Mac work sessions</p>
+          <h1 id="hero-title">Close the lid. Let the job finish.</h1>
+          <p class="hero-lede">
+            A tiny Mac menu bar tool for long builds, downloads, backups, and
+            remote jobs. AC-only by default. Battery stays safe unless you opt in.
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button button-primary" href="https://github.com/johnsilvavlogs/lidswitch/releases/latest">
+              <span aria-hidden="true">↓</span>
+              Get the DMG
+            </a>
+            <a class="button button-secondary" href="https://github.com/johnsilvavlogs/lidswitch">
+              Review source on GitHub
+            </a>
+          </div>
+          <p class="manual-note">
+            Not App Store distributed or notarized. macOS may require
+            <strong>Open Anyway</strong> in Security settings.
+          </p>
+        </div>
+
+        <div class="hero-visual" aria-label="LidSwitch app preview">
+          <div class="desk-scene" aria-hidden="true">
+            <div class="laptop-edge"></div>
+            <div class="cable"></div>
+            <div class="notebook">
+              <span>Build</span>
+              <span>Download</span>
+              <span>Backup</span>
+              <span>Remote job</span>
+            </div>
+          </div>
+          <img
+            src="/assets/lidswitch-panel.png"
+            alt="LidSwitch menu panel showing Keep awake when plugged in, Allow on battery, SleepDisabled on, AC sleep never, and Restore and Uninstall controls."
+            width="680"
+            height="600"
+          />
+        </div>
+      </section>
+
+      <section class="use-cases section-shell" id="why" aria-labelledby="why-title">
+        <p class="eyebrow">Built for the work that hates interruption</p>
+        <h2 id="why-title">Long-running, plugged-in work keeps moving.</h2>
+        <div class="case-grid">
+          <article>
+            <img class="case-icon" src="/assets/lidswitch-build.png" alt="" width="64" height="64" aria-hidden="true" />
+            <h3>Long builds</h3>
+            <p>Keep compiles and local test runs going after the screen closes.</p>
+          </article>
+          <article>
+            <img class="case-icon" src="/assets/lidswitch-download.png" alt="" width="64" height="64" aria-hidden="true" />
+            <h3>Large downloads</h3>
+            <p>Finish big downloads without babysitting the display hinge.</p>
+          </article>
+          <article>
+            <img class="case-icon" src="/assets/lidswitch-remote.png" alt="" width="64" height="64" aria-hidden="true" />
+            <h3>Remote jobs</h3>
+            <p>Keep SSH sessions, scripts, and remote tasks alive while charging.</p>
+          </article>
+          <article>
+            <img class="case-icon" src="/assets/lidswitch-backup.png" alt="" width="64" height="64" aria-hidden="true" />
+            <h3>Backups</h3>
+            <p>Let Time Machine or local scripts complete before sleep takes over.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="install section-shell" id="install" aria-labelledby="install-title">
+        <div class="section-heading">
+          <p class="eyebrow">Honest install</p>
+          <h2 id="install-title">Straightforward, with the friction disclosed.</h2>
+          <p>
+            LidSwitch is not trying to look like an App Store app. It is a small,
+            inspectable utility that asks macOS for admin permission only when it
+            installs, restores, or removes its helper.
+          </p>
+        </div>
+        <ol class="steps">
+          <li>
+            <span class="step-number">1</span>
+            <h3>Download DMG</h3>
+            <p>Get the release DMG from GitHub and open it like any other Mac download.</p>
+          </li>
+          <li>
+            <span class="step-number">2</span>
+            <h3>Open Anyway</h3>
+            <p>If Gatekeeper blocks the first launch, approve it in macOS Security settings.</p>
+          </li>
+          <li>
+            <span class="step-number">3</span>
+            <h3>Approve helper</h3>
+            <p>macOS asks for admin permission before LidSwitch installs the local helper.</p>
+          </li>
+          <li>
+            <span class="step-number">4</span>
+            <h3>Restore anytime</h3>
+            <p>Turn it off, restore sleep defaults, or uninstall from the menu bar.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section class="safety section-shell" id="safety" aria-labelledby="safety-title">
+        <div>
+          <p class="eyebrow">For technical friends</p>
+          <h2 id="safety-title">Inspect it. Install it. Remove it.</h2>
+          <p>
+            The point is not mystery. The point is a tiny switch with a clear power
+            policy: plugged-in work can keep running, battery sleep remains normal
+            unless you explicitly choose otherwise.
+          </p>
+        </div>
+        <div class="trust-grid">
+          <article>
+            <h3>No credentials stored</h3>
+            <p>LidSwitch does not collect passwords, tokens, accounts, or personal data.</p>
+          </article>
+          <article>
+            <h3>Open to inspect</h3>
+            <p>The app, helper, scripts, and docs live in the GitHub repository.</p>
+          </article>
+          <article>
+            <h3>Battery opt-in</h3>
+            <p>Battery lid-close sleep stays allowed unless you deliberately enable it.</p>
+          </article>
+          <article>
+            <h3>Easy to remove</h3>
+            <p>Restore and Uninstall are first-class controls in the menu bar panel.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="final-cta section-shell" aria-labelledby="final-title">
+        <img class="bolt-orb" src="/assets/lidswitch-mark.png" alt="" width="72" height="72" aria-hidden="true" />
+        <div>
+          <p class="eyebrow">Free to use. Source available.</p>
+          <h2 id="final-title">If it helps your Mac finish the job, use it.</h2>
+          <p>
+            Requires an Apple Silicon Mac with macOS 14 or newer. Built for people
+            comfortable reviewing source, approving a local helper, and removing the
+            tool if they change their mind.
+          </p>
+        </div>
+        <div class="final-actions">
+          <a class="button button-primary" href="https://github.com/johnsilvavlogs/lidswitch/releases/latest">Get the DMG</a>
+          <a class="button button-secondary" href="https://github.com/johnsilvavlogs/lidswitch">Review source on GitHub</a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>LidSwitch is an independent open-source project and is not affiliated with Apple.</p>
+      <p>
+        <a href="https://github.com/johnsilvavlogs/lidswitch">GitHub</a>
+        <span aria-hidden="true">/</span>
+        <a href="https://github.com/johnsilvavlogs/lidswitch/blob/main/docs/INSTALL.md">Install notes</a>
+        <span aria-hidden="true">/</span>
+        <a href="https://github.com/johnsilvavlogs/lidswitch/blob/main/docs/PRIVACY.md">Privacy</a>
+      </p>
+    </footer>
+  </body>
+</html>

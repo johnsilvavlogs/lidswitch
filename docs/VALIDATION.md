@@ -1,6 +1,8 @@
 # Validation
 
 LidSwitch has three validation layers: unit tests, generated-helper linting, and live product smoke.
+The public launch also adds site validation for the Vercel-hosted landing page.
+Current release packaging is validated for Apple Silicon Macs.
 
 ## Unit Tests
 
@@ -41,6 +43,45 @@ The helper-status diagnostic reports whether launchd sees the helper and whether
 This builds the SwiftPM target, stages `dist/LidSwitch.app`, launches the app bundle, and confirms the process exists.
 The verification checks that the running `LidSwitch` process is the staged bundle from this repo, not another process with the same name.
 
+## Landing Page Validation
+
+```bash
+npm install
+npm run site:check
+npm run site:test
+```
+
+`site:check` verifies the static page contains the required manual-install,
+open-source, privacy, and safety claims while rejecting common fake launch claims
+such as fake stars, testimonials, Apple affiliation, analytics, or notarization
+promises.
+
+`site:test` runs Playwright against the static site across desktop, tablet, and
+mobile projects. The tests cover:
+
+- hero comprehension and primary CTAs
+- manual Gatekeeper/Open Anyway disclosure
+- safety and open-source trust claims
+- product screenshot accessibility text, including the current primary toggle and battery opt-in labels
+- keyboard focus order
+- responsive overflow
+- install and privacy documentation links
+
+To validate a Vercel deployment instead of localhost:
+
+```bash
+SITE_BASE_URL=https://<deployment>.vercel.app npm run site:test
+```
+
+## DMG Packaging Dry Run
+
+```bash
+./script/build_dmg.sh --dry-run
+```
+
+The dry run confirms the unsigned manual DMG packaging path without launching the
+app or writing release artifacts.
+
 ## Live Product Smoke
 
 ```bash
@@ -67,11 +108,11 @@ This smoke expects the app to be installed and enabled. It is part of the JTBD d
 ## JTBD Done Gate
 
 ```bash
-python /Users/johnsilva/.agents/skills/jtbd-done-gate/scripts/done_gate.py --plan
-python /Users/johnsilva/.agents/skills/jtbd-done-gate/scripts/done_gate.py
+./scripts/run-jtbd-gate.sh --plan
+./scripts/run-jtbd-gate.sh
 ```
 
-The final successful run used `full-release` and passed:
+The native-app successful run used `full-release` and passed:
 
 1. Swift build
 2. Swift tests
@@ -79,6 +120,13 @@ The final successful run used `full-release` and passed:
 4. Helper plist syntax
 5. App bundle launch
 6. Live menu bar power smoke
+
+Public-launch profile adds:
+
+1. Site static claim check
+2. Site Playwright UI
+3. DMG packaging dry run
+4. Open-source secret scan
 
 ## Local Proof
 

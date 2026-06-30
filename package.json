@@ -1,0 +1,19 @@
+{
+  "name": "lidswitch-public-launch",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "site:serve": "python3 -m http.server 4173 --bind 127.0.0.1 --directory site",
+    "site:check": "node scripts/check-site.mjs && node scripts/check-icons.mjs && node scripts/check-public-links.mjs",
+    "links:check": "node scripts/check-public-links.mjs",
+    "icons:check": "node scripts/check-icons.mjs",
+    "site:test": "playwright test",
+    "site:test:ci": "playwright test --reporter=list,json",
+    "package:dmg": "./script/build_dmg.sh",
+    "scan:secrets": "node scripts/scan-public-secrets.mjs",
+    "validate:site": "npm run site:check && npm run site:test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0"
+  }
+}
