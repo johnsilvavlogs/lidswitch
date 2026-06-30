@@ -163,6 +163,7 @@ npm install
 npm run validate:site
 npm run scan:secrets
 npm run scan:secrets:test
+npm run public:hygiene
 ./script/build_dmg.sh --dry-run
 ./script/validate_dmg.sh
 npm run launch:check-public

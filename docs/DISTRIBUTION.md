@@ -25,6 +25,7 @@ This project is set up for a small technical-friends release.
    ```bash
    npm run scan:secrets
    npm run scan:secrets:test
+   npm run public:hygiene
    ```
 
 3. Build the DMG:

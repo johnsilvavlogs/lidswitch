@@ -22,6 +22,8 @@ jobs:
         run: npx playwright install chromium
       - name: Public secret scan
         run: npm run scan:secrets
+      - name: Public hygiene check
+        run: npm run public:hygiene
       - name: Secret scanner regression
         run: npm run scan:secrets:test
       - name: Validate site

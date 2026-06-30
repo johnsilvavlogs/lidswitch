@@ -3,16 +3,33 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
 const sourceExcludedDirs = new Set([
+  '.agents',
   '.build',
+  '.claude',
+  '.codex',
+  '.cursor',
   '.git',
   '.jtbd-done-gate',
+  '.oracle',
+  '.playwright-artifacts',
+  '.tmp',
+  '.vercel',
+  'coverage',
+  'DerivedData',
   'dist',
-  'node_modules'
+  'node_modules',
+  'pkg',
+  'playwright-report',
+  'test-results',
+  'tmp',
+  'work'
 ]);
 const releaseExcludedDirs = new Set([
   '.git',
   '.jtbd-done-gate',
-  'node_modules'
+  'node_modules',
+  'playwright-report',
+  'test-results'
 ]);
 const excludedFiles = new Set([
   'scripts/scan-public-secrets.mjs'
