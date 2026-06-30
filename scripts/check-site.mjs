@@ -12,7 +12,8 @@ const publicTextFiles = [
   'docs/PRIVACY.md',
   'docs/DISTRIBUTION.md',
   'docs/VALIDATION.md',
-  'site/index.html'
+  'site/index.html',
+  'site/download/index.html'
 ];
 
 const required = [
@@ -26,8 +27,10 @@ const required = [
   'Manual install, disclosed up front',
   'not App Store distributed or notarized',
   'Open Anyway',
-  'No credentials or telemetry',
-  'does not collect, transmit, or store',
+  'No app telemetry',
+  'The Mac app sends no passwords',
+  'Vercel Web Analytics',
+  'GitHub counts release downloads',
   'Battery stays opt-in',
   'Trust through control',
   'Keep awake when plugged in',
@@ -36,6 +39,7 @@ const required = [
   'Source is public on GitHub',
   'https://github.com/johnsilvavlogs/lidswitch',
   'https://github.com/johnsilvavlogs/lidswitch/releases/latest',
+  '/_vercel/insights/script.js',
   'not affiliated with Apple'
 ];
 
@@ -82,6 +86,7 @@ for (const file of publicTextFiles) {
 }
 
 const links = [
+  '/download/',
   'https://github.com/johnsilvavlogs/lidswitch/releases/latest',
   'https://github.com/johnsilvavlogs/lidswitch',
   '#install',
@@ -97,6 +102,14 @@ for (const link of links) {
 const downloadPage = readFileSync(join(root, 'site/download/index.html'), 'utf8');
 if (!/github\.com\/johnsilvavlogs\/lidswitch\/releases\/latest/i.test(downloadPage)) {
   throw new Error('Download page must point to the public GitHub release.');
+}
+
+if (!downloadPage.includes('/_vercel/insights/script.js')) {
+  throw new Error('Download page must include Vercel Web Analytics.');
+}
+
+if (!downloadPage.includes('download intent')) {
+  throw new Error('Download page must disclose that Vercel Web Analytics measures download intent.');
 }
 
 if (!/http-equiv="refresh"/i.test(downloadPage)) {

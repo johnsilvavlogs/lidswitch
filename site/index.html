@@ -48,7 +48,7 @@
             only changes when you deliberately opt in.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
-            <a class="button button-primary" href="https://github.com/johnsilvavlogs/lidswitch/releases/latest">
+            <a class="button button-primary" href="/download/">
               <span aria-hidden="true">↓</span>
               Download free DMG
             </a>
@@ -200,8 +200,8 @@
         </div>
         <div class="trust-grid">
           <article>
-            <h3>No credentials or telemetry</h3>
-            <p>It does not collect, transmit, or store passwords, API keys, tokens, account identifiers, personal analytics, or telemetry.</p>
+            <h3>No app telemetry</h3>
+            <p>The Mac app sends no passwords, API keys, tokens, account identifiers, analytics, or telemetry. This website uses Vercel Web Analytics for aggregate traffic, and GitHub counts release downloads.</p>
           </article>
           <article>
             <h3>Source is public</h3>
@@ -230,7 +230,7 @@
           </p>
         </div>
         <div class="final-actions">
-          <a class="button button-primary" href="https://github.com/johnsilvavlogs/lidswitch/releases/latest">Download free DMG</a>
+          <a class="button button-primary" href="/download/">Download free DMG</a>
           <a class="button button-secondary" href="https://github.com/johnsilvavlogs/lidswitch">
             <svg class="github-mark" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path
@@ -256,5 +256,9 @@
         <a href="#safety">Privacy</a>
       </p>
     </footer>
+    <script>
+      window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+    </script>
+    <script defer src="/_vercel/insights/script.js"></script>
   </body>
 </html>

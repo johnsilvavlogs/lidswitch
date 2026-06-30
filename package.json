@@ -13,6 +13,7 @@
     "package:verify": "./script/validate_dmg.sh",
     "scan:secrets": "node scripts/scan-public-secrets.mjs",
     "launch:check-public": "node scripts/check-public-github.mjs",
+    "analytics:downloads": "node scripts/report-downloads.mjs",
     "validate:site": "npm run site:check && npm run site:test"
   },
   "devDependencies": {

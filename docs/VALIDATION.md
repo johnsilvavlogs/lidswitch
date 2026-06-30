@@ -90,6 +90,26 @@ This confirms unauthenticated requests can see the repository, MIT license
 metadata, the latest non-draft release, and the `LidSwitch.dmg` plus checksum
 assets.
 
+## Analytics Validation
+
+Web Analytics is enabled on the linked Vercel project with:
+
+```bash
+npx -y vercel@latest project web-analytics --format json --scope team_fs4VucfgpyXLHSRITEcuK5gu
+```
+
+Expected output includes `"enabled": true`.
+
+Website visits appear in the Vercel project Analytics dashboard. Visits to
+`/download/` measure download intent, because the landing page download CTA
+routes there before handing off to GitHub Releases.
+
+Actual release asset download counts come from GitHub:
+
+```bash
+npm run analytics:downloads
+```
+
 ## DMG Packaging Dry Run
 
 ```bash

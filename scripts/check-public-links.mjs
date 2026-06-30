@@ -41,6 +41,7 @@ function withoutAnchor(target) {
 function assertExistingTarget(source, rawTarget) {
   const target = withoutAnchor(rawTarget.trim());
   if (!target || isExternal(target)) return;
+  if (target.startsWith('/_vercel/')) return;
 
   const decoded = decodeURIComponent(target);
   const baseDir = dirname(source);
