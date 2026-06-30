@@ -58,7 +58,8 @@ npm run site:test
 `site:check` verifies the static page contains the required manual-install,
 open-source, privacy, and safety claims while rejecting common fake launch claims
 such as fake stars, testimonials, Apple affiliation, analytics, or notarization
-promises.
+promises. It also checks that the primary CTA, numbered step badges, and green
+eyebrow/accent text meet the WCAG AA 4.5:1 contrast threshold for normal text.
 
 `site:test` runs Playwright against the static site across desktop, tablet, and
 mobile projects. The tests cover:
@@ -139,7 +140,7 @@ The native-app successful run used `full-release` and passed:
 
 Public-launch profile adds:
 
-1. Site static claim check
+1. Site static claim and contrast check
 2. Site Playwright UI
 3. DMG packaging dry run
 4. Open-source secret scan
