@@ -127,8 +127,9 @@ app or writing release artifacts.
 
 This builds `dist/LidSwitch.dmg`, verifies `dist/LidSwitch.dmg.sha256`, mounts the
 DMG, checks that the packaged `LidSwitch.app` has no extended attributes, runs
-strict codesign verification on the mounted app, and confirms Gatekeeper rejects
-the unsigned/not-notarized app so the manual approval flow remains explicit.
+strict codesign verification on the mounted app, scans the release artifacts for
+text secrets, and confirms Gatekeeper rejects the unsigned/not-notarized app so
+the manual approval flow remains explicit.
 
 ## Live Product Smoke
 
@@ -161,6 +162,7 @@ swift test
 npm install
 npm run validate:site
 npm run scan:secrets
+npm run scan:secrets:test
 ./script/build_dmg.sh --dry-run
 ./script/validate_dmg.sh
 npm run launch:check-public

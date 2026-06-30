@@ -189,6 +189,6 @@ fi
 grep -q "Keep awake when plugged in" <<<"$panel" || fail "menu panel missing primary toggle"
 grep -q "Allow on battery" <<<"$panel" || fail "menu panel missing battery opt-in toggle"
 grep -q "Battery lid-close sleep remains allowed" <<<"$panel" || fail "menu panel missing battery safety copy"
-grep -Eq "Keeping awake when plugged in|Plug in to block lid sleep|Battery sleep allowed|Clearing battery override" <<<"$panel" || fail "menu panel missing enabled status"
+grep -Eq "Keeping awake when plugged in|Plug in to block lid sleep|Battery sleep allowed|Clearing battery override|Helper update needed" <<<"$panel" || fail "menu panel missing recognized status"
 
 echo "live state ok: desired=$desired battery=$battery_pref sleepDisabled=$sleep_disabled helperVersion=$installed_helper_version menuItem=$menu_item"

@@ -119,6 +119,7 @@ fi
 assert_no_release_blocking_tree_metadata "$APP_ON_DMG"
 
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_ON_DMG" >/dev/null
+node "$ROOT_DIR/scripts/scan-public-secrets.mjs" --release-artifacts --path "$DIST_DIR" --path "$APP_ON_DMG"
 
 if /usr/sbin/spctl --assess --type execute --verbose=2 "$APP_ON_DMG" >"$SPCTL_OUT" 2>&1; then
   cat "$SPCTL_OUT" >&2

@@ -75,11 +75,8 @@ enum PrivilegedHelperManager {
         }
     }
 
-    private static func installScript(initialPreferences: PowerPreferences) -> String {
-        let userSupportDirectory = AppPaths.userSupportDirectory.path
+    private static func installScript(initialPreferences _: PowerPreferences) -> String {
         let desiredStateFile = AppPaths.desiredStateFile.path
-        let uid = getuid()
-        let gid = getgid()
 
         return """
         set -euo pipefail
@@ -88,17 +85,8 @@ enum PrivilegedHelperManager {
         helper_path=\(shellQuote(AppPaths.rootHelperPath))
         helper_version_path=\(shellQuote(AppPaths.rootHelperVersionPath))
         plist_path=\(shellQuote(AppPaths.launchDaemonPath))
-        user_support_dir=\(shellQuote(userSupportDirectory))
-        desired_state_file=\(shellQuote(desiredStateFile))
 
-        /bin/mkdir -p "$root_dir" "$user_support_dir"
-        /usr/sbin/chown \(uid):\(gid) "$user_support_dir"
-        /bin/chmod 0755 "$user_support_dir"
-        /bin/cat > "$desired_state_file" <<'LIDSWITCH_STATE'
-        \(initialPreferences.storagePayload)
-        LIDSWITCH_STATE
-        /usr/sbin/chown \(uid):\(gid) "$desired_state_file"
-        /bin/chmod 0644 "$desired_state_file"
+        /bin/mkdir -p "$root_dir"
 
         /bin/cat > "$helper_path" <<'LIDSWITCH_HELPER'
         \(helperScript(stateFile: desiredStateFile))
@@ -124,24 +112,12 @@ enum PrivilegedHelperManager {
     }
 
     private static func uninstallScript() -> String {
-        let desiredStateFile = AppPaths.desiredStateFile.path
-        let uid = getuid()
-        let gid = getgid()
-
         return """
         set -euo pipefail
 
         plist_path=\(shellQuote(AppPaths.launchDaemonPath))
         original_ac_sleep=\(shellQuote(AppPaths.rootOriginalACSleepPath))
         original_battery_sleep=\(shellQuote(AppPaths.rootOriginalBatterySleepPath))
-        desired_state_file=\(shellQuote(desiredStateFile))
-
-        /bin/mkdir -p "$(/usr/bin/dirname "$desired_state_file")"
-        /bin/cat > "$desired_state_file" <<'LIDSWITCH_STATE'
-        \(PowerPreferences.disabled.storagePayload)
-        LIDSWITCH_STATE
-        /usr/sbin/chown \(uid):\(gid) "$desired_state_file"
-        /bin/chmod 0644 "$desired_state_file"
 
         /usr/bin/pmset -a disablesleep 0
         if [ -f "$original_ac_sleep" ]; then
@@ -179,7 +155,7 @@ enum PrivilegedHelperManager {
           key="$1"
           default_value="$2"
 
-          if [ ! -f "$state_file" ]; then
+          if [ -L "$state_file" ] || [ ! -f "$state_file" ]; then
             /bin/echo "$default_value"
             return
           fi
