@@ -73,6 +73,7 @@ EOF
   exit 0
 fi
 
+/bin/mkdir -p "$DIST_DIR"
 "$ROOT_DIR/script/build_and_run.sh" --verify
 /usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 clean_bundle_metadata "$APP_BUNDLE"
