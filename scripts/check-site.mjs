@@ -16,11 +16,15 @@ const publicTextFiles = [
 
 const required = [
   'Close the lid. Let the job finish.',
+  "For Mac jobs you can't babysit.",
+  'app-panel-preview',
   'Review source on GitHub',
+  'github-mark',
   'Not App Store distributed or notarized',
   'Open Anyway',
   'No credentials stored',
   'Battery opt-in',
+  'A power switch you can inspect',
   'Keep awake when plugged in',
   'Allow on battery',
   'Requires an Apple Silicon Mac with macOS 14 or newer',
@@ -38,6 +42,9 @@ const forbidden = [
   /App Store badge/i,
   /notarized by Apple/i,
   /official Apple/i,
+  /Free manual DMG for technical friends/i,
+  /No App Store promises/i,
+  />\s*For technical friends\s*</i,
   /\\b\\d+[kK]?\\+?\\s+stars\\b/,
   /testimonial/i,
   /enterprise[- ]grade security/i,
@@ -49,6 +56,10 @@ for (const pattern of forbidden) {
   if (pattern.test(html)) {
     throw new Error(`Forbidden or unsupported public claim found: ${pattern}`);
   }
+}
+
+if (/<img[^>]+lidswitch-panel\.png/i.test(html)) {
+  throw new Error('Hero must not render the low-resolution product screenshot as a scaled img.');
 }
 
 for (const file of publicTextFiles) {
