@@ -117,14 +117,18 @@ npm install
 npm run validate:site
 ```
 
-Run the full JTBD gate:
+Run the release-oriented local checks:
 
 ```bash
-./scripts/run-jtbd-gate.sh
+npm run scan:secrets
+./script/build_dmg.sh --dry-run
+./script/validate_dmg.sh
 ```
 
-The gate checks Swift build/test, helper/plist syntax, app bundle launch, DMG
-artifact validation, and the live menu bar/power-state smoke.
+For native changes, also run `swift build`, `swift test`, and
+`./script/build_and_run.sh --verify`. For installed-helper changes, run
+`./script/validate_live_state.sh` on a Mac where LidSwitch is installed and
+enabled.
 
 ## Installed Files
 
@@ -148,7 +152,7 @@ battery=disabled
 
 Legacy `enabled` and `disabled` files still read safely; legacy `enabled` means AC-only.
 
-## Current Verified State
+## Local Verification Notes
 
 The implementation was verified on macOS 26.3 with the app enabled while connected to AC power:
 
@@ -158,13 +162,8 @@ The implementation was verified on macOS 26.3 with the app enabled while connect
 - battery power profile preserved with `sleep 1`
 - menu bar UI showed `Keeping awake when plugged in` and the battery opt-in control
 
-Proof is stored locally under:
-
-```text
-.jtbd-done-gate/reports/<timestamp>/report.md
-```
-
-Reports are ignored by git; rerun the gate to regenerate local proof.
+Those checks are environment-specific. Re-run the commands above on the release
+machine before publishing a new DMG.
 
 ## More Documentation
 
@@ -172,5 +171,6 @@ Reports are ignored by git; rerun the gate to regenerate local proof.
 - [Install](docs/INSTALL.md)
 - [Operations](docs/OPERATIONS.md)
 - [Privacy And Safety](docs/PRIVACY.md)
+- [Security Policy](SECURITY.md)
 - [Distribution](docs/DISTRIBUTION.md)
 - [Validation](docs/VALIDATION.md)

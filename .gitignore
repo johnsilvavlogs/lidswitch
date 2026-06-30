@@ -1,10 +1,14 @@
 .build/
 dist/
 node_modules/
+.codex/
+.jtbd-done-gate/
+.jtbd-done-gate.json
+.playwright-artifacts/
+playwright-report/
+test-results/
 .vercel/
 .env*.local
 npm-debug.log*
 .DS_Store
 ._*
-.jtbd-done-gate/reports/
-.jtbd-done-gate/tmp/

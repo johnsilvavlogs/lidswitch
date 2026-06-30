@@ -126,7 +126,7 @@ Older installed helpers, unloaded LaunchDaemons, or installed helper/plist conte
 
 ## Diagnostic Commands
 
-The executable supports diagnostic output used by tests and the done gate:
+The executable supports diagnostic output used by tests and release validation:
 
 ```bash
 .build/debug/LidSwitch --print-helper

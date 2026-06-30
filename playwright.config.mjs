@@ -2,9 +2,9 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './site-tests',
-  outputDir: '.jtbd-done-gate/tmp/playwright-output',
+  outputDir: '.playwright-artifacts/output',
   fullyParallel: false,
-  reporter: [['list'], ['json', { outputFile: process.env.PLAYWRIGHT_JSON_OUTPUT_FILE || '.jtbd-done-gate/tmp/playwright-results.json' }]],
+  reporter: [['list'], ['json', { outputFile: process.env.PLAYWRIGHT_JSON_OUTPUT_FILE || '.playwright-artifacts/results.json' }]],
   use: {
     baseURL: process.env.SITE_BASE_URL || 'http://127.0.0.1:4173',
     trace: 'retain-on-failure',

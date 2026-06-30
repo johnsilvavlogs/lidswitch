@@ -20,13 +20,19 @@ This project is set up for a small technical-friends release.
 ## Release Checklist
 
 1. Run native and site validation.
-2. Build the DMG:
+2. Run the public secret scan:
+
+   ```bash
+   npm run scan:secrets
+   ```
+
+3. Build the DMG:
 
    ```bash
    ./script/build_dmg.sh
    ```
 
-3. Validate the release artifact:
+4. Validate the release artifact:
 
    ```bash
    ./script/validate_dmg.sh
@@ -35,9 +41,10 @@ This project is set up for a small technical-friends release.
    This confirms the checksum, mounted app signature, and expected Gatekeeper
    rejection for the manual approval flow.
 
-4. Create a GitHub Release.
-5. Attach the Apple Silicon `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`.
-6. Tell recipients to expect macOS manual approval on first launch.
+5. Create a GitHub Release.
+6. Attach the Apple Silicon `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`.
+7. Confirm the landing page download CTA reaches the release.
+8. Tell recipients to expect macOS manual approval on first launch.
 
 Do not make the repository public until the final secret scan and launch review
 are complete.
