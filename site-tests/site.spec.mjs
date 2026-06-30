@@ -69,6 +69,16 @@ test('keyboard users can reach the core actions', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'LidSwitch home' })).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Why' })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Install', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Safety', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByLabel('Primary navigation').getByRole('link', { name: 'GitHub', exact: true })).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: /Get the DMG/i }).first()).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first()).toBeFocused();
 });
 
 test('responsive layouts avoid horizontal overflow', async ({ page }) => {

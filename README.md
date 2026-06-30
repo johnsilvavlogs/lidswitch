@@ -39,6 +39,12 @@ This writes `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`. See
 [Install](docs/INSTALL.md) and [Distribution](docs/DISTRIBUTION.md) for the
 manual approval and release checklist.
 
+Validate the release artifact with:
+
+```bash
+./script/validate_dmg.sh
+```
+
 ## What It Does
 
 - Adds a compact `MenuBarExtra` with one primary switch: **Keep awake when plugged in**.
@@ -88,10 +94,13 @@ Verify launch:
 The runner builds the SwiftPM executable, stages a local app bundle at:
 
 ```text
-dist/LidSwitch.app
+${TMPDIR}/lidswitch-app/LidSwitch.app
 ```
 
 and launches it as a real macOS app bundle rather than a raw executable.
+Use `LIDSWITCH_APP_STAGE_ROOT` or `LIDSWITCH_APP_BUNDLE` to override that path.
+The app is staged outside the repository so macOS FileProvider metadata from
+Documents/iCloud folders cannot corrupt codesign verification.
 
 ## Test
 
@@ -114,7 +123,8 @@ Run the full JTBD gate:
 ./scripts/run-jtbd-gate.sh
 ```
 
-The gate checks Swift build/test, helper/plist syntax, app bundle launch, and the live menu bar/power-state smoke.
+The gate checks Swift build/test, helper/plist syntax, app bundle launch, DMG
+artifact validation, and the live menu bar/power-state smoke.
 
 ## Installed Files
 

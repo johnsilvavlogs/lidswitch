@@ -40,8 +40,12 @@ The helper-status diagnostic reports whether launchd sees the helper and whether
 ./script/build_and_run.sh --verify
 ```
 
-This builds the SwiftPM target, stages `dist/LidSwitch.app`, launches the app bundle, and confirms the process exists.
-The verification checks that the running `LidSwitch` process is the staged bundle from this repo, not another process with the same name.
+This builds the SwiftPM target, stages `LidSwitch.app` under `${TMPDIR}/lidswitch-app`
+by default, launches the app bundle, and confirms the process exists.
+The verification checks that the running `LidSwitch` process is the staged bundle
+from this repo, not another process with the same name.
+Use `LIDSWITCH_APP_STAGE_ROOT` or `LIDSWITCH_APP_BUNDLE` to override the staging
+path when needed.
 
 ## Landing Page Validation
 
@@ -82,6 +86,17 @@ SITE_BASE_URL=https://<deployment>.vercel.app npm run site:test
 The dry run confirms the unsigned manual DMG packaging path without launching the
 app or writing release artifacts.
 
+## DMG Artifact Validation
+
+```bash
+./script/validate_dmg.sh
+```
+
+This builds `dist/LidSwitch.dmg`, verifies `dist/LidSwitch.dmg.sha256`, mounts the
+DMG, checks that the packaged `LidSwitch.app` has no extended attributes, runs
+strict codesign verification on the mounted app, and confirms Gatekeeper rejects
+the unsigned/not-notarized app so the manual approval flow remains explicit.
+
 ## Live Product Smoke
 
 ```bash
@@ -120,6 +135,7 @@ The native-app successful run used `full-release` and passed:
 4. Helper plist syntax
 5. App bundle launch
 6. Live menu bar power smoke
+7. DMG artifact validation
 
 Public-launch profile adds:
 
