@@ -18,9 +18,10 @@ const publicTextFiles = [
 const required = [
   'Close the lid. Let the job finish.',
   'Long Mac job? Plug in. Close the lid. Let it finish.',
+  'Public GitHub release opens after final approval',
   'app-panel-preview',
-  'Download free DMG',
-  'Review source on GitHub',
+  'Check DMG status',
+  'Preview install steps',
   'github-mark',
   'Manual install, disclosed up front',
   'not App Store distributed or notarized',
@@ -32,7 +33,7 @@ const required = [
   'Keep awake when plugged in',
   'Allow on battery',
   'Apple Silicon Macs on macOS 14 or newer',
-  'independent open-source project',
+  'Source opens with the public GitHub release',
   'not affiliated with Apple'
 ];
 
@@ -48,6 +49,8 @@ const forbidden = [
   /official Apple/i,
   /Free manual DMG for technical friends/i,
   /No App Store promises/i,
+  /https:\/\/github\.com\/johnsilvavlogs\/lidswitch\/releases\/latest/i,
+  /https:\/\/github\.com\/johnsilvavlogs\/lidswitch(?=["/])/i,
   />\s*For technical friends\s*</i,
   /\\b\\d+[kK]?\\+?\\s+stars\\b/,
   /testimonial/i,
@@ -73,17 +76,21 @@ for (const file of publicTextFiles) {
   }
 }
 
-const links = [
-  'https://github.com/johnsilvavlogs/lidswitch',
-  'https://github.com/johnsilvavlogs/lidswitch/releases/latest',
-  'https://github.com/johnsilvavlogs/lidswitch/blob/main/docs/INSTALL.md',
-  'https://github.com/johnsilvavlogs/lidswitch/blob/main/docs/PRIVACY.md'
-];
+const links = ['/download/', '#install', '#safety'];
 
 for (const link of links) {
   if (!html.includes(`href="${link}"`)) {
     throw new Error(`Missing expected public link: ${link}`);
   }
+}
+
+const downloadPage = readFileSync(join(root, 'site/download/index.html'), 'utf8');
+if (/github\.com\/johnsilvavlogs\/lidswitch\/releases\/latest/i.test(downloadPage)) {
+  throw new Error('Pre-launch download page must not redirect to a private GitHub release.');
+}
+
+if (!downloadPage.includes('release remain private until final approval')) {
+  throw new Error('Download status page must explain the pre-launch private release state.');
 }
 
 if (!css.includes('@media (max-width: 680px)')) {
