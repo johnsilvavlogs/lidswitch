@@ -24,6 +24,7 @@ This project is set up for a small technical-friends release.
 
    ```bash
    npm run scan:secrets
+   npm run scan:secrets:test
    ```
 
 3. Build the DMG:
@@ -38,8 +39,8 @@ This project is set up for a small technical-friends release.
    ./script/validate_dmg.sh
    ```
 
-   This confirms the checksum, mounted app signature, and expected Gatekeeper
-   rejection for the manual approval flow.
+   This confirms the checksum, mounted app signature, release-artifact secret
+   scan, and expected Gatekeeper rejection for the manual approval flow.
 
 5. Create a GitHub Release.
 6. Attach the Apple Silicon `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`.

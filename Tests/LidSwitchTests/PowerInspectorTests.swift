@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import LidSwitch
 
@@ -191,6 +192,103 @@ final class PowerInspectorTests: XCTestCase {
         )
     }
 
+    func testPrivilegedInstallScriptDoesNotWriteUserDesiredStateAsRoot() {
+        let script = PrivilegedHelperManager.diagnosticInstallScript(initialPreferences: .acOnlyEnabled)
+
+        XCTAssertFalse(script.contains("/bin/cat > \"$desired_state_file\""))
+        XCTAssertFalse(script.contains("/usr/sbin/chown \(getuid()):\(getgid()) \"$desired_state_file\""))
+        XCTAssertFalse(script.contains("/bin/chmod 0644 \"$desired_state_file\""))
+        XCTAssertFalse(script.contains("user_support_dir="))
+        XCTAssertTrue(script.contains("state_file='\(AppPaths.desiredStateFile.path)'"))
+    }
+
+    func testPrivilegedUninstallScriptDoesNotWriteUserDesiredStateAsRoot() {
+        let script = PrivilegedHelperManager.diagnosticUninstallScript()
+
+        XCTAssertFalse(script.contains("desired_state_file="))
+        XCTAssertFalse(script.contains("/bin/cat > \"$desired_state_file\""))
+        XCTAssertFalse(script.contains("/usr/sbin/chown \(getuid()):\(getgid()) \"$desired_state_file\""))
+        XCTAssertFalse(script.contains("/bin/chmod 0644 \"$desired_state_file\""))
+    }
+
+    func testPrivilegedHelperScriptFailsClosedOnSymlinkedDesiredState() {
+        let script = PrivilegedHelperManager.diagnosticHelperScript()
+
+        XCTAssertTrue(script.contains("[ -L \"$state_file\" ] || [ ! -f \"$state_file\" ]"))
+    }
+
+    func testDesiredStateStoreWritesRegularStateFile() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+
+        try DesiredStateStore.write(
+            .acOnlyEnabled,
+            supportDirectory: supportDirectory,
+            stateFile: stateFile
+        )
+
+        XCTAssertEqual(
+            try String(contentsOf: stateFile, encoding: .utf8),
+            PowerPreferences.acOnlyEnabled.storagePayload
+        )
+    }
+
+    func testDesiredStateStoreRejectsSymlinkedSupportDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        XCTAssertEqual(symlink(target.path, supportDirectory.path), 0)
+
+        XCTAssertThrowsError(
+            try DesiredStateStore.write(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+    }
+
+    func testDesiredStateStoreRejectsNonDirectorySupportPath() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try "not a directory".write(to: supportDirectory, atomically: true, encoding: .utf8)
+
+        XCTAssertThrowsError(
+            try DesiredStateStore.write(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+    }
+
+    func testDesiredStateStoreRejectsSymlinkedStateFileWithoutTouchingTarget() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        let target = root.appendingPathComponent("target-state", isDirectory: false)
+        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        try "keep this\n".write(to: target, atomically: true, encoding: .utf8)
+        XCTAssertEqual(symlink(target.path, stateFile.path), 0)
+
+        XCTAssertThrowsError(
+            try DesiredStateStore.write(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "keep this\n")
+    }
+
     func testInstalledHelperArtifactsAllowShellTrailingNewline() {
         XCTAssertFalse(
             PowerInspector.helperNeedsUpdate(
@@ -242,5 +340,12 @@ final class PowerInspectorTests: XCTestCase {
                 installedLaunchDaemonPlist: PrivilegedHelperManager.diagnosticLaunchDaemonPlist()
             )
         )
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
     }
 }
