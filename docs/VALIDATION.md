@@ -79,6 +79,17 @@ To validate a Vercel deployment instead of localhost:
 SITE_BASE_URL=https://<deployment>.vercel.app npm run site:test
 ```
 
+After the repository is public and the release is published, verify the anonymous
+GitHub surface:
+
+```bash
+npm run launch:check-public
+```
+
+This confirms unauthenticated requests can see the repository, MIT license
+metadata, the latest non-draft release, and the `LidSwitch.dmg` plus checksum
+assets.
+
 ## DMG Packaging Dry Run
 
 ```bash
@@ -132,6 +143,7 @@ npm run validate:site
 npm run scan:secrets
 ./script/build_dmg.sh --dry-run
 ./script/validate_dmg.sh
+npm run launch:check-public
 ```
 
 For native-app changes, verify generated helper artifacts:
@@ -162,3 +174,4 @@ The release checklist should cover:
 8. Site static claim, contrast, icon, and link checks
 9. Site Playwright UI tests
 10. Open-source secret scan
+11. Public GitHub release reachability after publishing
