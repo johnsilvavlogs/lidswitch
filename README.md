@@ -125,6 +125,14 @@ npm run scan:secrets
 ./script/validate_dmg.sh
 ```
 
+After the repository is public and the release is published, verify that anonymous
+visitors can reach the GitHub repo, license metadata, latest release, DMG, and
+checksum:
+
+```bash
+npm run launch:check-public
+```
+
 For native changes, also run `swift build`, `swift test`, and
 `./script/build_and_run.sh --verify`. For installed-helper changes, run
 `./script/validate_live_state.sh` on a Mac where LidSwitch is installed and

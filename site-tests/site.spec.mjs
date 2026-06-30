@@ -2,17 +2,17 @@ import { expect, test } from '@playwright/test';
 
 test('hero communicates the job and primary actions', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByRole('note')).toContainText('Public GitHub release opens after final approval.');
+  await expect(page.getByRole('note')).toContainText('Free DMG and source are on GitHub.');
   await expect(page.getByRole('heading', { name: 'Close the lid. Let the job finish.' })).toBeVisible();
-  await expect(page.getByRole('link', { name: /Check DMG status/i }).first()).toHaveAttribute(
+  await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toHaveAttribute(
     'href',
-    '/download/'
+    'https://github.com/johnsilvavlogs/lidswitch/releases/latest'
   );
-  await expect(page.getByRole('link', { name: /Preview install steps/i }).first()).toHaveAttribute(
+  await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first()).toHaveAttribute(
     'href',
-    '#install'
+    'https://github.com/johnsilvavlogs/lidswitch'
   );
-  await expect(page.getByRole('link', { name: /Preview install steps/i }).first().locator('.github-mark')).toBeVisible();
+  await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first().locator('.github-mark')).toBeVisible();
 });
 
 test('manual install friction is explicit before download', async ({ page }) => {
@@ -23,20 +23,21 @@ test('manual install friction is explicit before download', async ({ page }) => 
   await expect(page.getByRole('heading', { name: 'A manual install with the approval steps up front.' })).toBeVisible();
 });
 
-test('safety and launch-status trust claims are visible and bounded', async ({ page }) => {
+test('safety and public-source trust claims are visible and bounded', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByText('Trust through control')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Know what changes. Undo it fast.' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'No credentials or telemetry' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Battery stays opt-in' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Restore is not hidden' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Source is public' })).toBeVisible();
 });
 
 test('hero product preview stays secondary at annotated desktop viewport', async ({ page }) => {
   await page.setViewportSize({ width: 1022, height: 728 });
   await page.goto('/');
   const productPreview = page.getByRole('img', { name: /LidSwitch menu panel/i });
-  const primaryCta = page.getByRole('link', { name: /Check DMG status/i }).first();
+  const primaryCta = page.getByRole('link', { name: /Download free DMG/i }).first();
   await expect(productPreview).toBeVisible();
   await expect(primaryCta).toBeVisible();
   await expect(page.locator('.hero-visual > img')).toHaveCount(0);
@@ -97,31 +98,35 @@ test('keyboard users can reach the core actions', async ({ page }) => {
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Why' })).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: 'Install', exact: true })).toBeFocused();
+  await expect(page.getByLabel('Primary navigation').getByRole('link', { name: 'Install', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: 'Safety', exact: true })).toBeFocused();
+  await expect(page.getByLabel('Primary navigation').getByRole('link', { name: 'Safety', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByLabel('Primary navigation').getByRole('link', { name: 'Status', exact: true })).toBeFocused();
+  await expect(page.getByLabel('Primary navigation').getByRole('link', { name: 'GitHub', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: /Check DMG status/i }).first()).toBeFocused();
+  await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: /Preview install steps/i }).first()).toBeFocused();
+  await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first()).toBeFocused();
 });
 
 test('responsive layouts avoid horizontal overflow', async ({ page }) => {
   await page.goto('/');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
-  await expect(page.getByRole('link', { name: /Check DMG status/i }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toBeVisible();
 });
 
-test('footer exposes launch status and local install/privacy anchors', async ({ page }) => {
+test('footer exposes GitHub release and local install/privacy anchors', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByRole('contentinfo').getByRole('link', { name: 'Release status' })).toHaveAttribute(
+  await expect(page.getByRole('contentinfo').getByRole('link', { name: 'GitHub' })).toHaveAttribute(
     'href',
-    '/download/'
+    'https://github.com/johnsilvavlogs/lidswitch'
   );
-  await expect(page.getByRole('contentinfo').getByRole('link', { name: 'Install path' })).toHaveAttribute(
+  await expect(page.getByRole('contentinfo').getByRole('link', { name: 'Releases' })).toHaveAttribute(
+    'href',
+    'https://github.com/johnsilvavlogs/lidswitch/releases/latest'
+  );
+  await expect(page.getByRole('contentinfo').getByRole('link', { name: 'Install' })).toHaveAttribute(
     'href',
     '#install'
   );
@@ -131,10 +136,19 @@ test('footer exposes launch status and local install/privacy anchors', async ({ 
   );
 });
 
-test('download page explains private release state before public launch', async ({ page }) => {
-  await page.goto('/download/');
-  await expect(page.getByRole('heading', { name: 'LidSwitch DMG status' })).toBeVisible();
-  await expect(page.getByText(/release remain private until final approval/i)).toBeVisible();
-  await expect(page.locator('meta[http-equiv="refresh"]')).toHaveCount(0);
+test('download page hands off to GitHub Releases', async ({ page }) => {
+  await page.goto('/download/', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: 'Download LidSwitch' })).toBeVisible();
+  await expect(page.getByText(/DMG is published on GitHub Releases/i)).toBeVisible();
+  await expect(page.getByText(/not App Store distributed or notarized/i)).toBeVisible();
+  await expect(page.getByText(/Open Anyway/i)).toBeVisible();
+  await expect(page.locator('meta[http-equiv="refresh"]')).toHaveAttribute(
+    'content',
+    '3; url=https://github.com/johnsilvavlogs/lidswitch/releases/latest'
+  );
+  await expect(page.getByRole('link', { name: 'Open GitHub Releases' })).toHaveAttribute(
+    'href',
+    'https://github.com/johnsilvavlogs/lidswitch/releases/latest'
+  );
   await expect(page.getByRole('link', { name: 'Return to LidSwitch' })).toHaveAttribute('href', '/');
 });

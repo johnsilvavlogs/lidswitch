@@ -43,8 +43,15 @@ This project is set up for a small technical-friends release.
 
 5. Create a GitHub Release.
 6. Attach the Apple Silicon `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`.
-7. Confirm the landing page download CTA reaches the release.
-8. Tell recipients to expect macOS manual approval on first launch.
+7. Make the repository public and publish the release.
+8. Confirm the public GitHub surface is reachable without authentication:
+
+   ```bash
+   npm run launch:check-public
+   ```
+
+9. Confirm the landing page download CTA reaches the release.
+10. Tell recipients to expect macOS manual approval on first launch.
 
 Do not make the repository public until the final secret scan and launch review
 are complete.

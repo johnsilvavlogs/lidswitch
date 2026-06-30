@@ -17,11 +17,11 @@ const publicTextFiles = [
 
 const required = [
   'Close the lid. Let the job finish.',
-  'Long Mac job? Plug in. Close the lid. Let it finish.',
-  'Public GitHub release opens after final approval',
+  'Plug in. Close the lid. Let the run finish.',
+  'Free DMG and source are on GitHub',
   'app-panel-preview',
-  'Check DMG status',
-  'Preview install steps',
+  'Download free DMG',
+  'Review source on GitHub',
   'github-mark',
   'Manual install, disclosed up front',
   'not App Store distributed or notarized',
@@ -33,7 +33,9 @@ const required = [
   'Keep awake when plugged in',
   'Allow on battery',
   'Apple Silicon Macs on macOS 14 or newer',
-  'Source opens with the public GitHub release',
+  'Source is public on GitHub',
+  'https://github.com/johnsilvavlogs/lidswitch',
+  'https://github.com/johnsilvavlogs/lidswitch/releases/latest',
   'not affiliated with Apple'
 ];
 
@@ -49,8 +51,11 @@ const forbidden = [
   /official Apple/i,
   /Free manual DMG for technical friends/i,
   /No App Store promises/i,
-  /https:\/\/github\.com\/johnsilvavlogs\/lidswitch\/releases\/latest/i,
-  /https:\/\/github\.com\/johnsilvavlogs\/lidswitch(?=["/])/i,
+  /pending final approval/i,
+  /remain private until final approval/i,
+  /Check DMG status/i,
+  /Preview install steps/i,
+  /Release status/i,
   />\s*For technical friends\s*</i,
   /\\b\\d+[kK]?\\+?\\s+stars\\b/,
   /testimonial/i,
@@ -76,7 +81,12 @@ for (const file of publicTextFiles) {
   }
 }
 
-const links = ['/download/', '#install', '#safety'];
+const links = [
+  'https://github.com/johnsilvavlogs/lidswitch/releases/latest',
+  'https://github.com/johnsilvavlogs/lidswitch',
+  '#install',
+  '#safety'
+];
 
 for (const link of links) {
   if (!html.includes(`href="${link}"`)) {
@@ -85,12 +95,16 @@ for (const link of links) {
 }
 
 const downloadPage = readFileSync(join(root, 'site/download/index.html'), 'utf8');
-if (/github\.com\/johnsilvavlogs\/lidswitch\/releases\/latest/i.test(downloadPage)) {
-  throw new Error('Pre-launch download page must not redirect to a private GitHub release.');
+if (!/github\.com\/johnsilvavlogs\/lidswitch\/releases\/latest/i.test(downloadPage)) {
+  throw new Error('Download page must point to the public GitHub release.');
 }
 
-if (!downloadPage.includes('release remain private until final approval')) {
-  throw new Error('Download status page must explain the pre-launch private release state.');
+if (!/http-equiv="refresh"/i.test(downloadPage)) {
+  throw new Error('Download page must redirect to GitHub Releases.');
+}
+
+if (/private until final approval|pending final approval|DMG status/i.test(downloadPage)) {
+  throw new Error('Download page still contains pre-launch placeholder copy.');
 }
 
 if (!css.includes('@media (max-width: 680px)')) {
