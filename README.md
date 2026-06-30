@@ -1,8 +1,43 @@
 # LidSwitch
 
-LidSwitch is a minimal native macOS menu bar app for one job: keep a MacBook awake when the lid is closed. It defaults to the safer AC-only mode and includes an explicit battery opt-in for users who need processing to continue while unplugged.
+Close the lid. Let the job finish.
+
+LidSwitch is a minimal native macOS menu bar app for Apple Silicon MacBooks with one job: keep a plugged-in MacBook awake when the lid is closed. It defaults to the safer AC-only mode and includes an explicit battery opt-in for users who need processing to continue while unplugged.
 
 ![LidSwitch running](screenshots/lidswitch-working.png)
+
+## Public Preview
+
+The landing page lives in `site/` and is configured for Vercel.
+
+Run it locally:
+
+```bash
+npm install
+npm run site:serve
+```
+
+Then open:
+
+```text
+http://127.0.0.1:4173
+```
+
+The public launch copy is intentionally explicit: LidSwitch is a free manual DMG,
+not a Mac App Store app, not notarized, and may require **Open Anyway** approval
+in macOS Security settings.
+
+## Download
+
+Release DMGs should be attached to GitHub Releases. The current release build is for Apple Silicon Macs. Build one locally with:
+
+```bash
+./script/build_dmg.sh
+```
+
+This writes `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`. See
+[Install](docs/INSTALL.md) and [Distribution](docs/DISTRIBUTION.md) for the
+manual approval and release checklist.
 
 ## What It Does
 
@@ -30,6 +65,7 @@ The app never stores credentials. It delegates privileged work to macOS via the 
 
 ## Requirements
 
+- Apple Silicon Mac
 - macOS 14 or newer
 - Apple Swift toolchain / Xcode command line tools
 - Accessibility permission for validation scripts that inspect the menu bar UI
@@ -65,10 +101,17 @@ Run unit tests:
 swift test
 ```
 
+Validate the landing page:
+
+```bash
+npm install
+npm run validate:site
+```
+
 Run the full JTBD gate:
 
 ```bash
-python /Users/johnsilva/.agents/skills/jtbd-done-gate/scripts/done_gate.py
+./scripts/run-jtbd-gate.sh
 ```
 
 The gate checks Swift build/test, helper/plist syntax, app bundle launch, and the live menu bar/power-state smoke.
@@ -116,5 +159,8 @@ Reports are ignored by git; rerun the gate to regenerate local proof.
 ## More Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Install](docs/INSTALL.md)
 - [Operations](docs/OPERATIONS.md)
+- [Privacy And Safety](docs/PRIVACY.md)
+- [Distribution](docs/DISTRIBUTION.md)
 - [Validation](docs/VALIDATION.md)

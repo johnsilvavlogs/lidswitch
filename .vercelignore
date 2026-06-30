@@ -1,0 +1,12 @@
+.build
+.git
+.jtbd-done-gate
+.vercel
+dist
+node_modules
+*.log
+.DS_Store
+._*
+.env*
+*.xcresult
+DerivedData
