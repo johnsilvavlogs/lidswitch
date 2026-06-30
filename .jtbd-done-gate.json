@@ -122,7 +122,7 @@
       "kind": "quality",
       "run": "npm run site:check",
       "profiles": ["public-launch", "full-release"],
-      "affects": ["site/**", "scripts/check-site.mjs", "scripts/check-icons.mjs", "scripts/check-public-links.mjs", "package.json", "package-lock.json", "vercel.json", "README.md", "docs/**", "screenshots/**"]
+      "affects": ["site/**", "scripts/check-site.mjs", "scripts/check-contrast.mjs", "scripts/check-icons.mjs", "scripts/check-public-links.mjs", "package.json", "package-lock.json", "vercel.json", "README.md", "docs/**", "screenshots/**"]
     },
     {
       "name": "Site Playwright UI",

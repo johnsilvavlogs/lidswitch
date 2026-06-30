@@ -1,6 +1,6 @@
 :root {
-  --green: #14c96b;
-  --green-dark: #07934d;
+  --green: #047a3f;
+  --green-dark: #046a37;
   --ink: #111418;
   --muted: #5d6673;
   --line: #dde4dc;
@@ -202,9 +202,9 @@ h3 {
 }
 
 .button-primary {
-  background: linear-gradient(135deg, #16ce6f, #06994f);
+  background: linear-gradient(135deg, #047a3f, #035c31);
   color: white;
-  box-shadow: 0 16px 34px rgba(20, 201, 107, 0.28);
+  box-shadow: 0 16px 34px rgba(4, 122, 63, 0.28);
 }
 
 .button-secondary {
