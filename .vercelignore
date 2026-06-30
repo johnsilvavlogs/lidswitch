@@ -1,9 +1,14 @@
 .build
 .git
+.codex
 .jtbd-done-gate
+.jtbd-done-gate.json
+.playwright-artifacts
 .vercel
 dist
 node_modules
+playwright-report
+test-results
 *.log
 .DS_Store
 ._*

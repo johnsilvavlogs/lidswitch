@@ -119,16 +119,37 @@ This checks:
 - panel text includes the primary toggle, battery opt-in toggle, battery-safety copy, and enabled status
 - battery-on-AC-only state is represented as sleep allowed instead of protected
 
-This smoke expects the app to be installed and enabled. It is part of the JTBD done gate.
+This smoke expects the app to be installed and enabled.
 
-## JTBD Done Gate
+## Release Validation Checklist
 
 ```bash
-./scripts/run-jtbd-gate.sh --plan
-./scripts/run-jtbd-gate.sh
+swift build
+swift test
+npm install
+npm run validate:site
+npm run scan:secrets
+./script/build_dmg.sh --dry-run
+./script/validate_dmg.sh
 ```
 
-The native-app successful run used `full-release` and passed:
+For native-app changes, verify generated helper artifacts:
+
+```bash
+.build/debug/LidSwitch --print-helper | zsh -n /dev/stdin
+.build/debug/LidSwitch --print-install-script | zsh -n /dev/stdin
+.build/debug/LidSwitch --print-uninstall-script | zsh -n /dev/stdin
+.build/debug/LidSwitch --print-plist | plutil -lint -
+```
+
+For installed-helper or power-policy changes, also run:
+
+```bash
+./script/build_and_run.sh --verify
+./script/validate_live_state.sh
+```
+
+The release checklist should cover:
 
 1. Swift build
 2. Swift tests
@@ -137,18 +158,6 @@ The native-app successful run used `full-release` and passed:
 5. App bundle launch
 6. Live menu bar power smoke
 7. DMG artifact validation
-
-Public-launch profile adds:
-
-1. Site static claim and contrast check
-2. Site Playwright UI
-3. DMG packaging dry run
-4. Open-source secret scan
-
-## Local Proof
-
-```text
-.jtbd-done-gate/reports/<timestamp>/report.md
-```
-
-Gate reports are ignored by git. Re-run the gate to regenerate current proof after cloning or changing the app.
+8. Site static claim, contrast, icon, and link checks
+9. Site Playwright UI tests
+10. Open-source secret scan
