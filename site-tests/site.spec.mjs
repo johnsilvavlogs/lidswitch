@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test';
 
 test('hero communicates the job and primary actions', async ({ page }) => {
   await page.goto('/');
+  await expect(page.getByRole('note')).toContainText("For Mac jobs you can't babysit.");
   await expect(page.getByRole('heading', { name: 'Close the lid. Let the job finish.' })).toBeVisible();
   await expect(page.getByRole('link', { name: /Get the DMG/i }).first()).toHaveAttribute(
     'href',
@@ -11,6 +12,7 @@ test('hero communicates the job and primary actions', async ({ page }) => {
     'href',
     'https://github.com/johnsilvavlogs/lidswitch'
   );
+  await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first().locator('.github-mark')).toBeVisible();
 });
 
 test('manual install friction is explicit before download', async ({ page }) => {
@@ -22,19 +24,43 @@ test('manual install friction is explicit before download', async ({ page }) => 
 
 test('safety and open-source trust claims are visible and bounded', async ({ page }) => {
   await page.goto('/');
+  await expect(page.getByText('A power switch you can inspect')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Inspect it. Install it. Remove it.' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'No credentials stored' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Battery opt-in' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Easy to remove' })).toBeVisible();
 });
 
-test('product screenshot has useful accessible context', async ({ page }) => {
+test('hero product preview stays secondary at annotated desktop viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 1022, height: 728 });
   await page.goto('/');
-  const productImage = page.getByRole('img', { name: /LidSwitch menu panel/i });
-  await expect(productImage).toBeVisible();
-  await expect(productImage).toHaveAttribute('src', '/assets/lidswitch-panel.png');
-  await expect(productImage).toHaveAttribute('alt', /Keep awake when plugged in/);
-  await expect(productImage).toHaveAttribute('alt', /Allow on battery/);
+  const productPreview = page.getByRole('img', { name: /LidSwitch menu panel/i });
+  const primaryCta = page.getByRole('link', { name: /Get the DMG/i }).first();
+  await expect(productPreview).toBeVisible();
+  await expect(primaryCta).toBeVisible();
+  await expect(page.locator('.hero-visual > img')).toHaveCount(0);
+
+  const imageBox = await productPreview.boundingBox();
+  const primaryCtaBox = await primaryCta.boundingBox();
+  const heroTitleBox = await page.getByRole('heading', { name: 'Close the lid. Let the job finish.' }).boundingBox();
+
+  expect(imageBox).not.toBeNull();
+  expect(primaryCtaBox).not.toBeNull();
+  expect(heroTitleBox).not.toBeNull();
+  expect(imageBox.width).toBeLessThanOrEqual(460);
+  expect(imageBox.x).toBeGreaterThan(heroTitleBox.x + heroTitleBox.width);
+  expect(imageBox.x + imageBox.width).toBeLessThanOrEqual(1022);
+  expect(primaryCtaBox.y + primaryCtaBox.height).toBeLessThanOrEqual(728);
+});
+
+test('product preview has useful accessible context without bitmap scaling', async ({ page }) => {
+  await page.goto('/');
+  const productPreview = page.getByRole('img', { name: /LidSwitch menu panel/i });
+  await expect(productPreview).toBeVisible();
+  await expect(productPreview).toHaveClass(/app-panel-preview/);
+  await expect(productPreview).toHaveAttribute('aria-label', /Keep awake when plugged in/);
+  await expect(productPreview).toHaveAttribute('aria-label', /Allow on battery/);
+  await expect(productPreview).toHaveAttribute('aria-label', /Restore/);
 });
 
 test('architecture support is disclosed clearly', async ({ page }) => {

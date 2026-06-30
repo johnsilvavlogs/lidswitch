@@ -81,6 +81,8 @@ const greenDark = rootVariable('green-dark');
 const buttonPrimary = block('.button-primary');
 const buttonText = resolveColor(property(buttonPrimary, 'color'));
 const buttonBackgroundStops = property(buttonPrimary, 'background').match(/#[0-9a-fA-F]{6}/g) || [];
+const ribbon = block('.launch-ribbon');
+const ribbonText = resolveColor(property(ribbon, 'color'));
 
 if (buttonBackgroundStops.length < 2) {
   throw new Error('Primary button background must include at least two explicit hex stops.');
@@ -93,6 +95,8 @@ for (const stop of buttonBackgroundStops) {
 assertContrast('Eyebrow text on white', greenDark, '#ffffff');
 assertContrast('Eyebrow text on cream', greenDark, cream);
 assertContrast('Eyebrow text on cream-2', greenDark, cream2);
+assertContrast('Ribbon text on white', ribbonText, '#ffffff');
+assertContrast('Ribbon text on light green ribbon', ribbonText, '#e8f9e8');
 assertContrast('Step number text', '#ffffff', green);
 
 console.log('contrast check ok');
