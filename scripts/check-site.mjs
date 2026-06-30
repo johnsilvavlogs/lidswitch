@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
 const html = readFileSync(join(root, 'site/index.html'), 'utf8');
+const normalizedHtml = html.replace(/\s+/g, ' ');
 const css = readFileSync(join(root, 'site/styles.css'), 'utf8');
 const screenshot = statSync(join(root, 'site/assets/lidswitch-panel.png'));
 const publicTextFiles = [
@@ -16,24 +17,27 @@ const publicTextFiles = [
 
 const required = [
   'Close the lid. Let the job finish.',
-  "For Mac jobs you can't babysit.",
+  'Long Mac job? Plug in. Close the lid. Let it finish.',
   'app-panel-preview',
+  'Download free DMG',
   'Review source on GitHub',
   'github-mark',
-  'Not App Store distributed or notarized',
+  'Manual install, disclosed up front',
+  'not App Store distributed or notarized',
   'Open Anyway',
-  'No credentials stored',
-  'Battery opt-in',
-  'A power switch you can inspect',
+  'No credentials or telemetry',
+  'does not collect, transmit, or store',
+  'Battery stays opt-in',
+  'Trust through control',
   'Keep awake when plugged in',
   'Allow on battery',
-  'Requires an Apple Silicon Mac with macOS 14 or newer',
+  'Apple Silicon Macs on macOS 14 or newer',
   'independent open-source project',
   'not affiliated with Apple'
 ];
 
 for (const phrase of required) {
-  if (!html.includes(phrase)) {
+  if (!html.includes(phrase) && !normalizedHtml.includes(phrase)) {
     throw new Error(`Missing required site phrase: ${phrase}`);
   }
 }

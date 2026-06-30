@@ -2,9 +2,9 @@ import { expect, test } from '@playwright/test';
 
 test('hero communicates the job and primary actions', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByRole('note')).toContainText("For Mac jobs you can't babysit.");
+  await expect(page.getByRole('note')).toContainText('Long Mac job? Plug in. Close the lid. Let it finish.');
   await expect(page.getByRole('heading', { name: 'Close the lid. Let the job finish.' })).toBeVisible();
-  await expect(page.getByRole('link', { name: /Get the DMG/i }).first()).toHaveAttribute(
+  await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toHaveAttribute(
     'href',
     'https://github.com/johnsilvavlogs/lidswitch/releases/latest'
   );
@@ -17,25 +17,26 @@ test('hero communicates the job and primary actions', async ({ page }) => {
 
 test('manual install friction is explicit before download', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText(/Not App Store distributed or notarized/i)).toBeVisible();
+  await expect(page.getByText(/Manual install, disclosed up front/i)).toBeVisible();
+  await expect(page.getByText(/not App Store distributed or\s+notarized/i)).toBeVisible();
   await expect(page.getByText(/Open Anyway/i).first()).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Straightforward, with the friction disclosed.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'A manual install with the approval steps up front.' })).toBeVisible();
 });
 
 test('safety and open-source trust claims are visible and bounded', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText('A power switch you can inspect')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Inspect it. Install it. Remove it.' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'No credentials stored' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Battery opt-in' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Easy to remove' })).toBeVisible();
+  await expect(page.getByText('Trust through control')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Know what changes. Undo it fast.' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'No credentials or telemetry' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Battery stays opt-in' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Restore is not hidden' })).toBeVisible();
 });
 
 test('hero product preview stays secondary at annotated desktop viewport', async ({ page }) => {
   await page.setViewportSize({ width: 1022, height: 728 });
   await page.goto('/');
   const productPreview = page.getByRole('img', { name: /LidSwitch menu panel/i });
-  const primaryCta = page.getByRole('link', { name: /Get the DMG/i }).first();
+  const primaryCta = page.getByRole('link', { name: /Download free DMG/i }).first();
   await expect(productPreview).toBeVisible();
   await expect(primaryCta).toBeVisible();
   await expect(page.locator('.hero-visual > img')).toHaveCount(0);
@@ -65,7 +66,7 @@ test('product preview has useful accessible context without bitmap scaling', asy
 
 test('architecture support is disclosed clearly', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText(/Requires an Apple Silicon Mac with macOS 14 or newer/i)).toBeVisible();
+  await expect(page.getByText(/Apple Silicon Macs on macOS 14 or newer/i)).toBeVisible();
 });
 
 test('generated LidSwitch icons render in the brand and use-case cards', async ({ page }) => {
@@ -102,7 +103,7 @@ test('keyboard users can reach the core actions', async ({ page }) => {
   await page.keyboard.press('Tab');
   await expect(page.getByLabel('Primary navigation').getByRole('link', { name: 'GitHub', exact: true })).toBeFocused();
   await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: /Get the DMG/i }).first()).toBeFocused();
+  await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first()).toBeFocused();
 });
@@ -111,7 +112,7 @@ test('responsive layouts avoid horizontal overflow', async ({ page }) => {
   await page.goto('/');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(1);
-  await expect(page.getByRole('link', { name: /Get the DMG/i }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toBeVisible();
 });
 
 test('footer exposes install and privacy documentation links', async ({ page }) => {
