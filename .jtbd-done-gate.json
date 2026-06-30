@@ -19,10 +19,12 @@
       "steps": [
         "Swift build",
         "Swift tests",
+        "Shell script syntax",
         "Helper script syntax",
         "Helper plist syntax",
         "App bundle launch",
-        "Live menu bar power smoke"
+        "Live menu bar power smoke",
+        "DMG artifact validation"
       ],
       "require_product_steps": true,
       "require_frontend_if_applicable": false
@@ -47,6 +49,7 @@
       "steps": [
         "Site static claim check",
         "Site Playwright UI",
+        "Shell script syntax",
         "DMG packaging dry run",
         "Open-source secret scan"
       ],
@@ -71,6 +74,13 @@
       "run": "/usr/bin/arch -arm64 swift test",
       "profiles": ["native-macos", "full-release"],
       "affects": ["Package.swift", "Sources/**", "Tests/**"]
+    },
+    {
+      "name": "Shell script syntax",
+      "kind": "quality",
+      "run": "bash -n script/build_and_run.sh script/build_dmg.sh script/validate_dmg.sh script/validate_live_state.sh scripts/run-jtbd-gate.sh",
+      "profiles": ["native-macos", "public-launch", "full-release"],
+      "affects": ["script/build_and_run.sh", "script/build_dmg.sh", "script/validate_dmg.sh", "script/validate_live_state.sh", "scripts/run-jtbd-gate.sh", ".jtbd-done-gate.json"]
     },
     {
       "name": "Helper script syntax",
@@ -99,6 +109,13 @@
       "run": "./script/validate_live_state.sh",
       "profiles": ["native-macos", "full-release"],
       "affects": ["Package.swift", "Sources/**", "script/**"]
+    },
+    {
+      "name": "DMG artifact validation",
+      "kind": "product",
+      "run": "./script/validate_dmg.sh",
+      "profiles": ["native-macos", "full-release"],
+      "affects": ["Package.swift", "Resources/**", "Sources/**", "script/build_and_run.sh", "script/build_dmg.sh", "script/validate_dmg.sh"]
     },
     {
       "name": "Site static claim check",

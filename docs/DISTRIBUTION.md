@@ -26,7 +26,15 @@ This project is set up for a small technical-friends release.
    ./script/build_dmg.sh
    ```
 
-3. Confirm `dist/LidSwitch.dmg.sha256`.
+3. Validate the release artifact:
+
+   ```bash
+   ./script/validate_dmg.sh
+   ```
+
+   This confirms the checksum, mounted app signature, and expected Gatekeeper
+   rejection for the manual approval flow.
+
 4. Create a GitHub Release.
 5. Attach the Apple Silicon `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`.
 6. Tell recipients to expect macOS manual approval on first launch.

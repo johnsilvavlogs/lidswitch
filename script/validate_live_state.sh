@@ -3,7 +3,11 @@ set -euo pipefail
 
 APP_NAME="LidSwitch"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_BINARY="$ROOT_DIR/dist/$APP_NAME.app/Contents/MacOS/$APP_NAME"
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT="${TMP_ROOT%/}"
+APP_STAGE_ROOT="${LIDSWITCH_APP_STAGE_ROOT:-$TMP_ROOT/lidswitch-app}"
+APP_BUNDLE="${LIDSWITCH_APP_BUNDLE:-$APP_STAGE_ROOT/$APP_NAME.app}"
+APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 HELPER_LABEL="com.johnsilva.lidswitch.helper"
 DESIRED_STATE="$HOME/Library/Application Support/LidSwitch/desired-state"
 HELPER="/Library/Application Support/LidSwitch/lidswitch-helper"
@@ -16,13 +20,40 @@ fail() {
   exit 1
 }
 
-running_app_binary() {
-  pgrep -x "$APP_NAME" | while read -r pid; do
-    ps -p "$pid" -o comm= 2>/dev/null || true
-  done | grep -Fx "$APP_BINARY" | head -n 1
+normalize_path() {
+  local path="$1"
+  while [[ "$path" == *//* ]]; do
+    path="${path//\/\//\/}"
+  done
+  case "$path" in
+    /private/var/*)
+      printf '/var/%s\n' "${path#/private/var/}"
+      ;;
+    *)
+      printf '%s\n' "$path"
+      ;;
+  esac
 }
 
-test "$(running_app_binary)" = "$APP_BINARY" || fail "$APP_NAME process from $APP_BINARY is not running"
+executable_path_for_pid() {
+  /usr/sbin/lsof -a -p "$1" -Fn 2>/dev/null | awk '
+    $0 == "ftxt" { text = 1; next }
+    text && substr($0, 1, 1) == "n" { print substr($0, 2); exit }
+  '
+}
+
+running_app_binary() {
+  local expected path
+  expected="$(normalize_path "$APP_BINARY")"
+  pgrep -x "$APP_NAME" | while read -r pid; do
+    path="$(executable_path_for_pid "$pid")"
+    if [ "$(normalize_path "$path")" = "$expected" ]; then
+      printf '%s\n' "$path"
+    fi
+  done | head -n 1
+}
+
+test -n "$(running_app_binary)" || fail "$APP_NAME process from $APP_BINARY is not running"
 
 launchctl print "system/$HELPER_LABEL" >/dev/null || fail "$HELPER_LABEL is not loaded"
 test -x "$HELPER" || fail "helper executable is missing"

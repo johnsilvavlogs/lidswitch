@@ -7,8 +7,10 @@ BUNDLE_ID="com.johnsilva.LidSwitch"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST_DIR="$ROOT_DIR/dist"
-APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT="${TMP_ROOT%/}"
+APP_STAGE_ROOT="${LIDSWITCH_APP_STAGE_ROOT:-$TMP_ROOT/lidswitch-app}"
+APP_BUNDLE="${LIDSWITCH_APP_BUNDLE:-$APP_STAGE_ROOT/$APP_NAME.app}"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
@@ -17,6 +19,32 @@ INFO_PLIST="$APP_CONTENTS/Info.plist"
 ICON_SOURCE="$ROOT_DIR/Resources/$APP_NAME.icns"
 ICON_FILE="$APP_NAME.icns"
 
+clean_bundle_metadata() {
+  local target="$1"
+  /usr/bin/find "$target" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  /usr/bin/xattr -cr "$target" 2>/dev/null || true
+  /usr/bin/xattr -d com.apple.FinderInfo "$target" 2>/dev/null || true
+  /usr/bin/xattr -d 'com.apple.fileprovider.fpfs#P' "$target" 2>/dev/null || true
+  /usr/bin/xattr -d com.apple.provenance "$target" 2>/dev/null || true
+  /usr/bin/find "$target" -exec /usr/bin/xattr -d com.apple.FinderInfo {} + 2>/dev/null || true
+  /usr/bin/find "$target" -exec /usr/bin/xattr -d 'com.apple.fileprovider.fpfs#P' {} + 2>/dev/null || true
+  /usr/bin/find "$target" -exec /usr/bin/xattr -d com.apple.provenance {} + 2>/dev/null || true
+}
+
+sign_bundle_ad_hoc() {
+  local target="$1"
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    clean_bundle_metadata "$target"
+    if /usr/bin/codesign --force --sign - "$target" >/dev/null 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  clean_bundle_metadata "$target"
+  /usr/bin/codesign --force --sign - "$target" >/dev/null
+}
+
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 /usr/bin/arch -arm64 swift build
@@ -24,14 +52,14 @@ BUILD_BINARY="$(/usr/bin/arch -arm64 swift build --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
-cp "$BUILD_BINARY" "$APP_BINARY"
+COPYFILE_DISABLE=1 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
 
 if [ ! -f "$ICON_SOURCE" ]; then
   echo "Missing app icon: $ICON_SOURCE" >&2
   exit 1
 fi
-cp "$ICON_SOURCE" "$APP_RESOURCES/$ICON_FILE"
+COPYFILE_DISABLE=1 cp "$ICON_SOURCE" "$APP_RESOURCES/$ICON_FILE"
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -60,17 +88,43 @@ cat >"$INFO_PLIST" <<PLIST
 </plist>
 PLIST
 
-/usr/bin/xattr -cr "$APP_BUNDLE" 2>/dev/null || true
-/usr/bin/codesign --force --sign - "$APP_BUNDLE" >/dev/null
+sign_bundle_ad_hoc "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
 }
 
+normalize_path() {
+  local path="$1"
+  while [[ "$path" == *//* ]]; do
+    path="${path//\/\//\/}"
+  done
+  case "$path" in
+    /private/var/*)
+      printf '/var/%s\n' "${path#/private/var/}"
+      ;;
+    *)
+      printf '%s\n' "$path"
+      ;;
+  esac
+}
+
+executable_path_for_pid() {
+  /usr/sbin/lsof -a -p "$1" -Fn 2>/dev/null | awk '
+    $0 == "ftxt" { text = 1; next }
+    text && substr($0, 1, 1) == "n" { print substr($0, 2); exit }
+  '
+}
+
 running_app_binary() {
+  local expected path
+  expected="$(normalize_path "$APP_BINARY")"
   pgrep -x "$APP_NAME" | while read -r pid; do
-    ps -p "$pid" -o comm= 2>/dev/null || true
-  done | grep -Fx "$APP_BINARY" | head -n 1
+    path="$(executable_path_for_pid "$pid")"
+    if [ "$(normalize_path "$path")" = "$expected" ]; then
+      printf '%s\n' "$path"
+    fi
+  done | head -n 1
 }
 
 case "$MODE" in
@@ -91,7 +145,7 @@ case "$MODE" in
   --verify|verify)
     open_app
     sleep 2
-    test "$(running_app_binary)" = "$APP_BINARY"
+    test -n "$(running_app_binary)"
     ;;
   *)
     echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2

@@ -24,6 +24,7 @@ const required = [
   'Keep awake when plugged in',
   'Allow on battery',
   'Requires an Apple Silicon Mac with macOS 14 or newer',
+  'independent open-source project',
   'not affiliated with Apple'
 ];
 
