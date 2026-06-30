@@ -5,7 +5,7 @@ plugged-in MacBook can stay awake with the lid closed.
 
 ## Data
 
-LidSwitch does not collect, transmit, or store:
+The LidSwitch Mac app does not collect, transmit, or store:
 
 - passwords
 - API keys
@@ -47,3 +47,19 @@ you explicitly enable battery keep-awake in the app.
 ## Network
 
 LidSwitch does not require a network connection for normal operation.
+
+## Website Analytics
+
+The public landing page uses Vercel Web Analytics for aggregate website traffic:
+page views, referrers, device/browser class, geography, and visited paths such
+as `/download/`.
+
+The website does not add ad pixels, marketing cookies, or fingerprinting scripts.
+
+The download button routes through `/download/` so the Vercel dashboard can show
+download intent. The DMG itself is hosted on GitHub Releases, and actual release
+asset download counts are reported by GitHub for `LidSwitch.dmg` and
+`LidSwitch.dmg.sha256`.
+
+The Mac app still sends no telemetry and does not contact LidSwitch servers for
+normal operation.

@@ -15,7 +15,7 @@ This project is set up for a small technical-friends release.
 - Not a Mac App Store app
 - Not notarized
 - Not affiliated with Apple
-- Not a background account, analytics, or cloud service
+- The Mac app is not a background account, analytics, or cloud service
 
 ## Release Checklist
 
@@ -51,7 +51,19 @@ This project is set up for a small technical-friends release.
    ```
 
 9. Confirm the landing page download CTA reaches the release.
-10. Tell recipients to expect macOS manual approval on first launch.
+10. Confirm Web Analytics is enabled for the Vercel project:
+
+   ```bash
+   npx -y vercel@latest project web-analytics --format json --scope team_fs4VucfgpyXLHSRITEcuK5gu
+   ```
+
+11. Check current release asset download counts:
+
+   ```bash
+   npm run analytics:downloads
+   ```
+
+12. Tell recipients to expect macOS manual approval on first launch.
 
 Do not make the repository public until the final secret scan and launch review
 are complete.

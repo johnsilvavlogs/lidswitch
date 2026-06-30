@@ -6,7 +6,7 @@ test('hero communicates the job and primary actions', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Close the lid. Let the job finish.' })).toBeVisible();
   await expect(page.getByRole('link', { name: /Download free DMG/i }).first()).toHaveAttribute(
     'href',
-    'https://github.com/johnsilvavlogs/lidswitch/releases/latest'
+    '/download/'
   );
   await expect(page.getByRole('link', { name: /Review source on GitHub/i }).first()).toHaveAttribute(
     'href',
@@ -27,7 +27,9 @@ test('safety and public-source trust claims are visible and bounded', async ({ p
   await page.goto('/');
   await expect(page.getByText('Trust through control')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Know what changes. Undo it fast.' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'No credentials or telemetry' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'No app telemetry' })).toBeVisible();
+  await expect(page.getByText(/Vercel Web Analytics for aggregate traffic/i)).toBeVisible();
+  await expect(page.getByText(/GitHub counts release downloads/i)).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Battery stays opt-in' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Restore is not hidden' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Source is public' })).toBeVisible();
@@ -142,6 +144,7 @@ test('download page hands off to GitHub Releases', async ({ page }) => {
   await expect(page.getByText(/DMG is published on GitHub Releases/i)).toBeVisible();
   await expect(page.getByText(/not App Store distributed or notarized/i)).toBeVisible();
   await expect(page.getByText(/Open Anyway/i)).toBeVisible();
+  await expect(page.getByText(/download intent/i)).toBeVisible();
   await expect(page.locator('meta[http-equiv="refresh"]')).toHaveAttribute(
     'content',
     '3; url=https://github.com/johnsilvavlogs/lidswitch/releases/latest'
@@ -151,4 +154,11 @@ test('download page hands off to GitHub Releases', async ({ page }) => {
     'https://github.com/johnsilvavlogs/lidswitch/releases/latest'
   );
   await expect(page.getByRole('link', { name: 'Return to LidSwitch' })).toHaveAttribute('href', '/');
+});
+
+test('Vercel Web Analytics script is present on public pages', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('script[src="/_vercel/insights/script.js"]')).toHaveCount(1);
+  await page.goto('/download/', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('script[src="/_vercel/insights/script.js"]')).toHaveCount(1);
 });

@@ -133,6 +133,14 @@ checksum:
 npm run launch:check-public
 ```
 
+Website visits are tracked with Vercel Web Analytics. DMG download intent is
+visible as visits to `/download/`, and actual release-asset counts are available
+from GitHub:
+
+```bash
+npm run analytics:downloads
+```
+
 For native changes, also run `swift build`, `swift test`, and
 `./script/build_and_run.sh --verify`. For installed-helper changes, run
 `./script/validate_live_state.sh` on a Mac where LidSwitch is installed and
