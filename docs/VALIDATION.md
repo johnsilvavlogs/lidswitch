@@ -56,17 +56,18 @@ npm run site:test
 ```
 
 `site:check` verifies the static page contains the required manual-install,
-open-source, privacy, and safety claims while rejecting common fake launch claims
-such as fake stars, testimonials, Apple affiliation, analytics, or notarization
-promises. It also checks that the primary CTA, numbered step badges, and green
-eyebrow/accent text meet the WCAG AA 4.5:1 contrast threshold for normal text.
+privacy, safety, and launch-status claims while rejecting common fake launch
+claims such as fake stars, testimonials, Apple affiliation, analytics, or
+notarization promises. It also checks that the primary CTA, numbered step
+badges, and green eyebrow/accent text meet the WCAG AA 4.5:1 contrast threshold
+for normal text.
 
 `site:test` runs Playwright against the static site across desktop, tablet, and
 mobile projects. The tests cover:
 
 - hero comprehension and primary CTAs
 - manual Gatekeeper/Open Anyway disclosure
-- safety and open-source trust claims
+- safety and launch-status trust claims
 - product screenshot accessibility text, including the current primary toggle and battery opt-in labels
 - keyboard focus order
 - responsive overflow
