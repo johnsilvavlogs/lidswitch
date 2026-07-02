@@ -26,11 +26,16 @@ work/
 tmp/
 .tmp/
 pkg/
+.direnv/
 
 # Local secrets and OS metadata
 .env
 .env.*
+.envrc
+.envrc.*
 !.env.example
 !.env.sample
+!.envrc.example
+!.envrc.sample
 .DS_Store
 ._*
