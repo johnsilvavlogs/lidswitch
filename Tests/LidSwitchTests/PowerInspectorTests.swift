@@ -289,6 +289,93 @@ final class PowerInspectorTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "keep this\n")
     }
 
+    func testDesiredStateStoreRejectsNonRegularStateFile() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        XCTAssertEqual(mkfifo(stateFile.path, S_IRUSR | S_IWUSR), 0)
+
+        XCTAssertThrowsError(
+            try DesiredStateStore.write(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+    }
+
+    func testHelperLifecycleDesiredStateIgnoresUnsafeStateFileWithoutTouchingTarget() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        let target = root.appendingPathComponent("target-state", isDirectory: false)
+        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        try "keep this\n".write(to: target, atomically: true, encoding: .utf8)
+        XCTAssertEqual(symlink(target.path, stateFile.path), 0)
+
+        XCTAssertNoThrow(
+            try HelperLifecycleDesiredState.writeBestEffort(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "keep this\n")
+    }
+
+    func testHelperLifecycleDesiredStateIgnoresNonRegularStateFile() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
+        XCTAssertEqual(mkfifo(stateFile.path, S_IRUSR | S_IWUSR), 0)
+
+        XCTAssertNoThrow(
+            try HelperLifecycleDesiredState.writeBestEffort(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+    }
+
+    func testHelperLifecycleDesiredStateIgnoresUnsafeSupportDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        XCTAssertEqual(symlink(target.path, supportDirectory.path), 0)
+
+        XCTAssertNoThrow(
+            try HelperLifecycleDesiredState.writeBestEffort(
+                .disabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+    }
+
+    func testHelperLifecycleDesiredStateStillThrowsNonUnsafeWriteFailures() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = root.appendingPathComponent("missing-parent/desired-state", isDirectory: false)
+
+        XCTAssertThrowsError(
+            try HelperLifecycleDesiredState.writeBestEffort(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        )
+    }
+
     func testInstalledHelperArtifactsAllowShellTrailingNewline() {
         XCTAssertFalse(
             PowerInspector.helperNeedsUpdate(
