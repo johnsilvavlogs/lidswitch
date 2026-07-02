@@ -54,8 +54,9 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try HelperLifecycleDesiredState.writeBestEffort(preferences)
-                try PrivilegedHelperManager.install(initialPreferences: preferences)
+                try HelperLifecycleDesiredState.performAfterBestEffortWrite(preferences) {
+                    try PrivilegedHelperManager.install(initialPreferences: preferences)
+                }
                 try? await Task.sleep(nanoseconds: 1_200_000_000)
                 let nextSnapshot = PowerInspector.snapshot()
                 await MainActor.run {
@@ -133,8 +134,9 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try HelperLifecycleDesiredState.writeBestEffort(.disabled)
-                try PrivilegedHelperManager.restoreSleepNow()
+                try HelperLifecycleDesiredState.performAfterBestEffortWrite(.disabled) {
+                    try PrivilegedHelperManager.restoreSleepNow()
+                }
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 let nextSnapshot = PowerInspector.snapshot()
                 await MainActor.run {
@@ -164,8 +166,9 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try HelperLifecycleDesiredState.writeBestEffort(.disabled)
-                try PrivilegedHelperManager.uninstall()
+                try HelperLifecycleDesiredState.performAfterBestEffortWrite(.disabled) {
+                    try PrivilegedHelperManager.uninstall()
+                }
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 let nextSnapshot = PowerInspector.snapshot()
                 await MainActor.run {

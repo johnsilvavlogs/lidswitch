@@ -14,11 +14,25 @@ enum HelperLifecycleDesiredState {
             )
         } catch let error as DesiredStateStore.StoreError {
             switch error {
-            case .unsafePath(_, .stateFile):
+            case .unsafePath:
                 return
             default:
                 throw error
             }
         }
+    }
+
+    static func performAfterBestEffortWrite(
+        _ preferences: PowerPreferences,
+        supportDirectory: URL = AppPaths.userSupportDirectory,
+        stateFile: URL = AppPaths.desiredStateFile,
+        operation: () throws -> Void
+    ) throws {
+        try writeBestEffort(
+            preferences,
+            supportDirectory: supportDirectory,
+            stateFile: stateFile
+        )
+        try operation()
     }
 }
