@@ -54,7 +54,7 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try DesiredStateStore.write(preferences)
+                try HelperLifecycleDesiredState.writeBestEffort(preferences)
                 try PrivilegedHelperManager.install(initialPreferences: preferences)
                 try? await Task.sleep(nanoseconds: 1_200_000_000)
                 let nextSnapshot = PowerInspector.snapshot()
@@ -133,7 +133,7 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try DesiredStateStore.write(.disabled)
+                try HelperLifecycleDesiredState.writeBestEffort(.disabled)
                 try PrivilegedHelperManager.restoreSleepNow()
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 let nextSnapshot = PowerInspector.snapshot()
@@ -164,7 +164,7 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             do {
-                try DesiredStateStore.write(.disabled)
+                try HelperLifecycleDesiredState.writeBestEffort(.disabled)
                 try PrivilegedHelperManager.uninstall()
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 let nextSnapshot = PowerInspector.snapshot()
