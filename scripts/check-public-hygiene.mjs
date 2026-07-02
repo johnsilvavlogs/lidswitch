@@ -22,7 +22,8 @@ const blockedPathRules = [
   ['local Vercel state', /^\.vercel(?:\/|$)/],
   ['local direnv state', /^\.direnv(?:\/|$)/],
   ['local scratch workspace', /^(?:work|tmp|\.tmp|pkg)(?:\/|$)/],
-  ['release binary', /\.(?:dmg|pkg|xcresult)$/],
+  ['release binary', /\.(?:dmg|pkg)$/],
+  ['Xcode result bundle', /(?:^|\/)[^/]+\.xcresult(?:\/|$)/],
   ['macOS metadata', /(?:^|\/)(?:\.DS_Store|._[^/]+)$/]
 ];
 
