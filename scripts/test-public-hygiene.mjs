@@ -21,8 +21,8 @@ function writeFixture(root, relativePath, value) {
 
 function trackFixture(root, relativePath, value) {
   writeFixture(root, relativePath, value);
-  const result = spawnSync('git', ['add', relativePath], { cwd: root, encoding: 'utf8' });
-  assert(result.status === 0, `git add ${relativePath} failed: ${result.stderr}`);
+  const result = spawnSync('git', ['add', '-f', relativePath], { cwd: root, encoding: 'utf8' });
+  assert(result.status === 0, `git add -f ${relativePath} failed: ${result.stderr}`);
 }
 
 function runChecker(root) {
@@ -81,6 +81,27 @@ function assertIgnoreFileIncludes(relativePath, requiredLines) {
   }
 }
 
+function withGlobalExcludes(patterns, callback) {
+  const home = mkdtempSync(join(tmpdir(), 'lidswitch-public-hygiene-home-'));
+  const originalHome = process.env.HOME;
+
+  try {
+    const excludesPath = join(home, 'global-excludes');
+    writeFileSync(excludesPath, `${patterns.join('\n')}\n`);
+    writeFileSync(join(home, '.gitconfig'), `[core]\n\texcludesfile = ${excludesPath}\n`);
+
+    process.env.HOME = home;
+    callback();
+  } finally {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 assertIgnoreFileIncludes('.gitignore', ['.direnv/', '.envrc', '.envrc.*']);
 assertIgnoreFileIncludes('.vercelignore', ['.direnv', '.envrc', '.envrc.*']);
 
@@ -102,5 +123,21 @@ for (const relativePath of ['.envrc', '.envrc.local', '.env.production']) {
 }
 
 assertTrackedFilesPass(['.env.example', '.env.sample', '.envrc.example', '.envrc.sample']);
+
+withGlobalExcludes(['.env*', '.direnv'], () => {
+  assertTrackedFileFails('.envrc');
+  assertTrackedFileFails('.envrc.local');
+
+  const root = makeTempRepo();
+  try {
+    trackFixture(root, '.direnv/allow', 'local direnv state\n');
+    const result = runChecker(root);
+
+    assert(result.status === 1, '.direnv/allow should fail the hygiene check even when globally ignored');
+    assert(result.stderr.includes('.direnv/allow: tracked local direnv state'), '.direnv failure should name the globally ignored direnv state');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 console.log('public hygiene regression ok');
