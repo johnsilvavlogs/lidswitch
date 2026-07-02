@@ -2,8 +2,13 @@ import Foundation
 import Darwin
 
 enum DesiredStateStore {
+    enum UnsafePathKind {
+        case supportDirectory
+        case stateFile
+    }
+
     enum StoreError: Error {
-        case unsafePath(String)
+        case unsafePath(String, UnsafePathKind)
         case openFailed(String, Int32)
         case writeFailed(String, Int32)
     }
@@ -49,6 +54,8 @@ enum DesiredStateStore {
 
     private static func prepareSupportDirectory(_ directory: URL) throws {
         let fileManager = FileManager.default
+        try assertParentDirectoryIsSafe(for: directory)
+
         if fileManager.fileExists(atPath: directory.path) {
             try assertDirectoryIsSafe(directory)
             return
@@ -58,13 +65,23 @@ enum DesiredStateStore {
             at: directory,
             withIntermediateDirectories: true
         )
+        try assertParentDirectoryIsSafe(for: directory)
         try assertDirectoryIsSafe(directory)
+    }
+
+    private static func assertParentDirectoryIsSafe(for directory: URL) throws {
+        let parent = directory.deletingLastPathComponent()
+        guard parent.path != directory.path, FileManager.default.fileExists(atPath: parent.path) else {
+            return
+        }
+
+        try assertDirectoryIsSafe(parent)
     }
 
     private static func assertDirectoryIsSafe(_ directory: URL) throws {
         let status = try lstatStatus(directory)
         if isSymlink(status) || !isDirectory(status) {
-            throw StoreError.unsafePath(directory.path)
+            throw StoreError.unsafePath(directory.path, .supportDirectory)
         }
     }
 
@@ -75,7 +92,7 @@ enum DesiredStateStore {
 
         let status = try lstatStatus(file)
         if isSymlink(status) || !isRegularFile(status) {
-            throw StoreError.unsafePath(file.path)
+            throw StoreError.unsafePath(file.path, .stateFile)
         }
     }
 
@@ -112,7 +129,7 @@ enum DesiredStateStore {
 
         var status = stat()
         guard fstat(fd, &status) == 0, isRegularFile(status) else {
-            throw StoreError.unsafePath(file.path)
+            throw StoreError.unsafePath(file.path, .stateFile)
         }
 
         let bytes = Array(payload.utf8)
