@@ -54,6 +54,19 @@ function assertTrackedFileFails(relativePath) {
   }
 }
 
+function assertTrackedPathFails(relativePath, label) {
+  const root = makeTempRepo();
+  try {
+    trackFixture(root, relativePath, 'fixture\n');
+    const result = runChecker(root);
+
+    assert(result.status === 1, `${relativePath} should fail the hygiene check`);
+    assert(result.stderr.includes(`${relativePath}: tracked ${label}`), `${relativePath} failure should name the tracked ${label}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function assertTrackedFilesPass(files) {
   const root = makeTempRepo();
   try {
@@ -121,6 +134,16 @@ for (const relativePath of ['.envrc', '.envrc.local', '.env.production']) {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+for (const relativePath of [
+  'TestResults.xcresult',
+  'TestResults.xcresult/Info.plist',
+  'nested/TestResults.xcresult/Info.plist'
+]) {
+  assertTrackedPathFails(relativePath, 'Xcode result bundle');
+}
+
+assertTrackedFilesPass(['docs/xcresult-notes.md', 'docs/TestResults.xcresult.md']);
 
 assertTrackedFilesPass(['.env.example', '.env.sample', '.envrc.example', '.envrc.sample']);
 
