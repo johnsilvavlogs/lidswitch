@@ -262,6 +262,32 @@ final class PowerInspectorTests: XCTestCase {
         )
     }
 
+    func testDesiredStateStoreRejectsSymlinkedSupportParentDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        let supportParent = root.appendingPathComponent("Application Support", isDirectory: true)
+        let supportDirectory = supportParent.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: target.appendingPathComponent("LidSwitch", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        XCTAssertEqual(symlink(target.path, supportParent.path), 0)
+
+        XCTAssertThrowsError(
+            try DesiredStateStore.write(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        ) { error in
+            guard case DesiredStateStore.StoreError.unsafePath(_, .supportDirectory) = error else {
+                return XCTFail("Expected unsafe support parent directory, got \(error)")
+            }
+        }
+    }
+
     func testDesiredStateStoreRejectsNonDirectorySupportPath() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -352,7 +378,7 @@ final class PowerInspectorTests: XCTestCase {
         )
     }
 
-    func testHelperLifecycleDesiredStateRejectsUnsafeSupportDirectory() throws {
+    func testHelperLifecycleDesiredStateRunsRecoveryOperationsAfterUnsafeSupportDirectory() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let target = root.appendingPathComponent("target", isDirectory: true)
@@ -366,20 +392,27 @@ final class PowerInspectorTests: XCTestCase {
         )
         XCTAssertEqual(symlink(target.path, supportDirectory.path), 0)
 
-        XCTAssertThrowsError(
-            try HelperLifecycleDesiredState.writeBestEffort(
-                .disabled,
-                supportDirectory: supportDirectory,
-                stateFile: stateFile
+        let operations: [(name: String, preferences: PowerPreferences)] = [
+            ("install", .acOnlyEnabled),
+            ("restore", .disabled),
+            ("uninstall", .disabled),
+        ]
+        var operationsRun: [String] = []
+        for operation in operations {
+            XCTAssertNoThrow(
+                try HelperLifecycleDesiredState.performAfterBestEffortWrite(
+                    operation.preferences,
+                    supportDirectory: supportDirectory,
+                    stateFile: stateFile
+                ) {
+                    operationsRun.append(operation.name)
+                }
             )
-        ) { error in
-            guard case DesiredStateStore.StoreError.unsafePath(_, .supportDirectory) = error else {
-                return XCTFail("Expected unsafe support directory, got \(error)")
-            }
         }
+        XCTAssertEqual(operationsRun, operations.map { $0.name })
     }
 
-    func testHelperLifecycleDesiredStateRejectsUnsafeSupportParentDirectory() throws {
+    func testHelperLifecycleDesiredStateRunsRecoveryOperationsAfterUnsafeSupportParentDirectory() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let target = root.appendingPathComponent("target", isDirectory: true)
@@ -397,17 +430,24 @@ final class PowerInspectorTests: XCTestCase {
         )
         XCTAssertEqual(symlink(target.path, supportParent.path), 0)
 
-        XCTAssertThrowsError(
-            try HelperLifecycleDesiredState.writeBestEffort(
-                .disabled,
-                supportDirectory: supportDirectory,
-                stateFile: stateFile
+        let operations: [(name: String, preferences: PowerPreferences)] = [
+            ("install", .acOnlyEnabled),
+            ("restore", .disabled),
+            ("uninstall", .disabled),
+        ]
+        var operationsRun: [String] = []
+        for operation in operations {
+            XCTAssertNoThrow(
+                try HelperLifecycleDesiredState.performAfterBestEffortWrite(
+                    operation.preferences,
+                    supportDirectory: supportDirectory,
+                    stateFile: stateFile
+                ) {
+                    operationsRun.append(operation.name)
+                }
             )
-        ) { error in
-            guard case DesiredStateStore.StoreError.unsafePath(_, .supportDirectory) = error else {
-                return XCTFail("Expected unsafe support parent directory, got \(error)")
-            }
         }
+        XCTAssertEqual(operationsRun, operations.map { $0.name })
     }
 
     func testHelperLifecycleDesiredStateStillThrowsNonUnsafeWriteFailures() throws {
@@ -423,6 +463,25 @@ final class PowerInspectorTests: XCTestCase {
                 stateFile: stateFile
             )
         )
+    }
+
+    func testHelperLifecycleDesiredStateDoesNotRunRecoveryOperationAfterNonUnsafeWriteFailure() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = root.appendingPathComponent("missing-parent/desired-state", isDirectory: false)
+
+        var operationRan = false
+        XCTAssertThrowsError(
+            try HelperLifecycleDesiredState.performAfterBestEffortWrite(
+                .acOnlyEnabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            ) {
+                operationRan = true
+            }
+        )
+        XCTAssertFalse(operationRan)
     }
 
     func testInstalledHelperArtifactsAllowShellTrailingNewline() {
