@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { extname, join, resolve } from 'node:path';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = process.env.LIDSWITCH_HYGIENE_ROOT
+  ? resolve(process.env.LIDSWITCH_HYGIENE_ROOT)
+  : new URL('..', import.meta.url).pathname;
 
 const trackedFiles = execFileSync('git', ['ls-files', '-z'], {
   cwd: root,
@@ -18,6 +20,7 @@ const blockedPathRules = [
   ['local agent state', /^(?:\.codex|\.agents|\.oracle|\.claude|\.cursor)(?:\/|$)/],
   ['local done-gate state', /^\.jtbd-done-gate(?:\.json|\/|$)/],
   ['local Vercel state', /^\.vercel(?:\/|$)/],
+  ['local direnv state', /^\.direnv(?:\/|$)/],
   ['local scratch workspace', /^(?:work|tmp|\.tmp|pkg)(?:\/|$)/],
   ['release binary', /\.(?:dmg|pkg|xcresult)$/],
   ['macOS metadata', /(?:^|\/)(?:\.DS_Store|._[^/]+)$/]
@@ -53,7 +56,10 @@ const contentRuleExemptions = new Set([
 
 function isBlockedEnvFile(file) {
   const name = file.split('/').pop() ?? '';
-  return /^\.env(?:$|\.)/.test(name)
+  return (name === '.env'
+    || name.startsWith('.env.')
+    || name === '.envrc'
+    || name.startsWith('.envrc.'))
     && !name.endsWith('.example')
     && !name.endsWith('.sample');
 }

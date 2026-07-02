@@ -24,8 +24,11 @@ work
 tmp
 .tmp
 pkg
+.direnv
 
 .env
 .env.*
+.envrc
+.envrc.*
 .DS_Store
 ._*
