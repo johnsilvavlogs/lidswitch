@@ -217,6 +217,15 @@ final class PowerInspectorTests: XCTestCase {
         XCTAssertTrue(script.contains("[ -L \"$state_file\" ] || [ ! -f \"$state_file\" ]"))
     }
 
+    func testPrivilegedHelperScriptFailsClosedOnUnsafeSupportDirectory() {
+        let script = PrivilegedHelperManager.diagnosticHelperScript()
+
+        XCTAssertTrue(script.contains("support_dir=\"$(/usr/bin/dirname \"$state_file\")\""))
+        XCTAssertTrue(script.contains("support_parent=\"$(/usr/bin/dirname \"$support_dir\")\""))
+        XCTAssertTrue(script.contains("[ -L \"$support_parent\" ] || [ ! -d \"$support_parent\" ]"))
+        XCTAssertTrue(script.contains("[ -L \"$support_dir\" ] || [ ! -d \"$support_dir\" ]"))
+    }
+
     func testDesiredStateStoreWritesRegularStateFile() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -343,22 +352,62 @@ final class PowerInspectorTests: XCTestCase {
         )
     }
 
-    func testHelperLifecycleDesiredStateIgnoresUnsafeSupportDirectory() throws {
+    func testHelperLifecycleDesiredStateRejectsUnsafeSupportDirectory() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let target = root.appendingPathComponent("target", isDirectory: true)
         let supportDirectory = root.appendingPathComponent("LidSwitch", isDirectory: true)
         let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try PowerPreferences.acOnlyEnabled.storagePayload.write(
+            to: target.appendingPathComponent("desired-state", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
         XCTAssertEqual(symlink(target.path, supportDirectory.path), 0)
 
-        XCTAssertNoThrow(
+        XCTAssertThrowsError(
             try HelperLifecycleDesiredState.writeBestEffort(
                 .disabled,
                 supportDirectory: supportDirectory,
                 stateFile: stateFile
             )
+        ) { error in
+            guard case DesiredStateStore.StoreError.unsafePath(_, .supportDirectory) = error else {
+                return XCTFail("Expected unsafe support directory, got \(error)")
+            }
+        }
+    }
+
+    func testHelperLifecycleDesiredStateRejectsUnsafeSupportParentDirectory() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        let supportParent = root.appendingPathComponent("Application Support", isDirectory: true)
+        let supportDirectory = supportParent.appendingPathComponent("LidSwitch", isDirectory: true)
+        let stateFile = supportDirectory.appendingPathComponent("desired-state", isDirectory: false)
+        try FileManager.default.createDirectory(
+            at: target.appendingPathComponent("LidSwitch", isDirectory: true),
+            withIntermediateDirectories: true
         )
+        try PowerPreferences.acOnlyEnabled.storagePayload.write(
+            to: target.appendingPathComponent("LidSwitch/desired-state", isDirectory: false),
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertEqual(symlink(target.path, supportParent.path), 0)
+
+        XCTAssertThrowsError(
+            try HelperLifecycleDesiredState.writeBestEffort(
+                .disabled,
+                supportDirectory: supportDirectory,
+                stateFile: stateFile
+            )
+        ) { error in
+            guard case DesiredStateStore.StoreError.unsafePath(_, .supportDirectory) = error else {
+                return XCTFail("Expected unsafe support parent directory, got \(error)")
+            }
+        }
     }
 
     func testHelperLifecycleDesiredStateStillThrowsNonUnsafeWriteFailures() throws {

@@ -14,7 +14,7 @@ enum HelperLifecycleDesiredState {
             )
         } catch let error as DesiredStateStore.StoreError {
             switch error {
-            case .unsafePath:
+            case .unsafePath(_, .stateFile):
                 return
             default:
                 throw error

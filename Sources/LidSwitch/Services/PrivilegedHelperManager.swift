@@ -145,6 +145,8 @@ enum PrivilegedHelperManager {
         set -u
 
         state_file=\(shellQuote(stateFile))
+        support_dir="$(/usr/bin/dirname "$state_file")"
+        support_parent="$(/usr/bin/dirname "$support_dir")"
         root_dir=\(shellQuote(AppPaths.rootSupportDirectory))
         original_ac_sleep=\(shellQuote(AppPaths.rootOriginalACSleepPath))
         original_battery_sleep=\(shellQuote(AppPaths.rootOriginalBatterySleepPath))
@@ -155,7 +157,7 @@ enum PrivilegedHelperManager {
           key="$1"
           default_value="$2"
 
-          if [ -L "$state_file" ] || [ ! -f "$state_file" ]; then
+          if [ -L "$support_parent" ] || [ ! -d "$support_parent" ] || [ -L "$support_dir" ] || [ ! -d "$support_dir" ] || [ -L "$state_file" ] || [ ! -f "$state_file" ]; then
             /bin/echo "$default_value"
             return
           fi
