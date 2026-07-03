@@ -79,14 +79,14 @@ struct LidSwitchPanel: View {
                 Text("Allow on battery")
                     .font(.subheadline.weight(.medium))
 
-                Text(batteryToggleDetail)
+                Text(controller.snapshot.batteryToggleDetail)
                     .font(.caption)
                     .foregroundStyle(controller.snapshot.batteryKeepAwakeEnabled ? .orange : .secondary)
             }
         }
         .toggleStyle(.switch)
         .accessibilityLabel("Allow on battery")
-        .accessibilityHint(batteryToggleHint)
+        .accessibilityHint(controller.snapshot.batteryToggleDetail)
         .accessibilityValue(controller.snapshot.batteryKeepAwakeEnabled ? "On" : "Off")
         .disabled(controller.isBusy || !controller.snapshot.desiredEnabled)
     }
@@ -219,26 +219,6 @@ struct LidSwitchPanel: View {
         return .secondary
     }
 
-    private var batteryToggleDetail: String {
-        if !controller.snapshot.desiredEnabled {
-            return "Turn on keep-awake first."
-        }
-
-        if controller.snapshot.batteryKeepAwakeEnabled {
-            if controller.snapshot.isOnBattery {
-                return "On now: lid-close sleep is blocked. Watch remaining charge."
-            }
-
-            return "Will also keep awake after unplugging. Battery can drain."
-        }
-
-        if controller.snapshot.isOnBattery {
-            return "Off now: lid close will sleep."
-        }
-
-        return "Off unless you explicitly allow it."
-    }
-
     private var enableToggleHint: String {
         if controller.snapshot.batteryKeepAwakeEnabled {
             return "Prevents lid-close sleep while connected to power and while running on battery."
@@ -247,11 +227,4 @@ struct LidSwitchPanel: View {
         return "Prevents lid-close sleep while connected to power. Battery lid-close sleep remains allowed."
     }
 
-    private var batteryToggleHint: String {
-        if !controller.snapshot.desiredEnabled {
-            return "Turn on Keep awake when plugged in before allowing battery mode."
-        }
-
-        return "Allows LidSwitch to prevent lid-close sleep while running from battery power."
-    }
 }
