@@ -5,6 +5,7 @@ const root = new URL('..', import.meta.url).pathname;
 const sourceExcludedDirs = new Set([
   '.agents',
   '.build',
+  '.direnv',
   '.git',
   '.jtbd-done-gate',
   '.playwright-artifacts',
