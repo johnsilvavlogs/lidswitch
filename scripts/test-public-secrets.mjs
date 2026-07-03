@@ -114,6 +114,25 @@ for (const prefix of ['ghp_', 'github_pat_', 'gho_', 'ghu_', 'ghs_', 'ghr_']) {
 
 {
   const root = makeTempRoot();
+  const ignoredValue = `gho_${tokenBody}`;
+  const scannedValue = `ghp_${tokenBody}`;
+  try {
+    writeFixture(root, '.direnv/env', `token = "${ignoredValue}"\n`);
+    writeFixture(root, '.config/lidswitch/settings.toml', `token = "${scannedValue}"\n`);
+    const result = runScanner(['--path', root]);
+
+    assert(result.status === 1, '.direnv should be excluded without skipping publishable hidden config');
+    assert(result.stderr.includes('.config/lidswitch/settings.toml'), 'publishable hidden config should still be scanned');
+    assert(!result.stderr.includes('.direnv/env'), '.direnv local state should not be reported');
+    assert(!result.stderr.includes(ignoredValue), '.direnv fixture leaked the matched value');
+    assert(!result.stderr.includes(scannedValue), 'hidden config fixture leaked the matched value');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
   const syntheticValue = `gho_${tokenBody}`;
   try {
     writeFixture(root, '.jtbd-done-gate/tmp/report.txt', `token = "${syntheticValue}"\n`);
