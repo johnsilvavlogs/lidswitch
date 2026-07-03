@@ -80,4 +80,48 @@ for (const prefix of ['ghp_', 'github_pat_', 'gho_', 'ghu_', 'ghs_', 'ghr_']) {
   }
 }
 
+{
+  const root = makeTempRoot();
+  const syntheticValue = `sk-${tokenBody}`;
+  try {
+    writeFixture(root, '.codex/environments/environment.toml', `OPENAI_API_KEY="${syntheticValue}"\n`);
+    const result = runScanner(['--path', root]);
+
+    assert(result.status === 1, 'source scan should inspect hidden config directories');
+    assert(result.stderr.includes('.codex/environments/environment.toml:1:openai-key'), 'hidden config finding should name the source file and detector');
+    assert(!result.stderr.includes(syntheticValue), 'hidden config scan leaked the matched value');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
+  const syntheticValue = `gho_${tokenBody}`;
+  try {
+    writeFixture(root, '.config/service/token.env', `SERVICE_TOKEN=${syntheticValue}\n`);
+    const result = runScanner(['--path', root]);
+
+    assert(result.status === 1, 'source scan should inspect non-special hidden config directories');
+    assert(result.stderr.includes('.config/service/token.env:1:github-token'), 'hidden dot-config finding should name the source file and detector');
+    assert(!result.stderr.includes(syntheticValue), 'hidden dot-config scan leaked the matched value');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
+  try {
+    writeFixture(root, '.git/hooks/pre-commit', `plain value gho_${tokenBody}\n`);
+    writeFixture(root, '.playwright-artifacts/trace.txt', `plain value gho_${tokenBody}\n`);
+    writeFixture(root, '.cache/build-output.txt', `plain value gho_${tokenBody}\n`);
+    const result = runScanner(['--path', root]);
+
+    assert(result.status === 0, 'source scan should keep ignoring hidden dependency and cache directories');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 console.log('public secret scanner regression ok');

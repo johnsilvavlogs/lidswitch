@@ -3,17 +3,17 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
 const sourceExcludedDirs = new Set([
-  '.agents',
   '.build',
-  '.claude',
-  '.codex',
-  '.cursor',
+  '.cache',
+  '.direnv',
   '.git',
   '.jtbd-done-gate',
-  '.oracle',
+  '.npm',
+  '.pnpm-store',
   '.playwright-artifacts',
   '.tmp',
   '.vercel',
+  '.yarn',
   'coverage',
   'DerivedData',
   'dist',
@@ -143,10 +143,6 @@ function scanFile(scanRoot, path) {
 
 function walk(scanRoot, dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (entry.name.startsWith('.') && !['.github', '.vercelignore', '.gitignore'].includes(entry.name)) {
-      if (entry.isDirectory()) continue;
-    }
-
     const path = join(dir, entry.name);
     const rel = relative(scanRoot, path);
 
