@@ -46,6 +46,17 @@ function assertFailsWithoutLeakingValue(prefix) {
   }
 }
 
+function assertGithubTokenReported(root, relativePath, message) {
+  const syntheticValue = `gho_${tokenBody}`;
+  writeFixture(root, relativePath, `token = "${syntheticValue}"\n`);
+  const result = runScanner(['--path', root]);
+
+  assert(result.status === 1, `${message} should fail the scan`);
+  assert(result.stderr.includes('github-token'), `${message} should report github-token`);
+  assert(result.stderr.includes(relativePath), `${message} should report the fixture path`);
+  assert(!result.stderr.includes(syntheticValue), `${message} leaked the matched value`);
+}
+
 for (const prefix of ['ghp_', 'github_pat_', 'gho_', 'ghu_', 'ghs_', 'ghr_']) {
   assertFailsWithoutLeakingValue(prefix);
 }
@@ -57,6 +68,59 @@ for (const prefix of ['ghp_', 'github_pat_', 'gho_', 'ghu_', 'ghs_', 'ghr_']) {
     const result = runScanner(['--path', root]);
 
     assert(result.status === 0, 'benign prefix mention should pass');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
+  try {
+    assertGithubTokenReported(
+      root,
+      '.codex/environments/environment.toml',
+      'committed .codex environment fixture'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
+  try {
+    assertGithubTokenReported(
+      root,
+      '.codex/worktrees/019f2580/nested/secret.txt',
+      'deep hidden config fixture'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
+  try {
+    assertGithubTokenReported(
+      root,
+      '.config/lidswitch/settings.toml',
+      'generic hidden config fixture'
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = makeTempRoot();
+  const syntheticValue = `gho_${tokenBody}`;
+  try {
+    writeFixture(root, '.jtbd-done-gate/tmp/report.txt', `token = "${syntheticValue}"\n`);
+    const result = runScanner(['--path', root]);
+
+    assert(result.status === 0, 'hidden gate state directory should stay excluded');
+    assert(!result.stderr.includes(syntheticValue), 'hidden gate state fixture leaked the matched value');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
