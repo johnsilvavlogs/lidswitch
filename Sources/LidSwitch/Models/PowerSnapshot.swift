@@ -140,6 +140,38 @@ struct PowerSnapshot: Equatable {
         return "No lid-awake override is active."
     }
 
+    var batteryToggleDetail: String {
+        if !desiredEnabled {
+            return "Turn on keep-awake first."
+        }
+
+        if batteryKeepAwakeEnabled {
+            if helperInstalled && helperNeedsUpdate {
+                return "Update the helper before battery mode can run."
+            }
+
+            if !helperInstalled {
+                return "Install the helper before battery mode can run."
+            }
+
+            if isOnBattery {
+                if sleepDisabled {
+                    return "On now: lid-close sleep is blocked. Watch remaining charge."
+                }
+
+                return "On now: waiting for the helper to block lid-close sleep."
+            }
+
+            return "Will also keep awake after unplugging. Battery can drain."
+        }
+
+        if isOnBattery {
+            return "Off now: lid close will sleep."
+        }
+
+        return "Off unless you explicitly allow it."
+    }
+
     var isOnBattery: Bool {
         if case .battery = source {
             return true

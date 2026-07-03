@@ -181,6 +181,105 @@ final class PowerInspectorTests: XCTestCase {
         XCTAssertFalse(snapshot.batterySleepAllowedNow)
     }
 
+    func testBatteryToggleDetailWaitsForSleepDisabledWhenBatteryOptInIsPending() {
+        let snapshot = PowerSnapshot(
+            source: .battery(percent: 58),
+            sleepDisabled: false,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 0,
+            preferences: PowerPreferences(keepAwakeEnabled: true, allowBatteryKeepAwake: true),
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(snapshot.statusTitle, "Turning on battery")
+        XCTAssertEqual(snapshot.statusDetail, "Waiting for the helper to apply the battery profile.")
+        XCTAssertEqual(snapshot.batteryToggleDetail, "On now: waiting for the helper to block lid-close sleep.")
+    }
+
+    func testBatteryToggleDetailClaimsBlockedOnlyAfterSleepDisabledFlipsOnBattery() {
+        let snapshot = PowerSnapshot(
+            source: .battery(percent: 58),
+            sleepDisabled: true,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 0,
+            preferences: PowerPreferences(keepAwakeEnabled: true, allowBatteryKeepAwake: true),
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(snapshot.statusTitle, "Keeping awake on battery")
+        XCTAssertEqual(snapshot.statusDetail, "Lid-close sleep is blocked on battery. Watch remaining charge.")
+        XCTAssertEqual(snapshot.batteryToggleDetail, "On now: lid-close sleep is blocked. Watch remaining charge.")
+    }
+
+    func testBatteryToggleDetailCoversInactiveAndArmedEdges() {
+        let disabled = PowerSnapshot(
+            source: .battery(percent: 58),
+            sleepDisabled: false,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 1,
+            preferences: .disabled,
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+        let acArmed = PowerSnapshot(
+            source: .ac,
+            sleepDisabled: true,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 0,
+            preferences: PowerPreferences(keepAwakeEnabled: true, allowBatteryKeepAwake: true),
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+        let batteryOff = PowerSnapshot(
+            source: .battery(percent: 58),
+            sleepDisabled: false,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 1,
+            preferences: .acOnlyEnabled,
+            helperInstalled: true,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(disabled.batteryToggleDetail, "Turn on keep-awake first.")
+        XCTAssertEqual(acArmed.batteryToggleDetail, "Will also keep awake after unplugging. Battery can drain.")
+        XCTAssertEqual(batteryOff.batteryToggleDetail, "Off now: lid close will sleep.")
+    }
+
+    func testBatteryToggleDetailDoesNotArmBatteryCopyWithoutReadyHelper() {
+        let helperMissing = PowerSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            acIdleSleepMinutes: 1,
+            batteryIdleSleepMinutes: 1,
+            preferences: PowerPreferences(keepAwakeEnabled: true, allowBatteryKeepAwake: true),
+            helperInstalled: false,
+            helperNeedsUpdate: false,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+        let helperStale = PowerSnapshot(
+            source: .ac,
+            sleepDisabled: true,
+            acIdleSleepMinutes: 0,
+            batteryIdleSleepMinutes: 0,
+            preferences: PowerPreferences(keepAwakeEnabled: true, allowBatteryKeepAwake: true),
+            helperInstalled: true,
+            helperNeedsUpdate: true,
+            checkedAt: Date(timeIntervalSince1970: 0)
+        )
+
+        XCTAssertEqual(helperMissing.statusTitle, "Helper needed")
+        XCTAssertEqual(helperMissing.batteryToggleDetail, "Install the helper before battery mode can run.")
+        XCTAssertEqual(helperStale.statusTitle, "Helper update needed")
+        XCTAssertEqual(helperStale.batteryToggleDetail, "Update the helper before battery mode can run.")
+    }
+
     func testCurrentHelperArtifactsDoNotNeedUpdate() {
         XCTAssertFalse(
             PowerInspector.helperNeedsUpdate(
