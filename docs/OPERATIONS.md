@@ -43,4 +43,4 @@ The following old components must remain disabled/unloaded until removed:
 /Library/Application Support/LidSwitch/lidswitch-helper
 ```
 
-Version `0.2.2` removes them during preparation. Do not re-enable them.
+Version `0.2.3` removes them during preparation. Do not re-enable them.

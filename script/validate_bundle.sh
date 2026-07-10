@@ -14,10 +14,11 @@ APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 HELPER_BINARY="$APP_BUNDLE/Contents/Library/LaunchServices/LidSwitchHelper"
 LEASE_PATH="$HOME/Library/Application Support/LidSwitch/activation-lease"
 PLIST_TMP="$(/usr/bin/mktemp /tmp/lidswitch-plist.XXXXXX)"
+PLIST_RENDERED_TMP="$(/usr/bin/mktemp /tmp/lidswitch-plist-rendered.XXXXXX)"
 SPCTL_TMP="$(/usr/bin/mktemp /tmp/lidswitch-spctl.XXXXXX)"
 
 cleanup() {
-  /bin/rm -f "$PLIST_TMP" "$SPCTL_TMP"
+  /bin/rm -f "$PLIST_TMP" "$PLIST_RENDERED_TMP" "$SPCTL_TMP"
 }
 trap cleanup EXIT
 
@@ -67,15 +68,16 @@ if [ "$before_diagnostic_pids" != "$after_diagnostic_pids" ] \
   exit 1
 fi
 /usr/bin/plutil -lint "$PLIST_TMP" >/dev/null
-if /usr/bin/plutil -p "$PLIST_TMP" | /usr/bin/grep -q '"StartInterval"'; then
+/usr/bin/plutil -p "$PLIST_TMP" >"$PLIST_RENDERED_TMP"
+if /usr/bin/grep -q '"StartInterval"' "$PLIST_RENDERED_TMP"; then
   echo "LaunchDaemon must not use StartInterval polling" >&2
   exit 1
 fi
-if ! /usr/bin/plutil -p "$PLIST_TMP" | /usr/bin/grep -q '"SuccessfulExit" => false'; then
+if ! /usr/bin/grep -q '"SuccessfulExit" => false' "$PLIST_RENDERED_TMP"; then
   echo "LaunchDaemon must recover abnormal exits only" >&2
   exit 1
 fi
-if ! /usr/bin/plutil -p "$PLIST_TMP" | /usr/bin/grep -q '"WatchPaths"'; then
+if ! /usr/bin/grep -q '"WatchPaths"' "$PLIST_RENDERED_TMP"; then
   echo "LaunchDaemon must be event-driven by the lease path" >&2
   exit 1
 fi
