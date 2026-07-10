@@ -61,21 +61,24 @@ final class HelperRuntime: @unchecked Sendable {
         guard let lease = validatedLease() else {
             let preservedSessionID = HelperStatusTombstone.read(path: configuration.statusPath)
                 .flatMap(\.sessionID)
-            if let preservedSessionID {
-                _ = terminalGenerationRecord(preservedSessionID, terminalGenerationsPath)
-            }
-            _ = restoreOwnedState(reason: "no-valid-lease", statusSessionID: preservedSessionID)
+            _ = restoreOwnedStateThenRecordTerminal(
+                reason: "no-valid-lease",
+                sessionID: preservedSessionID
+            )
             return 0
         }
-        guard terminalGenerationAllows(lease.sessionID, terminalGenerationsPath) else {
-            return 0
-        }
-        if let status = HelperStatusTombstone.read(path: configuration.statusPath),
-           status.sessionID == lease.sessionID,
-           status.isTerminal
-        {
+        let terminalGeneration = !terminalGenerationAllows(lease.sessionID, terminalGenerationsPath)
+        let terminalStatus = HelperStatusTombstone.read(path: configuration.statusPath).map {
+            $0.sessionID == lease.sessionID && $0.isTerminal
+        } ?? false
+        if terminalGeneration || terminalStatus {
             // Terminal status is the fail-closed fallback when the bounded
-            // ledger could not be recorded. Cleanup preserves this session ID.
+            // ledger could not be recorded. Neither terminal marker may suppress
+            // rollback while a prior helper still owns applied power state.
+            _ = restoreOwnedStateThenRecordTerminal(
+                reason: "terminal-session-recovery",
+                sessionID: lease.sessionID
+            )
             return 0
         }
         switch recoverAppliedSession(lease: lease) {
@@ -83,13 +86,17 @@ final class HelperRuntime: @unchecked Sendable {
             break
         case .needsActivation:
             guard activate(lease: lease) else {
-                _ = terminalGenerationRecord(lease.sessionID, terminalGenerationsPath)
-                _ = restoreOwnedState(reason: "activation-failed", statusSessionID: lease.sessionID)
+                _ = restoreOwnedStateThenRecordTerminal(
+                    reason: "activation-failed",
+                    sessionID: lease.sessionID
+                )
                 return 0
             }
         case .failed:
-            _ = terminalGenerationRecord(lease.sessionID, terminalGenerationsPath)
-            _ = restoreOwnedState(reason: "recovery-failed", statusSessionID: lease.sessionID)
+            _ = restoreOwnedStateThenRecordTerminal(
+                reason: "recovery-failed",
+                sessionID: lease.sessionID
+            )
             return 0
         }
 
@@ -242,10 +249,7 @@ final class HelperRuntime: @unchecked Sendable {
 
     private func stop(reason: String) {
         guard !shouldExit else { return }
-        if let activeSessionID {
-            _ = terminalGenerationRecord(activeSessionID, terminalGenerationsPath)
-        }
-        _ = restoreOwnedState(reason: reason)
+        _ = restoreOwnedStateThenRecordTerminal(reason: reason, sessionID: activeSessionID)
         // Recovery-required is a durable handled state. A nonzero exit here would
         // make launchd retry the same pmset failure forever through KeepAlive.
         exitCode = 0
@@ -255,6 +259,26 @@ final class HelperRuntime: @unchecked Sendable {
             CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .defaultMode)
         }
         CFRunLoopStop(CFRunLoopGetCurrent())
+    }
+
+    @discardableResult
+    private func restoreOwnedStateThenRecordTerminal(reason: String, sessionID: UUID?) -> Bool {
+        // Publish a durable retry marker before mutating power state. If the helper
+        // is interrupted anywhere in rollback, startup will retry restoration
+        // instead of reactivating or treating the session as already cleaned up.
+        HelperStatusStore.write(
+            state: "recovery-required",
+            reason: "\(reason)-restore-pending",
+            sessionID: sessionID,
+            path: configuration.statusPath
+        )
+        guard restoreOwnedState(reason: reason, statusSessionID: sessionID) else {
+            return false
+        }
+        if let sessionID {
+            _ = terminalGenerationRecord(sessionID, terminalGenerationsPath)
+        }
+        return true
     }
 
     @discardableResult
