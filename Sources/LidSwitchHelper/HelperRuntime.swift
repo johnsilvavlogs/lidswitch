@@ -196,6 +196,7 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     private func recoverAppliedSession(lease: ActivationLease) -> StartupRecovery {
+        let priorStatus = HelperStatusTombstone.read(path: configuration.statusPath)
         switch AppliedStateStore.load(
             path: configuration.appliedStatePath,
             expectedOwnerUID: getuid()
@@ -211,18 +212,28 @@ final class HelperRuntime: @unchecked Sendable {
             )
             return .failed
         case let .success(applied):
+            if applied.sessionID == lease.sessionID, priorStatus?.sessionID == lease.sessionID,
+               priorStatus?.recoveryReserved == true
+            {
+                // A crash after recording the pre-mutation reservation is not
+                // evidence of a successful repair. Roll back and tombstone it;
+                // startup must never spend a fresh budget by reactivating here.
+                _ = restoreOwnedState(reason: "startup-interrupted-override-recovery", statusSessionID: lease.sessionID)
+                return .failed
+            }
             if applied.sessionID == lease.sessionID,
                power.powerSource() == .ac,
                power.sleepDisabled() == true,
                power.acSleepMinutes() == 0
             {
                 activeSessionID = lease.sessionID
-                successfulOverrideRecoveries = 0
+                successfulOverrideRecoveries = priorStatus?.sessionID == lease.sessionID && priorStatus?.recoverySpent == true ? 1 : 0
                 HelperStatusStore.write(
                     state: "active",
                     reason: "recovered-after-abnormal-exit",
                     sessionID: lease.sessionID,
-                    path: configuration.statusPath
+                    path: configuration.statusPath,
+                    evidence: successfulOverrideRecoveries == 1 ? ["recovery_budget": "spent"] : [:]
                 )
                 return .recovered
             }
@@ -262,9 +273,10 @@ final class HelperRuntime: @unchecked Sendable {
         }
         HelperStatusStore.write(
             state: "active",
-            reason: "verified",
+            reason: successfulOverrideRecoveries == 1 ? "verified-after-override-recovery" : "verified",
             sessionID: activeSessionID,
-            path: configuration.statusPath
+            path: configuration.statusPath,
+            evidence: successfulOverrideRecoveries == 1 ? ["recovery_budget": "spent"] : [:]
         )
     }
 
@@ -295,7 +307,7 @@ final class HelperRuntime: @unchecked Sendable {
             reason: "override-drift-observed",
             sessionID: lease.sessionID,
             path: configuration.statusPath,
-            evidence: evidence
+            evidence: evidence.merging(["recovery_budget": "reserved"]) { _, new in new }
         )
         guard terminalGenerationAllows(lease.sessionID, terminalGenerationsPath),
               power.powerSource() == .ac,
@@ -319,7 +331,10 @@ final class HelperRuntime: @unchecked Sendable {
             reason: "override-recovered",
             sessionID: lease.sessionID,
             path: configuration.statusPath,
-            evidence: evidence.merging(["recovered_at": String(Int(Date().timeIntervalSince1970))]) { _, new in new }
+            evidence: evidence.merging([
+                "recovered_at": String(Int(Date().timeIntervalSince1970)),
+                "recovery_budget": "spent",
+            ]) { _, new in new }
         )
         successfulOverrideRecoveries = 1
         return true

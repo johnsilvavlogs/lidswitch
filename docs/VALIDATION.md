@@ -26,6 +26,8 @@ The `SessionSafetyTests` suite covers:
 - one owned SleepDisabled-only drift recovery with the same session UUID, fresh
   recovery acknowledgement, bounded diagnostics, and no AC-sleep overwrite;
 - a second owned SleepDisabled drift terminalizing without rearm;
+- helper restart after a reserved recovery failing closed, restart after a spent
+  recovery retaining the budget, and a new UUID receiving a fresh budget;
 - bounded, structured, owner-only diagnostic history;
 - abnormal helper recovery;
 - restoration failure retaining applied-state;

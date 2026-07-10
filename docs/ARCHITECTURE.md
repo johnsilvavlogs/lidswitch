@@ -22,7 +22,7 @@ Helper preparation preserves a valid bounded ledger, normalizes it to root-owned
 
 ## End and recovery
 
-Unplug, quit, reboot, app death, lease expiry, invalid input, lost acknowledgement, signal, or setting drift ends the session. One exception is a single owned `SleepDisabled=0` loss while AC, the matching current lease, applied-state, helper session, and nonterminal generation all still agree: the helper records bounded causal evidence and reapplies `SleepDisabled=1` to the same UUID. A second loss in that generation, AC-sleep drift, unreadable settings, terminal markers, or a failed reapply terminalizes and restores instead. Restoration:
+Unplug, quit, reboot, app death, lease expiry, invalid input, lost acknowledgement, signal, or setting drift ends the session. One exception is a single owned `SleepDisabled=0` loss while AC, the matching current lease, applied-state, helper session, and nonterminal generation all still agree: the helper records a root-owned bounded `recovery_budget=reserved` marker before mutation and `spent` after success, then reapplies `SleepDisabled=1` to the same UUID. The marker survives helper restart; a restart while reserved fails closed, while a restart with spent budget retains the spent state. A second loss in that generation, AC-sleep drift, unreadable settings, terminal markers, or a failed reapply terminalizes and restores instead. Restoration:
 
 - clears `SleepDisabled` only when LidSwitch recorded ownership;
 - restores AC sleep only if the current value still equals LidSwitch's applied `0`;
