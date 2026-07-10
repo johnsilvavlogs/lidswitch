@@ -14,7 +14,7 @@ const pngAssets = [
 ];
 
 const siteHtml = readFileSync(join(root, 'site/index.html'), 'utf8');
-const buildScript = readFileSync(join(root, 'script/build_and_run.sh'), 'utf8');
+const buildScript = readFileSync(join(root, 'script/build_app_bundle.sh'), 'utf8');
 
 function readPng(filePath) {
   const bytes = readFileSync(filePath);

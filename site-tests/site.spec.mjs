@@ -30,7 +30,7 @@ test('safety and public-source trust claims are visible and bounded', async ({ p
   await expect(page.getByRole('heading', { name: 'No app telemetry' })).toBeVisible();
   await expect(page.getByText(/Vercel Web Analytics for aggregate traffic/i)).toBeVisible();
   await expect(page.getByText(/GitHub counts release downloads/i)).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Battery stays opt-in' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Battery stays unchanged' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Restore is not hidden' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Source is public' })).toBeVisible();
 });
@@ -62,14 +62,15 @@ test('product preview has useful accessible context without bitmap scaling', asy
   const productPreview = page.getByRole('img', { name: /LidSwitch menu panel/i });
   await expect(productPreview).toBeVisible();
   await expect(productPreview).toHaveClass(/app-panel-preview/);
-  await expect(productPreview).toHaveAttribute('aria-label', /Keep awake when plugged in/);
-  await expect(productPreview).toHaveAttribute('aria-label', /Allow on battery/);
-  await expect(productPreview).toHaveAttribute('aria-label', /Restore/);
+  await expect(productPreview).toHaveAttribute('aria-label', /Prepare Safe Helper/);
+  await expect(productPreview).toHaveAttribute('aria-label', /Start Plugged-In Session/);
+  await expect(productPreview).toHaveAttribute('aria-label', /Stop and Restore/);
 });
 
 test('architecture support is disclosed clearly', async ({ page }) => {
   await page.goto('/');
-  await expect(page.getByText(/Apple Silicon Macs on macOS 14 or newer/i)).toBeVisible();
+  await expect(page.getByText(/macOS 26\.5\.2 build 25F84/i).first()).toBeVisible();
+  await expect(page.getByText(/Other builds remain off/i)).toBeVisible();
 });
 
 test('generated LidSwitch icons render in the brand and use-case cards', async ({ page }) => {

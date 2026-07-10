@@ -1,49 +1,26 @@
 # Install
 
-LidSwitch is distributed as a free manual DMG for technical Apple Silicon Mac
-users. It is not distributed through the Mac App Store and is not notarized.
-
 ## Requirements
 
 - Apple Silicon Mac
-- macOS 14 or newer
-- Administrator access for first helper install, restore, and uninstall actions
-- Comfort approving an app manually in macOS Security settings
+- macOS `26.5.2` build `25F84` for activation in this recovery release
+- Administrator access to install or remove the helper and to run explicit force restore
 
-## Install From A DMG
+## Install the manual build
 
-1. Download the latest `LidSwitch.dmg` from GitHub Releases.
-2. Open the DMG and drag `LidSwitch.app` to Applications.
-3. Launch LidSwitch.
-4. If macOS blocks the first launch, open System Settings, go to Privacy &
-   Security, and choose **Open Anyway** for LidSwitch.
-5. Turn on **Keep awake when plugged in** from the menu bar panel.
-6. Approve the macOS administrator prompt when LidSwitch installs its local helper.
+1. Download `LidSwitch.dmg` and `LidSwitch.dmg.sha256` from GitHub Releases.
+2. Verify the checksum with `shasum -a 256 -c LidSwitch.dmg.sha256`.
+3. Open the DMG and copy `LidSwitch.app` to `/Applications`.
+4. This build is ad-hoc signed and not notarized. If Gatekeeper blocks it, use **Open Anyway** in System Settings > Privacy & Security.
+5. Open LidSwitch. Protection is off.
+6. Choose **Prepare Safe Helper** and approve the administrator prompt. This installs the compiled helper and removes old startup behavior; it does not start a session.
+7. While connected to AC, choose **Start Plugged-In Session** and confirm.
+8. When the job finishes, choose **Stop and Restore**.
 
-After the helper is installed, normal on/off changes write only to the user-owned
-desired-state file and do not need administrator permission.
+There is no login launch or battery mode. Reconnecting power never starts a session.
 
-## Build A DMG Locally
+## Remove
 
-```bash
-./script/build_dmg.sh
-```
+Choose **Remove Helper** and confirm. LidSwitch revokes the session, verifies restoration, disables and unloads the daemon, and removes current and legacy helper files. Delete `/Applications/LidSwitch.app` afterward if desired.
 
-The script writes:
-
-```text
-dist/LidSwitch.dmg
-dist/LidSwitch.dmg.sha256
-```
-
-The DMG is intentionally unsigned beyond local ad-hoc signing of the app bundle.
-Recipients should expect manual approval on first launch.
-
-## Uninstall
-
-Use **Uninstall** from the LidSwitch menu bar panel. It disables LidSwitch,
-restores saved sleep values when available, unloads the LaunchDaemon, and removes
-the root-owned helper files.
-
-See [Operations](OPERATIONS.md) for manual verification commands and recovery
-details.
+If the administrator prompt is cancelled, the UI reports: **Administrator approval was cancelled. Nothing was enabled.**
