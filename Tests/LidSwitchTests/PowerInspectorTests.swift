@@ -532,7 +532,7 @@ final class SessionSafetyTests: XCTestCase {
         let first = UUID()
         let second = UUID()
         try "\(first.uuidString)\n\(second.uuidString)\n".write(to: ledger, atomically: true, encoding: .utf8)
-        XCTAssertEqual(chmod(ledger.path, 0o600), 0)
+        XCTAssertEqual(chmod(ledger.path, 0o644), 0)
         XCTAssertTrue(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
 
         try "\(first.uuidString)\n\(first.uuidString.lowercased())\n".write(to: ledger, atomically: true, encoding: .utf8)
@@ -546,6 +546,20 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(unlink(ledger.path), 0)
         XCTAssertEqual(symlink("missing-target", ledger.path), 0)
         XCTAssertFalse(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
+    }
+
+    func testTerminalGenerationStorePublishesAppReadableNonWritableLedger() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ledger = root.appendingPathComponent("terminal-generations")
+        let sessionID = UUID()
+
+        XCTAssertTrue(TerminalGenerationStore.record(sessionID: sessionID, path: ledger.path))
+        var metadata = stat()
+        XCTAssertEqual(lstat(ledger.path, &metadata), 0)
+        XCTAssertEqual(metadata.st_mode & 0o777, 0o644)
+        XCTAssertEqual(TerminalGenerationLedger.parse(try String(contentsOf: ledger)), [sessionID])
+        XCTAssertTrue(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
     }
 
     func testLeaseRejectsRebootExpiryAndExcessiveLifetime() {
@@ -922,7 +936,9 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(restore.contains("force=1"))
         XCTAssertTrue(install.contains("lidswitch_parse_applied_state"))
         XCTAssertTrue(install.contains(AppPaths.rootTerminalGenerationsPath))
-        XCTAssertTrue(install.contains("/bin/chmod 0600 \"$terminal_generations_path\""))
+        XCTAssertTrue(install.contains("/bin/chmod 0644 \"$terminal_generations_path\""))
+        XCTAssertTrue(install.contains("/bin/chmod 0644 \"$terminal_generations_temp\""))
+        XCTAssertFalse(install.contains("/bin/chmod 0600 \"$terminal_generations_path\""))
         XCTAssertTrue(install.contains("[ ! -L \"$terminal_generations_path\" ]"))
         XCTAssertTrue(install.contains("/usr/bin/stat -f '%u %g %Lp %l %z'"))
         XCTAssertTrue(install.contains("/usr/bin/grep -Eqv"))

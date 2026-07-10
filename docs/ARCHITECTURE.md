@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.2` is a SwiftPM menu bar app with three targets:
+LidSwitch `0.2.3` is a SwiftPM menu bar app with three targets:
 
 - `LidSwitch`: UI, inspection, lease writer, installation and recovery controls.
 - `LidSwitchCore`: lease schema, monotonic clock, boot identity, and compatibility policy.
@@ -8,7 +8,7 @@ LidSwitch `0.2.2` is a SwiftPM menu bar app with three targets:
 
 ## Session flow
 
-1. The user prepares helper version `4`; legacy login and shell-helper artifacts are removed while protection remains off.
+1. The user prepares helper version `5`; legacy login and shell-helper artifacts are removed while protection remains off.
 2. The user confirms **Start Plugged-In Session** on AC power.
 3. The app writes a user-owned `0600` activation lease atomically. It contains the session UUID, boot identity, monotonic issue/expiry times, UID, and macOS build.
 4. launchd reacts to the lease path. There is no `StartInterval`.
@@ -18,7 +18,7 @@ LidSwitch `0.2.2` is a SwiftPM menu bar app with three targets:
 8. The coordinator renews every 8 seconds using monotonic deadlines. Immediately before atomic lease publication, it rechecks the prior expiry and fresh matching helper/AC state.
 9. The root-owned `terminal-generations` ledger is the authoritative tombstone, bounded to the newest 64 session UUIDs; helper status remains the current acknowledgement surface. Replaying a fresh lease with a tombstoned UUID cannot reactivate the helper.
 
-Helper preparation preserves a valid bounded ledger, normalizes it to `root:wheel` mode `0600`, and atomically replaces missing, symlinked, nonregular, writable, oversized, malformed, or duplicate state with an empty safe ledger after restoration.
+Helper preparation preserves a valid bounded ledger, normalizes it to root-owned, non-writable mode `0644` so the unprivileged app can validate readiness, and atomically replaces missing, symlinked, nonregular, writable, oversized, malformed, or duplicate state with an empty safe ledger after restoration. Every helper rewrite also restores `0644`, preventing readiness from drifting after the first terminal session.
 
 ## End and recovery
 
@@ -34,6 +34,6 @@ launchd uses `KeepAlive.SuccessfulExit=false` with throttling only to recover ab
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.2`, `CFBundleVersion=4`, and the signed native helper under `Contents/Library/LaunchServices`.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.3`, `CFBundleVersion=5`, and the signed native helper under `Contents/Library/LaunchServices`.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

@@ -137,12 +137,12 @@ enum PrivilegedHelperManager {
         /bin/chmod 0755 "$root_dir"
         if lidswitch_terminal_ledger_valid; then
           /usr/sbin/chown root:wheel "$terminal_generations_path"
-          /bin/chmod 0600 "$terminal_generations_path"
+          /bin/chmod 0644 "$terminal_generations_path"
         else
           /bin/rm -rf "$terminal_generations_path"
           : > "$terminal_generations_temp"
           /usr/sbin/chown root:wheel "$terminal_generations_temp"
-          /bin/chmod 0600 "$terminal_generations_temp"
+          /bin/chmod 0644 "$terminal_generations_temp"
           /bin/mv -f "$terminal_generations_temp" "$terminal_generations_path"
         fi
 

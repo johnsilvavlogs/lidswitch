@@ -36,13 +36,15 @@ enum TerminalGenerationStore {
         entries = Array(entries.suffix(TerminalGenerationLedger.maximumEntries))
         let payload = entries.map { $0.uuidString.lowercased() }.joined(separator: "\n") + "\n"
         let temp = path + ".tmp.\(UUID().uuidString)"
-        let descriptor = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        let readableMode = mode_t(S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+        let descriptor = open(temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, readableMode)
         guard descriptor >= 0 else { return false }
         var removeTemp = true
         defer {
             close(descriptor)
             if removeTemp { unlink(temp) }
         }
+        guard fchmod(descriptor, readableMode) == 0 else { return false }
         let bytes = Array(payload.utf8)
         var offset = 0
         while offset < bytes.count {

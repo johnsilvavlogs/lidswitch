@@ -2,12 +2,12 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.2` build `4` is a heartbeat-stability release. Lease start and renewal run on a serial monotonic coordinator, independent of full UI inspection and the main run loop. Root-owned terminal generation tombstones prevent a late lease rewrite or rapid replug from rearming an ended session.
+Version `0.2.3` build `5` is a heartbeat-stability release. Lease start and renewal run on a serial monotonic coordinator, independent of full UI inspection and the main run loop. Root-owned, app-readable terminal generation tombstones prevent a late lease rewrite or rapid replug from rearming an ended session.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `4` and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `5` and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app writes a same-boot, same-user, same-build lease with a maximum lifetime of 30 seconds and renews it every 8 seconds.
 - The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and live `pmset` state.
@@ -59,7 +59,7 @@ The session suite covers current acknowledgement, monotonic heartbeat starvation
 ./script/validate_dmg.sh
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.2` build `4`, helper version `4`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.3` build `5`, helper version `5`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 
