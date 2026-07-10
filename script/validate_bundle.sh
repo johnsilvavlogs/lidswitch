@@ -2,8 +2,8 @@
 set -euo pipefail
 
 APP_NAME="LidSwitch"
-EXPECTED_VERSION="0.2.0"
-EXPECTED_BUILD="2"
+EXPECTED_VERSION="0.2.1"
+EXPECTED_BUILD="3"
 EXPECTED_ID="com.johnsilva.LidSwitch"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}"

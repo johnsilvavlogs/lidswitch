@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const owner = 'johnsilvavlogs';
 const repo = 'lidswitch';
 const apiBase = `https://api.github.com/repos/${owner}/${repo}`;
-const expectedTag = process.env.LIDSWITCH_EXPECTED_TAG ?? 'v0.2.0';
+const expectedTag = process.env.LIDSWITCH_EXPECTED_TAG ?? 'v0.2.1';
 const expectedCommit = process.env.LIDSWITCH_EXPECTED_COMMIT
   ?? execFileSync('/usr/bin/git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const checksumLine = readFileSync(resolve('dist/LidSwitch.dmg.sha256'), 'utf8').trim();

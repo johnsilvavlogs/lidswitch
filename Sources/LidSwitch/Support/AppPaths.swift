@@ -2,8 +2,8 @@ import Foundation
 
 enum AppPaths {
     static let appName = "LidSwitch"
-    static let appVersion = "0.2.0"
-    static let appBuild = "2"
+    static let appVersion = "0.2.1"
+    static let appBuild = "3"
     static let bundleIdentifier = "com.johnsilva.LidSwitch"
     static let helperLabel = "com.johnsilva.lidswitch.helper"
     static let helperVersion = "3"

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 APP_NAME="LidSwitch"
-APP_VERSION="0.2.0"
-APP_BUILD="2"
+APP_VERSION="0.2.1"
+APP_BUILD="3"
 BUNDLE_ID="com.johnsilva.LidSwitch"
 MIN_SYSTEM_VERSION="14.0"
 
