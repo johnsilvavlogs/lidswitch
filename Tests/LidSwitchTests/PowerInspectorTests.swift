@@ -139,6 +139,58 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(renewed.value, 1)
     }
 
+    func testHeartbeatRecoveryAcknowledgementIsOncePerFreshStatusAndResetsForNewGeneration() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = UUID()
+        let second = UUID()
+        let base = Date(timeIntervalSince1970: 2_600)
+        let clock = LockedBox(base)
+        let monotonic = LockedBox<TimeInterval>(0)
+        let status = LockedBox(HelperStatusRecord(state: "active", reason: "verified", sessionID: first, updatedAt: base))
+        let acknowledgements = LockedBox(0)
+        let renewals = LockedBox(0)
+        let diagnostics = SessionDiagnosticStore(file: root.appendingPathComponent("history.json"))
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            acknowledgementTimeout: 20,
+            now: { clock.value },
+            monotonicNow: { monotonic.value },
+            observe: { _ in SessionHeartbeatObservation(power: .ac, leaseIsValid: true, helperStatus: status.value) },
+            renew: { _, commitGuard in
+                guard commitGuard() else { throw TestError.commitRejected }
+                renewals.withValue { $0 += 1 }
+                return monotonic.value + 30
+            },
+            revoke: {},
+            diagnostics: diagnostics,
+            onAcknowledged: { _ in acknowledgements.withValue { $0 += 1 } },
+            onEnded: { _, _ in }
+        )
+        coordinator.start(sessionID: first, initialLeaseExpiresMonotonic: 30)
+        coordinator.evaluateForTesting() // normal initial acknowledgement
+        status.value = HelperStatusRecord(state: "active", reason: "override-recovered", sessionID: first, updatedAt: clock.value)
+        coordinator.evaluateForTesting()
+        coordinator.evaluateForTesting()
+        XCTAssertEqual(acknowledgements.value, 2)
+        XCTAssertEqual(diagnostics.entries().filter { $0.event == "recovered" }.count, 1)
+        XCTAssertEqual(renewals.value, 0)
+
+        monotonic.value = 8
+        clock.value = base.addingTimeInterval(8)
+        coordinator.evaluateForTesting()
+        XCTAssertEqual(renewals.value, 1)
+
+        coordinator.start(sessionID: second, initialLeaseExpiresMonotonic: 38)
+        status.value = HelperStatusRecord(state: "active", reason: "verified", sessionID: second, updatedAt: clock.value)
+        coordinator.evaluateForTesting()
+        status.value = HelperStatusRecord(state: "active", reason: "override-recovered", sessionID: second, updatedAt: clock.value)
+        coordinator.evaluateForTesting()
+        XCTAssertEqual(diagnostics.entries().filter { $0.event == "recovered" }.count, 2)
+        XCTAssertEqual(acknowledgements.value, 4)
+    }
+
     func testCommitBoundaryTerminalTransitionCannotPublishFreshLease() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -502,6 +554,34 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertNotNil(HelperStatusRecord.parse("state=inactive\nreason=restored\nsession=none\nupdated=1\n"))
     }
 
+    func testHelperStatusEvidenceIsBoundedCollisionSafeAndParserCompatible() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("helper-status").path
+        let sessionID = UUID()
+        HelperStatusStore.write(
+            state: "active",
+            reason: "verified",
+            sessionID: sessionID,
+            path: path,
+            evidence: [
+                "state": "override", "reason": "override", "session": "override", "updated": "override",
+                "a": String(repeating: "x", count: 120), "b": "b", "c": "c", "d": "d", "e": "e",
+                "f": "f", "g": "g", "h": "h", "i": "i", "invalid-key": "ignored",
+            ]
+        )
+        let raw = try String(contentsOfFile: path, encoding: .utf8)
+        XCTAssertEqual(raw.split(separator: "\n").filter { $0.hasPrefix("state=") }.count, 1)
+        XCTAssertTrue(raw.contains("state=active"))
+        XCTAssertTrue(raw.contains("reason=verified"))
+        XCTAssertTrue(raw.contains("session=\(sessionID.uuidString.lowercased())"))
+        XCTAssertFalse(raw.contains("invalid-key="))
+        XCTAssertFalse(raw.contains("i=i"))
+        XCTAssertEqual(raw.split(separator: "\n").filter { $0.first == "a" }.first?.count, 98)
+        XCTAssertNotNil(HelperStatusRecord.parse(raw))
+        XCTAssertNotNil(HelperStatusTombstone.read(path: path))
+    }
+
     func testLeaseParserRejectsDuplicateAndUnknownFields() {
         let lease = makeLease(sessionID: UUID(), lifetime: 30)
         XCTAssertNotNil(ActivationLease.parse(lease.storagePayload))
@@ -717,23 +797,157 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(harness.power.enableSleepOverrideCalls, 1)
     }
 
-    func testNativeHelperOverrideLostCleansUpWithoutOverwritingExternalDrift() throws {
+    func testNativeHelperRecoversOwnedSleepDisabledDriftWithSameSessionWithinDeadline() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.2)
+        let recoveredStatus = LockedBox<String?>(nil)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceSleepDisabled(false) }
+        Timer.scheduledTimer(withTimeInterval: 0.23, repeats: false) { _ in
+            recoveredStatus.value = try? String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in power.setSource(.battery) }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let recovered = try XCTUnwrap(recoveredStatus.value)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 2)
+        XCTAssertTrue(recovered.contains("state=active"))
+        XCTAssertTrue(recovered.contains("reason=override-recovered"))
+        XCTAssertTrue(recovered.contains("session=\(harness.lease.sessionID.uuidString.lowercased())"))
+        XCTAssertTrue(recovered.contains("observed_sleep_disabled=0"))
+        XCTAssertEqual(power.currentSleepDisabled, false)
+    }
+
+    func testNativeHelperSecondOwnedSleepDisabledDriftTerminalizesWithoutRearm() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.2)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceSleepDisabled(false) }
+        Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { _ in power.forceSleepDisabled(false) }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let status = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 2)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertTrue(status.contains("state=inactive"))
+        XCTAssertTrue(status.contains("reason=override-lost"))
+        XCTAssertTrue(status.contains("observed_sleep_disabled=0"))
+    }
+
+    func testHelperRestartAfterObservedDriftFailsClosedWithoutReactivation() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 0)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, preapplyState: true)
+        HelperStatusStore.write(
+            state: "active",
+            reason: "override-drift-observed",
+            sessionID: harness.lease.sessionID,
+            path: harness.configuration.statusPath,
+            evidence: ["recovery_budget": "reserved"]
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 0)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(try String(contentsOfFile: harness.configuration.statusPath).contains("state=inactive"))
+    }
+
+    func testHelperRestartAfterRecoveryRetainsSpentBudgetAndTerminalizesSecondDrift() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: true, acSleep: 0)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            preapplyState: true,
+            reconciliationInterval: 0.02
+        )
+        HelperStatusStore.write(
+            state: "active",
+            reason: "override-recovered",
+            sessionID: harness.lease.sessionID,
+            path: harness.configuration.statusPath,
+            evidence: ["recovery_budget": "spent"]
+        )
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceSleepDisabled(false) }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let status = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 0)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertTrue(status.contains("state=inactive"))
+        XCTAssertTrue(status.contains("reason=override-lost"))
+    }
+
+    func testFreshGenerationIgnoresSpentBudgetForDifferentSessionAndCanRecover() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.2)
+        HelperStatusStore.write(
+            state: "active",
+            reason: "override-recovered",
+            sessionID: UUID(),
+            path: harness.configuration.statusPath,
+            evidence: ["recovery_budget": "spent"]
+        )
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceSleepDisabled(false) }
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in power.setSource(.battery) }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 2)
+    }
+
+    func testNativeHelperACSleepDriftTerminalizesWithoutOverwritingExternalValue() throws {
         let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
         let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.02)
-        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
-            power.forceSleepDisabled(false)
-            power.forceACSleep(7)
-        }
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceACSleep(7) }
 
-        let code = harness.runtime.run()
+        XCTAssertEqual(harness.runtime.run(), 0)
         let status = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
-
-        XCTAssertEqual(code, 0)
         XCTAssertEqual(power.currentSleepDisabled, false)
         XCTAssertEqual(power.currentACSleep, 7)
         XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
         XCTAssertTrue(status.contains("state=inactive"))
         XCTAssertTrue(status.contains("reason=override-lost"))
+        XCTAssertTrue(status.contains("observed_ac_sleep=7"))
+    }
+
+    func testNativeHelperPersistentRecoveryFailureTerminalizesWithoutRearm() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.02)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.failSleepEnable = true
+            power.forceSleepDisabled(false)
+        }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 2)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(try String(contentsOfFile: harness.configuration.statusPath).contains("state=inactive"))
+    }
+
+    func testNativeHelperUnreadableOverrideFailsClosedWithoutReapply() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.02)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceSleepDisabledUnknown() }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let status = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(status.contains("state=recovery-required"))
+        XCTAssertTrue(status.contains("observed_sleep_disabled=unreadable"))
+    }
+
+    func testNativeHelperRecoveryUnplugRaceTerminatesWithoutRearm() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        power.unplugOnEnableAfterCall = 2
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.02)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in power.forceSleepDisabled(false) }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let calls = power.enableSleepOverrideCalls
+        power.setSource(.ac)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 2)
+        XCTAssertEqual(power.currentSleepDisabled, false)
     }
 
     func testNativeHelperTerminalGenerationTombstoneBlocksSameSessionReplay() throws {
@@ -1520,7 +1734,9 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
     private var acSleepValue: Int?
     private var enableCalls = 0
     private var failRestoreValue = false
+    private var failEnableValue = false
     private var unplugOnEnableValue = false
+    private var unplugOnEnableAfterCallValue: Int?
     private var sleepRestoreObserver: (() -> Void)?
 
     init(source: HelperPowerSource, sleepDisabled: Bool?, acSleep: Int?) {
@@ -1536,9 +1752,17 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
         get { withLock { failRestoreValue } }
         set { withLock { failRestoreValue = newValue } }
     }
+    var failSleepEnable: Bool {
+        get { withLock { failEnableValue } }
+        set { withLock { failEnableValue = newValue } }
+    }
     var unplugWhenEnablingSleepOverride: Bool {
         get { withLock { unplugOnEnableValue } }
         set { withLock { unplugOnEnableValue = newValue } }
+    }
+    var unplugOnEnableAfterCall: Int? {
+        get { withLock { unplugOnEnableAfterCallValue } }
+        set { withLock { unplugOnEnableAfterCallValue = newValue } }
     }
     var onSleepRestore: (() -> Void)? {
         get { withLock { sleepRestoreObserver } }
@@ -1551,6 +1775,10 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
 
     func forceSleepDisabled(_ enabled: Bool) {
         withLock { sleepDisabledValue = enabled }
+    }
+
+    func forceSleepDisabledUnknown() {
+        withLock { sleepDisabledValue = nil }
     }
 
     func forceACSleep(_ minutes: Int) {
@@ -1571,7 +1799,10 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
             }
             if enabled {
                 enableCalls += 1
-                if unplugOnEnableValue {
+                if failEnableValue {
+                    throw NSError(domain: "FakePowerSystem", code: 2)
+                }
+                if unplugOnEnableValue || unplugOnEnableAfterCallValue == enableCalls {
                     source = .battery
                 }
             }

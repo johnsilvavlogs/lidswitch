@@ -31,6 +31,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     private var phase: Phase = .terminal
     private var nextRenewalMonotonic = TimeInterval.greatestFiniteMagnitude
     private var leaseExpiresMonotonic = TimeInterval.greatestFiniteMagnitude
+    private var lastRecoveryAcknowledgement: String?
 
     init(
         observationInterval: TimeInterval = 1,
@@ -65,6 +66,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             cancelTimer()
             let startedMonotonic = monotonicNow()
             self.sessionID = sessionID
+            lastRecoveryAcknowledgement = nil
             phase = .starting(deadlineMonotonic: startedMonotonic + acknowledgementTimeout)
             nextRenewalMonotonic = startedMonotonic + renewalInterval
             leaseExpiresMonotonic = initialLeaseExpiresMonotonic
@@ -128,6 +130,16 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
                 notify: true
             )
             return
+        }
+        if let matchingStatus,
+           matchingStatus.state == "active",
+           matchingStatus.reason == "override-recovered",
+           matchingStatus.isFresh(at: checkedAt),
+           lastRecoveryAcknowledgement != "\(sessionID.uuidString)-\(matchingStatus.updatedAt.timeIntervalSince1970)"
+        {
+            lastRecoveryAcknowledgement = "\(sessionID.uuidString)-\(matchingStatus.updatedAt.timeIntervalSince1970)"
+            diagnostics.record(event: "recovered", reason: "override-recovered", sessionID: sessionID)
+            onAcknowledged(sessionID)
         }
 
         switch phase {

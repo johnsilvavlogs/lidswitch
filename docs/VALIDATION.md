@@ -23,6 +23,11 @@ The `SessionSafetyTests` suite covers:
 - unplug restoration and no rearm;
 - helper terminal-generation replay rejection after unplug and blocked preflight;
 - helper and controller override/status drift termination;
+- one owned SleepDisabled-only drift recovery with the same session UUID, fresh
+  recovery acknowledgement, bounded diagnostics, and no AC-sleep overwrite;
+- a second owned SleepDisabled drift terminalizing without rearm;
+- helper restart after a reserved recovery failing closed, restart after a spent
+  recovery retaining the budget, and a new UUID receiving a fresh budget;
 - bounded, structured, owner-only diagnostic history;
 - abnormal helper recovery;
 - restoration failure retaining applied-state;
@@ -44,6 +49,14 @@ LIDSWITCH_CONTROLLED_CANARY=1 ./script/validate_live_state.sh
 ```
 
 The script observes at least 40 seconds of fresh acknowledgements (`LIDSWITCH_LIVE_OBSERVATION_SECONDS`, minimum `40`), sends `SIGKILL` to the app, waits up to 45 seconds for verified restoration, and proves there is no automatic rearm. A later human-observed unplug/replug and short lid-close test completes local deployment qualification.
+
+To exercise the candidate's same-session recovery path, add the separate
+`LIDSWITCH_INJECT_OVERRIDE_DRIFT=1` opt-in. It first verifies the helper owns a
+current AC session, invokes only `sudo pmset -a disablesleep 0`, and waits at
+most 10 seconds for `SleepDisabled=1`, AC sleep `0`, a fresh `active`
+`override-recovered` status, and the unchanged session UUID. It never edits
+root state files. Do not run this on a production session unless the explicit
+canary is intended.
 
 ## Public surface
 

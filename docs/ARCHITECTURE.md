@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.3` is a SwiftPM menu bar app with three targets:
+LidSwitch `0.2.4` is a SwiftPM menu bar app with three targets:
 
 - `LidSwitch`: UI, inspection, lease writer, installation and recovery controls.
 - `LidSwitchCore`: lease schema, monotonic clock, boot identity, and compatibility policy.
@@ -8,7 +8,7 @@ LidSwitch `0.2.3` is a SwiftPM menu bar app with three targets:
 
 ## Session flow
 
-1. The user prepares helper version `5`; legacy login and shell-helper artifacts are removed while protection remains off.
+1. The user prepares helper version `1`; legacy login and shell-helper artifacts are removed while protection remains off.
 2. The user confirms **Start Plugged-In Session** on AC power.
 3. The app writes a user-owned `0600` activation lease atomically. It contains the session UUID, boot identity, monotonic issue/expiry times, UID, and macOS build.
 4. launchd reacts to the lease path. There is no `StartInterval`.
@@ -22,7 +22,7 @@ Helper preparation preserves a valid bounded ledger, normalizes it to root-owned
 
 ## End and recovery
 
-Unplug, quit, reboot, app death, lease expiry, invalid input, lost acknowledgement, signal, or setting drift ends the session. Restoration:
+Unplug, quit, reboot, app death, lease expiry, invalid input, lost acknowledgement, signal, or setting drift ends the session. One exception is a single owned `SleepDisabled=0` loss while AC, the matching current lease, applied-state, helper session, and nonterminal generation all still agree: the helper records a root-owned bounded `recovery_budget=reserved` marker before mutation and `spent` after success, then reapplies `SleepDisabled=1` to the same UUID. The marker survives helper restart; a restart while reserved fails closed, while a restart with spent budget retains the spent state. A second loss in that generation, AC-sleep drift, unreadable settings, terminal markers, or a failed reapply terminalizes and restores instead. Restoration:
 
 - clears `SleepDisabled` only when LidSwitch recorded ownership;
 - restores AC sleep only if the current value still equals LidSwitch's applied `0`;
@@ -34,6 +34,6 @@ launchd uses `KeepAlive.SuccessfulExit=false` with throttling only to recover ab
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.3`, `CFBundleVersion=5`, and the signed native helper under `Contents/Library/LaunchServices`.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.4`, `CFBundleVersion=1`, and the signed native helper under `Contents/Library/LaunchServices`.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

@@ -3,11 +3,16 @@ import Foundation
 
 struct HelperStatusTombstone: Equatable {
     let state: String
+    let reason: String
     let sessionID: UUID?
+    let recoveryBudget: String?
 
     var isTerminal: Bool {
         state == "inactive" || state == "blocked" || state == "recovery-required"
     }
+
+    var recoveryReserved: Bool { recoveryBudget == "reserved" || reason == "override-drift-observed" }
+    var recoverySpent: Bool { recoveryBudget == "spent" || reason == "override-recovered" || reason == "verified-after-override-recovery" }
 
     static func read(path: String, expectedOwnerUID: uid_t = geteuid()) -> HelperStatusTombstone? {
         let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
@@ -49,6 +54,7 @@ struct HelperStatusTombstone: Equatable {
             values[key] = String(parts[1])
         }
         guard let state = values["state"],
+              let reason = values["reason"],
               let sessionRaw = values["session"]
         else { return nil }
         let sessionID: UUID?
@@ -59,6 +65,13 @@ struct HelperStatusTombstone: Equatable {
         } else {
             return nil
         }
-        return HelperStatusTombstone(state: state, sessionID: sessionID)
+        let recoveryBudget = values["recovery_budget"]
+        guard recoveryBudget == nil || recoveryBudget == "reserved" || recoveryBudget == "spent" else { return nil }
+        return HelperStatusTombstone(
+            state: state,
+            reason: reason,
+            sessionID: sessionID,
+            recoveryBudget: recoveryBudget
+        )
     }
 }

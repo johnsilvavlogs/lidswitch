@@ -73,7 +73,10 @@ struct SystemPowerSystem: HelperPowerSystem {
         }
     }
 
-    private func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 5) -> ProcessResult {
+    // Reconciliation may need several pmset reads plus one write. A one-second
+    // bound keeps the owned-drift recovery transaction below its ten-second
+    // session safety deadline even when pmset is unhealthy.
+    private func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 1) -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
