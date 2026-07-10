@@ -390,8 +390,40 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(restore.contains("|0) return 1"))
         XCTAssertTrue(restore.contains("alarm(shift @ARGV)"))
         XCTAssertTrue(restore.contains("if [ \"$changed_ac\" = \"0\" ]"))
+        XCTAssertTrue(install.contains("[ \"$owner\" = \"$(/usr/bin/id -u)\" ] && [ \"$links\" = \"1\" ]"))
+        XCTAssertFalse(install.contains("[ \"$group\" = \"$(/usr/bin/id -g)\" ]"))
         XCTAssertFalse(install.contains("StartInterval"))
         XCTAssertFalse(install.contains(AppPaths.legacyLoginLabel))
+    }
+
+    func testAdministratorCommandSkipsUserZshStartupFiles() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let startupMarker = root.appendingPathComponent("startup-sourced")
+        let commandMarker = root.appendingPathComponent("command-ran")
+        try "/usr/bin/touch \(startupMarker.path)\n".write(
+            to: root.appendingPathComponent(".zshenv"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let command = PrivilegedHelperManager.diagnosticAdministratorCommand(
+            "/usr/bin/touch \(commandMarker.path)\n"
+        )
+        XCTAssertTrue(command.hasSuffix("| /bin/zsh -f"))
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        var environment = ProcessInfo.processInfo.environment
+        environment["ZDOTDIR"] = root.path
+        process.environment = environment
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: commandMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: startupMarker.path))
     }
 
     func testAdminRestoreMigratesValidLegacyACBaseline() throws {
@@ -400,6 +432,31 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         XCTAssertEqual(result.acSleep, 5)
         XCTAssertFalse(result.legacyFileExists)
+    }
+
+    func testAdminRestoreMigratesRootAdminLegacyACBaseline() throws {
+        let result = try runAdminRestoreScenario(
+            legacyAC: "5",
+            currentACSleep: 0,
+            legacyACGroup: 80
+        )
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertEqual(result.acSleep, 5)
+        XCTAssertFalse(result.legacyFileExists)
+    }
+
+    func testAdminRestoreRejectsGroupWritableLegacyBaseline() throws {
+        let result = try runAdminRestoreScenario(
+            legacyAC: "5",
+            currentACSleep: 0,
+            legacyACMode: 0o664
+        )
+
+        XCTAssertEqual(result.exitCode, 75, result.stderr)
+        XCTAssertEqual(result.acSleep, 0)
+        XCTAssertTrue(result.legacyFileExists)
+        XCTAssertTrue(result.stderr.contains("reason=unsafe-legacy-state"))
     }
 
     func testAdminRestoreIgnoresStaleZeroLegacyBaseline() throws {
@@ -527,6 +584,8 @@ final class SessionSafetyTests: XCTestCase {
     private func runAdminRestoreScenario(
         legacyAC: String?,
         currentACSleep: Int,
+        legacyACGroup: gid_t? = nil,
+        legacyACMode: mode_t? = nil,
         legacyBattery: String? = nil,
         currentBatterySleep: Int = 5,
         sleepDisabled: Int = 0
@@ -574,6 +633,12 @@ final class SessionSafetyTests: XCTestCase {
         let legacyBatteryPath = support.appendingPathComponent("original-battery-sleep").path
         if let legacyAC {
             try "\(legacyAC)\n".write(toFile: legacyACPath, atomically: true, encoding: .utf8)
+            if let legacyACGroup {
+                XCTAssertEqual(chown(legacyACPath, getuid(), legacyACGroup), 0)
+            }
+            if let legacyACMode {
+                XCTAssertEqual(chmod(legacyACPath, legacyACMode), 0)
+            }
         }
         if let legacyBattery {
             try "\(legacyBattery)\n".write(toFile: legacyBatteryPath, atomically: true, encoding: .utf8)
@@ -594,7 +659,7 @@ final class SessionSafetyTests: XCTestCase {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = [scriptFile.path]
+        process.arguments = ["-f", scriptFile.path]
         var environment = ProcessInfo.processInfo.environment
         environment["MOCK_POWER_STATE"] = state.path
         process.environment = environment

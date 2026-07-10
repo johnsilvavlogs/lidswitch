@@ -2,7 +2,7 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.0` build `2` is a crash-recovery release. It removes the old persistent toggle, battery mode, login launch, and five-second root shell polling design.
+Version `0.2.1` build `3` is a crash-recovery release. It removes the old persistent toggle, battery mode, login launch, and five-second root shell polling design. It also migrates the `root:admin` baseline written by historical releases and prevents privileged installation from loading user shell startup files.
 
 ## Safety model
 
@@ -58,7 +58,7 @@ The session suite covers current acknowledgement, expiry, reboot mismatch, unplu
 ./script/validate_dmg.sh
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.0` build `2`, helper version `3`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.1` build `3`, helper version `3`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 

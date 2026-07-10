@@ -6,8 +6,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 CHECKSUM_PATH="$DMG_PATH.sha256"
-EXPECTED_VERSION="0.2.0"
-EXPECTED_BUILD="2"
+EXPECTED_VERSION="0.2.1"
+EXPECTED_BUILD="3"
 
 process_ids() {
   /usr/bin/pgrep -x "$APP_NAME" 2>/dev/null | /usr/bin/sort -n | /usr/bin/tr '\n' ' ' || true

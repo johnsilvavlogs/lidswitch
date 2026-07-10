@@ -3,6 +3,10 @@ import Foundation
 import LidSwitchCore
 
 enum PrivilegedHelperManager {
+    static func diagnosticAdministratorCommand(_ script: String) -> String {
+        administratorCommand(script)
+    }
+
     static func diagnosticLaunchDaemonPlist() -> String {
         launchDaemonPlist()
     }
@@ -52,8 +56,7 @@ enum PrivilegedHelperManager {
     }
 
     private static func runAsAdministrator(_ script: String, prompt: String) throws {
-        let encodedScript = Data(script.utf8).base64EncodedString()
-        let command = "/bin/echo \(shellQuote(encodedScript)) | /usr/bin/base64 --decode | /bin/zsh"
+        let command = administratorCommand(script)
         let appleScript = """
         do shell script \(appleScriptQuote(command)) with administrator privileges with prompt \(appleScriptQuote(prompt))
         """
@@ -74,6 +77,13 @@ enum PrivilegedHelperManager {
                 ]
             )
         }
+    }
+
+    private static func administratorCommand(_ script: String) -> String {
+        let encodedScript = Data(script.utf8).base64EncodedString()
+        // -f prevents a privileged operation from sourcing the user's zsh startup
+        // files. The installer must run only the generated, audited script.
+        return "/bin/echo \(shellQuote(encodedScript)) | /usr/bin/base64 --decode | /bin/zsh -f"
     }
 
     private static func installScript() -> String {
@@ -310,7 +320,10 @@ enum PrivilegedHelperManager {
           [ ! -L "$path" ] && [ -f "$path" ] || return 1
           metadata="$(/usr/bin/stat -f '%u:%g:%Lp:%l:%z' "$path" 2>/dev/null)" || return 1
           IFS=: read -r owner group mode links size <<< "$metadata"
-          [ "$owner" = "$(/usr/bin/id -u)" ] && [ "$group" = "$(/usr/bin/id -g)" ] && [ "$links" = "1" ] || return 1
+          [ "$owner" = "$(/usr/bin/id -u)" ] && [ "$links" = "1" ] || return 1
+          # Historical releases created this root-owned, read-only evidence as
+          # root:admin on macOS. Group identity is not a trust boundary because
+          # the exact mode allowlist below rejects every group-writable file.
           case "$mode" in 600|640|644) ;; *) return 1 ;; esac
           [ "$size" -gt 0 ] && [ "$size" -le 128 ]
         }
