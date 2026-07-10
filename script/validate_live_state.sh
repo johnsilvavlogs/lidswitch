@@ -109,6 +109,36 @@ case "$changed_ac:$original_ac" in
   *) fail "applied-state has an invalid AC restoration baseline" ;;
 esac
 
+# This is intentionally a second opt-in. It changes only SleepDisabled through
+# pmset; it never edits the root-owned lease, status, applied-state, or ledger.
+# The preflight proves this helper owns the active generation before injection.
+if [ "${LIDSWITCH_INJECT_OVERRIDE_DRIFT:-0}" = "1" ]; then
+  session_before="$(status_value session)"
+  updated_before="$(status_value updated)"
+  test -n "$session_before" && test "$session_before" != "none" || fail "active helper session is missing"
+  test -n "$updated_before" || fail "active helper timestamp is missing"
+  test "$(status_value state)" = "active" || fail "helper is not active before drift injection"
+  test "$(sleep_disabled)" = "1" || fail "SleepDisabled is not helper-owned before injection"
+  echo "Injecting owned SleepDisabled loss; waiting up to 10 seconds for same-session recovery."
+  /usr/bin/sudo /usr/bin/pmset -a disablesleep 0
+  recovered=0
+  for _ in $(/usr/bin/jot 10); do
+    current_updated="$(status_value updated)"
+    if power_is_ac \
+      && [ "$(sleep_disabled 2>/dev/null || true)" = "1" ] \
+      && [ "$(ac_sleep_minutes 2>/dev/null || true)" = "0" ] \
+      && [ "$(status_value state)" = "active" ] \
+      && [ "$(status_value reason)" = "override-recovered" ] \
+      && [ "$(status_value session)" = "$session_before" ] \
+      && [ "$current_updated" -ge "$updated_before" ]; then
+      recovered=1
+      break
+    fi
+    /bin/sleep 1
+  done
+  test "$recovered" = "1" || fail "owned SleepDisabled loss did not recover within 10 seconds"
+fi
+
 for _ in $(/usr/bin/jot "$OBSERVATION_SECONDS"); do
   power_is_ac || fail "power changed during active observation"
   test "$(sleep_disabled)" = "1" || fail "sleep override dropped during active observation"

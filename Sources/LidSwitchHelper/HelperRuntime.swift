@@ -235,8 +235,24 @@ final class HelperRuntime: @unchecked Sendable {
             stop(reason: "lease-expired-or-invalid")
             return
         }
-        guard power.sleepDisabled() == true, power.acSleepMinutes() == 0 else {
-            stop(reason: "override-lost")
+        let sleepDisabled = power.sleepDisabled()
+        let acSleep = power.acSleepMinutes()
+        guard sleepDisabled == true, acSleep == 0 else {
+            let evidence = overrideEvidence(
+                sessionID: lease.sessionID,
+                sleepDisabled: sleepDisabled,
+                acSleep: acSleep
+            )
+            // AC sleep drift is deliberately not repaired here: a nonzero value
+            // may be newer third-party intent. Only our owned SleepDisabled=0
+            // loss can be recovered, and only for this still-live generation.
+            if sleepDisabled == false,
+               acSleep == 0,
+               recoverOwnedSleepDisabledOverride(lease: lease, evidence: evidence)
+            {
+                return
+            }
+            stop(reason: "override-lost", evidence: evidence)
             return
         }
         HelperStatusStore.write(
@@ -247,9 +263,75 @@ final class HelperRuntime: @unchecked Sendable {
         )
     }
 
-    private func stop(reason: String) {
+    private func recoverOwnedSleepDisabledOverride(
+        lease: ActivationLease,
+        evidence: [String: String]
+    ) -> Bool {
+        let status = HelperStatusTombstone.read(path: configuration.statusPath)
+        guard activeSessionID == lease.sessionID,
+              terminalGenerationAllows(lease.sessionID, terminalGenerationsPath),
+              !(status?.sessionID == lease.sessionID && status?.isTerminal == true),
+              case let .success(applied) = AppliedStateStore.load(
+                path: configuration.appliedStatePath,
+                expectedOwnerUID: getuid()
+              ),
+              applied.sessionID == lease.sessionID,
+              applied.changedSleepDisabled,
+              power.powerSource() == .ac,
+              power.sleepDisabled() == false,
+              power.acSleepMinutes() == 0
+        else { return false }
+
+        // Persist causal evidence before mutation; a terminal status below keeps
+        // it if the reapply fails. It is bounded, root-owned, and non-sensitive.
+        HelperStatusStore.write(
+            state: "active",
+            reason: "override-drift-observed",
+            sessionID: lease.sessionID,
+            path: configuration.statusPath,
+            evidence: evidence
+        )
+        guard terminalGenerationAllows(lease.sessionID, terminalGenerationsPath),
+              power.powerSource() == .ac,
+              power.sleepDisabled() == false,
+              power.acSleepMinutes() == 0,
+              let currentLease = validatedLease(), currentLease.sessionID == lease.sessionID
+        else { return false }
+        do {
+            try power.setSleepDisabled(true)
+        } catch {
+            return false
+        }
+        guard power.powerSource() == .ac,
+              power.sleepDisabled() == true,
+              power.acSleepMinutes() == 0,
+              let currentLease = validatedLease(), currentLease.sessionID == lease.sessionID,
+              terminalGenerationAllows(lease.sessionID, terminalGenerationsPath)
+        else { return false }
+        HelperStatusStore.write(
+            state: "active",
+            reason: "override-recovered",
+            sessionID: lease.sessionID,
+            path: configuration.statusPath,
+            evidence: evidence.merging(["recovered_at": String(Int(Date().timeIntervalSince1970))]) { _, new in new }
+        )
+        return true
+    }
+
+    private func overrideEvidence(sessionID: UUID, sleepDisabled: Bool?, acSleep: Int?) -> [String: String] {
+        [
+            "event": "override-drift",
+            "observed_sleep_disabled": sleepDisabled.map { $0 ? "1" : "0" } ?? "unreadable",
+            "observed_ac_sleep": acSleep.map(String.init) ?? "unreadable",
+            "observed_power": "ac",
+            "observed_session": sessionID.uuidString.lowercased(),
+            "observed_at": String(Int(Date().timeIntervalSince1970)),
+        ]
+    }
+
+    private func stop(reason: String, evidence: [String: String] = [:]) {
         guard !shouldExit else { return }
-        _ = restoreOwnedStateThenRecordTerminal(reason: reason, sessionID: activeSessionID)
+        _ = restoreOwnedStateThenRecordTerminal(reason: reason, sessionID: activeSessionID, evidence: evidence)
         // Recovery-required is a durable handled state. A nonzero exit here would
         // make launchd retry the same pmset failure forever through KeepAlive.
         exitCode = 0
@@ -262,7 +344,11 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     @discardableResult
-    private func restoreOwnedStateThenRecordTerminal(reason: String, sessionID: UUID?) -> Bool {
+    private func restoreOwnedStateThenRecordTerminal(
+        reason: String,
+        sessionID: UUID?,
+        evidence: [String: String] = [:]
+    ) -> Bool {
         // Publish a durable retry marker before mutating power state. If the helper
         // is interrupted anywhere in rollback, startup will retry restoration
         // instead of reactivating or treating the session as already cleaned up.
@@ -270,9 +356,10 @@ final class HelperRuntime: @unchecked Sendable {
             state: "recovery-required",
             reason: "\(reason)-restore-pending",
             sessionID: sessionID,
-            path: configuration.statusPath
+            path: configuration.statusPath,
+            evidence: evidence
         )
-        guard restoreOwnedState(reason: reason, statusSessionID: sessionID) else {
+        guard restoreOwnedState(reason: reason, statusSessionID: sessionID, evidence: evidence) else {
             return false
         }
         if let sessionID {
@@ -282,7 +369,11 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     @discardableResult
-    private func restoreOwnedState(reason: String, statusSessionID: UUID? = nil) -> Bool {
+    private func restoreOwnedState(
+        reason: String,
+        statusSessionID: UUID? = nil,
+        evidence: [String: String] = [:]
+    ) -> Bool {
         let applied: AppliedState
         switch AppliedStateStore.load(
             path: configuration.appliedStatePath,
@@ -294,7 +385,8 @@ final class HelperRuntime: @unchecked Sendable {
                 state: "inactive",
                 reason: reason,
                 sessionID: activeSessionID ?? statusSessionID,
-                path: configuration.statusPath
+                path: configuration.statusPath,
+                evidence: evidence
             )
             return true
         case .invalid:
@@ -319,7 +411,8 @@ final class HelperRuntime: @unchecked Sendable {
                         state: "recovery-required",
                         reason: "\(reason)-applied-state-remove-failed",
                         sessionID: applied.sessionID,
-                        path: configuration.statusPath
+                        path: configuration.statusPath,
+                        evidence: evidence
                     )
                     return false
                 }
@@ -328,7 +421,8 @@ final class HelperRuntime: @unchecked Sendable {
                     state: "inactive",
                     reason: reason,
                     sessionID: applied.sessionID,
-                    path: configuration.statusPath
+                    path: configuration.statusPath,
+                    evidence: evidence
                 )
                 return true
             }
@@ -338,7 +432,8 @@ final class HelperRuntime: @unchecked Sendable {
             state: "recovery-required",
             reason: "\(reason)-restore-unverified",
             sessionID: applied.sessionID,
-            path: configuration.statusPath
+            path: configuration.statusPath,
+            evidence: evidence
         )
         return false
     }

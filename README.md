@@ -2,7 +2,7 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.3` build `5` is a heartbeat-stability release. Lease start and renewal run on a serial monotonic coordinator, independent of full UI inspection and the main run loop. Root-owned, app-readable terminal generation tombstones prevent a late lease rewrite or rapid replug from rearming an ended session.
+Version `0.2.4` build `1` adds bounded same-session recovery for an owned SleepDisabled-only drift. Lease start and renewal run on a serial monotonic coordinator, independent of full UI inspection and the main run loop. Root-owned, app-readable terminal generation tombstones prevent a late lease rewrite or rapid replug from rearming an ended session.
 
 ## Safety model
 
@@ -59,7 +59,7 @@ The session suite covers current acknowledgement, monotonic heartbeat starvation
 ./script/validate_dmg.sh
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.3` build `5`, helper version `5`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.4` build `1`, helper version `1`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 
