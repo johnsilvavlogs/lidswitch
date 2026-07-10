@@ -6,6 +6,96 @@ import XCTest
 @testable import LidSwitchHelper
 
 final class SessionSafetyTests: XCTestCase {
+    @MainActor
+    func testNativeConfirmationPresenterMapsConfirmedActionsExactlyOnce() {
+        var actions: [NativeConfirmationAction] = []
+        let presenter = NativeConfirmationPresenter(responseProvider: { _ in .confirm })
+
+        for action in NativeConfirmationAction.allCases {
+            XCTAssertTrue(presenter.present(action) { actions.append(action) })
+        }
+
+        XCTAssertEqual(actions, [.startSession, .removeHelper, .quit])
+        XCTAssertEqual(NativeConfirmationAction.startSession.confirmTitle, "Start and Verify")
+        XCTAssertTrue(NativeConfirmationAction.removeHelper.isDestructive)
+        XCTAssertTrue(NativeConfirmationAction.allCases.allSatisfy(\.confirmsWithReturn))
+        XCTAssertTrue(NativeConfirmationAction.allCases.allSatisfy(\.cancelsWithEscape))
+    }
+
+    @MainActor
+    func testNativeConfirmationPresenterIgnoresCancelAndNestedDuplicatePresentation() {
+        var presenter: NativeConfirmationPresenter!
+        var actions: [NativeConfirmationAction] = []
+        presenter = NativeConfirmationPresenter(responseProvider: { action in
+            if action == .startSession {
+                XCTAssertFalse(presenter.present(.quit) { actions.append(.quit) })
+            }
+            return .cancel
+        })
+
+        for action in NativeConfirmationAction.allCases {
+            XCTAssertTrue(presenter.present(action) { actions.append(action) })
+        }
+        XCTAssertTrue(actions.isEmpty)
+    }
+
+    @MainActor
+    func testControllerStartingStatePublishesBeforeFreshPreconditionFailure() {
+        var snapshotCalls = 0
+        let controller = PowerController(bootstrap: false, snapshotProvider: { _ in
+            snapshotCalls += 1
+            return .empty
+        })
+
+        controller.startSession()
+        XCTAssertTrue(controller.isStarting)
+        XCTAssertTrue(controller.isBusy)
+        XCTAssertEqual(snapshotCalls, 0)
+        controller.startSession() // duplicate click cannot enqueue a second request
+        XCTAssertEqual(snapshotCalls, 0)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertEqual(snapshotCalls, 1)
+        XCTAssertFalse(controller.isStarting)
+        XCTAssertFalse(controller.isBusy)
+        XCTAssertTrue(controller.errorMessage?.contains("Session did not start.") == true)
+        XCTAssertTrue(controller.errorMessage?.contains("Protection remains off.") == true)
+    }
+
+    @MainActor
+    func testControllerInvalidatedStartRequestCannotCommitStalePreflight() {
+        var snapshotCalls = 0
+        let controller = PowerController(bootstrap: false, snapshotProvider: { _ in
+            snapshotCalls += 1
+            return .empty
+        })
+
+        controller.startSession()
+        controller.invalidateStartRequestForTesting()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+        XCTAssertEqual(snapshotCalls, 0)
+        XCTAssertFalse(controller.isStarting)
+        XCTAssertFalse(controller.isBusy)
+    }
+
+    func testExternalHDMIClamshellDoesNotChangePluggedInStartEligibility() {
+        // Display topology is intentionally absent from the safety contract:
+        // a single external HDMI display must not change an AC helper/session check.
+        let now = Date()
+        let snapshot = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: nil,
+            checkedAt: now
+        )
+
+        XCTAssertTrue(snapshot.source.isAC)
+        XCTAssertTrue(snapshot.canStartSession)
+    }
+
     func testHeartbeatRenewsFourTimesDuringFortySecondInspectionDelay() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

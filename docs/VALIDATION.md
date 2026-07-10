@@ -28,6 +28,12 @@ The `SessionSafetyTests` suite covers:
 - a second owned SleepDisabled drift terminalizing without rearm;
 - helper restart after a reserved recovery failing closed, restart after a spent
   recovery retaining the budget, and a new UUID receiving a fresh budget;
+- application-owned native Start, Remove Helper, and Quit confirmations: exact
+  one affirmative action, cancel/Escape no action, duplicate presentation guard,
+  immediate starting state, and fresh-precondition rejection with protection off;
+- AC eligibility is independent of display topology, including a single external
+  HDMI display in clamshell mode; only the qualified AC/helper/lease contract
+  controls session start.
 - bounded, structured, owner-only diagnostic history;
 - abnormal helper recovery;
 - restoration failure retaining applied-state;
