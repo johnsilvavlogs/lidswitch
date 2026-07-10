@@ -16,6 +16,9 @@ final class HelperRuntime: @unchecked Sendable {
     private let power: HelperPowerSystem
     private let currentBootID: () -> String?
     private let currentSystemBuild: () -> String?
+    private let reconciliationInterval: TimeInterval
+    private let terminalGenerationAllows: (UUID, String) -> Bool
+    private let terminalGenerationRecord: (UUID, String) -> Bool
     private var activeSessionID: UUID?
     private var shouldExit = false
     private var exitCode: Int32 = 0
@@ -23,16 +26,30 @@ final class HelperRuntime: @unchecked Sendable {
     private var powerSourceRunLoopSource: CFRunLoopSource?
     private var signalSources: [DispatchSourceSignal] = []
 
+    private var terminalGenerationsPath: String {
+        configuration.supportDirectory + "/terminal-generations"
+    }
+
     init(
         configuration: HelperConfiguration,
         power: HelperPowerSystem = SystemPowerSystem(),
         currentBootID: @escaping () -> String? = BootIdentity.current,
-        currentSystemBuild: @escaping () -> String? = SystemBuild.current
+        currentSystemBuild: @escaping () -> String? = SystemBuild.current,
+        reconciliationInterval: TimeInterval = 2,
+        terminalGenerationAllows: @escaping (UUID, String) -> Bool = { sessionID, path in
+            TerminalGenerationStore.allowsActivation(sessionID: sessionID, path: path)
+        },
+        terminalGenerationRecord: @escaping (UUID, String) -> Bool = { sessionID, path in
+            TerminalGenerationStore.record(sessionID: sessionID, path: path)
+        }
     ) {
         self.configuration = configuration
         self.power = power
         self.currentBootID = currentBootID
         self.currentSystemBuild = currentSystemBuild
+        self.reconciliationInterval = reconciliationInterval
+        self.terminalGenerationAllows = terminalGenerationAllows
+        self.terminalGenerationRecord = terminalGenerationRecord
     }
 
     func run() -> Int32 {
@@ -42,7 +59,23 @@ final class HelperRuntime: @unchecked Sendable {
             return 0
         }
         guard let lease = validatedLease() else {
-            _ = restoreOwnedState(reason: "no-valid-lease")
+            let preservedSessionID = HelperStatusTombstone.read(path: configuration.statusPath)
+                .flatMap(\.sessionID)
+            if let preservedSessionID {
+                _ = terminalGenerationRecord(preservedSessionID, terminalGenerationsPath)
+            }
+            _ = restoreOwnedState(reason: "no-valid-lease", statusSessionID: preservedSessionID)
+            return 0
+        }
+        guard terminalGenerationAllows(lease.sessionID, terminalGenerationsPath) else {
+            return 0
+        }
+        if let status = HelperStatusTombstone.read(path: configuration.statusPath),
+           status.sessionID == lease.sessionID,
+           status.isTerminal
+        {
+            // Terminal status is the fail-closed fallback when the bounded
+            // ledger could not be recorded. Cleanup preserves this session ID.
             return 0
         }
         switch recoverAppliedSession(lease: lease) {
@@ -50,16 +83,19 @@ final class HelperRuntime: @unchecked Sendable {
             break
         case .needsActivation:
             guard activate(lease: lease) else {
-                _ = restoreOwnedState(reason: "activation-failed")
+                _ = terminalGenerationRecord(lease.sessionID, terminalGenerationsPath)
+                _ = restoreOwnedState(reason: "activation-failed", statusSessionID: lease.sessionID)
                 return 0
             }
         case .failed:
+            _ = terminalGenerationRecord(lease.sessionID, terminalGenerationsPath)
+            _ = restoreOwnedState(reason: "recovery-failed", statusSessionID: lease.sessionID)
             return 0
         }
 
         installPowerNotification()
         installSignalHandlers()
-        leaseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        leaseTimer = Timer.scheduledTimer(withTimeInterval: reconciliationInterval, repeats: true) { [weak self] _ in
             self?.reconcile()
         }
 
@@ -206,6 +242,9 @@ final class HelperRuntime: @unchecked Sendable {
 
     private func stop(reason: String) {
         guard !shouldExit else { return }
+        if let activeSessionID {
+            _ = terminalGenerationRecord(activeSessionID, terminalGenerationsPath)
+        }
         _ = restoreOwnedState(reason: reason)
         // Recovery-required is a durable handled state. A nonzero exit here would
         // make launchd retry the same pmset failure forever through KeepAlive.
@@ -219,7 +258,7 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     @discardableResult
-    private func restoreOwnedState(reason: String) -> Bool {
+    private func restoreOwnedState(reason: String, statusSessionID: UUID? = nil) -> Bool {
         let applied: AppliedState
         switch AppliedStateStore.load(
             path: configuration.appliedStatePath,
@@ -230,7 +269,7 @@ final class HelperRuntime: @unchecked Sendable {
             HelperStatusStore.write(
                 state: "inactive",
                 reason: reason,
-                sessionID: activeSessionID,
+                sessionID: activeSessionID ?? statusSessionID,
                 path: configuration.statusPath
             )
             return true
@@ -238,7 +277,7 @@ final class HelperRuntime: @unchecked Sendable {
             HelperStatusStore.write(
                 state: "recovery-required",
                 reason: "\(reason)-invalid-applied-state",
-                sessionID: activeSessionID,
+                sessionID: activeSessionID ?? statusSessionID,
                 path: configuration.statusPath
             )
             return false

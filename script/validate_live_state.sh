@@ -2,6 +2,8 @@
 set -euo pipefail
 
 APP_NAME="LidSwitch"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT_DIR/script/release.env"
 APP_BUNDLE="${LIDSWITCH_INSTALLED_APP:-/Applications/LidSwitch.app}"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 HELPER_LABEL="com.johnsilva.lidswitch.helper"
@@ -12,8 +14,9 @@ STATUS_FILE="/Library/Application Support/LidSwitch/helper-status"
 LEASE="$HOME/Library/Application Support/LidSwitch/activation-lease"
 LEGACY_LOGIN="$HOME/Library/LaunchAgents/com.johnsilva.LidSwitch.login.plist"
 LEGACY_HELPER="/Library/Application Support/LidSwitch/lidswitch-helper"
-EXPECTED_HELPER_VERSION="3"
+EXPECTED_HELPER_VERSION="$LIDSWITCH_HELPER_VERSION"
 EXPECTED_BUILD="25F84"
+OBSERVATION_SECONDS="${LIDSWITCH_LIVE_OBSERVATION_SECONDS:-40}"
 
 fail() {
   echo "controlled-live-canary: $*" >&2
@@ -23,6 +26,10 @@ fail() {
 if [ "${LIDSWITCH_CONTROLLED_CANARY:-0}" != "1" ]; then
   fail "refusing live power validation without LIDSWITCH_CONTROLLED_CANARY=1"
 fi
+case "$OBSERVATION_SECONDS" in
+  ''|*[!0-9]*) fail "LIDSWITCH_LIVE_OBSERVATION_SECONDS must be an integer of at least 40" ;;
+esac
+[ "$OBSERVATION_SECONDS" -ge 40 ] || fail "LIDSWITCH_LIVE_OBSERVATION_SECONDS must be at least 40"
 
 normalize_path() {
   case "$1" in
@@ -102,7 +109,7 @@ case "$changed_ac:$original_ac" in
   *) fail "applied-state has an invalid AC restoration baseline" ;;
 esac
 
-for _ in $(/usr/bin/jot 10); do
+for _ in $(/usr/bin/jot "$OBSERVATION_SECONDS"); do
   power_is_ac || fail "power changed during active observation"
   test "$(sleep_disabled)" = "1" || fail "sleep override dropped during active observation"
   test "$(status_value state)" = "active" || fail "helper did not acknowledge the active session"
@@ -114,7 +121,7 @@ for _ in $(/usr/bin/jot 10); do
   /bin/sleep 1
 done
 
-echo "Active session remained verified for 10 seconds; killing app PID $pid to prove lease-expiry rollback."
+echo "Active session remained verified for $OBSERVATION_SECONDS seconds; killing app PID $pid to prove lease-expiry rollback."
 /bin/kill -KILL "$pid"
 
 restored=0

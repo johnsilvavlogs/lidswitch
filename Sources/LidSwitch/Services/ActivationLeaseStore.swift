@@ -8,9 +8,14 @@ enum ActivationLeaseStore {
         case openFailed(String, Int32)
         case writeFailed(String, Int32)
         case renameFailed(String, Int32)
+        case commitRejected(String)
     }
 
-    static func issue(sessionID: UUID, lifetime: TimeInterval = ActivationLease.maximumLifetime) throws -> ActivationLease {
+    static func issue(
+        sessionID: UUID,
+        lifetime: TimeInterval = ActivationLease.maximumLifetime,
+        commitGuard: (@Sendable () -> Bool)? = nil
+    ) throws -> ActivationLease {
         guard let bootID = BootIdentity.current(),
               let systemBuild = SystemBuild.current()
         else {
@@ -27,11 +32,15 @@ enum ActivationLeaseStore {
             ownerUID: getuid(),
             systemBuild: systemBuild
         )
-        try write(lease)
+        try write(lease, commitGuard: commitGuard)
         return lease
     }
 
-    static func write(_ lease: ActivationLease, to file: URL = AppPaths.activationLeaseFile) throws {
+    static func write(
+        _ lease: ActivationLease,
+        to file: URL = AppPaths.activationLeaseFile,
+        commitGuard: (@Sendable () -> Bool)? = nil
+    ) throws {
         try prepareSupportDirectory(file.deletingLastPathComponent())
         let temp = file.deletingLastPathComponent()
             .appendingPathComponent(".activation-lease.\(UUID().uuidString)", isDirectory: false)
@@ -70,6 +79,9 @@ enum ActivationLeaseStore {
         }
         guard fsync(descriptor) == 0 else {
             throw StoreError.writeFailed(temp.path, errno)
+        }
+        guard commitGuard?() ?? true else {
+            throw StoreError.commitRejected(file.path)
         }
         guard rename(temp.path, file.path) == 0 else {
             throw StoreError.renameFailed(file.path, errno)

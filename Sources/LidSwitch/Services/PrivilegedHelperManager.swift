@@ -95,15 +95,37 @@ enum PrivilegedHelperManager {
         helper_path=\(shellQuote(AppPaths.rootHelperPath))
         legacy_helper_path=\(shellQuote(AppPaths.legacyRootHelperPath))
         helper_version_path=\(shellQuote(AppPaths.rootHelperVersionPath))
+        terminal_generations_path=\(shellQuote(AppPaths.rootTerminalGenerationsPath))
         plist_path=\(shellQuote(AppPaths.launchDaemonPath))
         source_helper=\(shellQuote(sourceHelper))
         temp_helper="$root_dir/.LidSwitchHelper.new.$$"
         temp_plist="$plist_path.new.$$"
+        terminal_generations_temp="$root_dir/.terminal-generations.new.$$"
 
         cleanup_failed_install() {
-          /bin/rm -f "$temp_helper" "$temp_plist"
+          /bin/rm -f "$temp_helper" "$temp_plist" "$terminal_generations_temp"
         }
         trap cleanup_failed_install EXIT
+
+        lidswitch_terminal_ledger_valid() {
+          [ ! -L "$terminal_generations_path" ] || return 1
+          [ -f "$terminal_generations_path" ] || return 1
+          metadata="$(/usr/bin/stat -f '%u %g %Lp %l %z' "$terminal_generations_path" 2>/dev/null)" || return 1
+          set -- $metadata
+          [ "$#" -eq 5 ] || return 1
+          [ "$1" = "0" ] && [ "$2" = "0" ] && [ "$4" = "1" ] || return 1
+          case "$3" in ''|*[!0-7]*) return 1 ;; esac
+          [ $((0$3 & 18)) -eq 0 ] || return 1
+          [ "$5" -le 2560 ] || return 1
+          line_count="$(/usr/bin/awk 'END { print NR }' "$terminal_generations_path")"
+          [ "$line_count" -le 64 ] || return 1
+          if [ -s "$terminal_generations_path" ]; then
+            /usr/bin/grep -Eqv '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' "$terminal_generations_path" && return 1
+            duplicate_count="$(/usr/bin/tr '[:upper:]' '[:lower:]' < "$terminal_generations_path" | /usr/bin/sort | /usr/bin/uniq -d | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+            [ "$duplicate_count" -eq 0 ] || return 1
+          fi
+          return 0
+        }
 
         /bin/launchctl bootout system/\(AppPaths.helperLabel) >/dev/null 2>&1 || true
         /bin/launchctl bootout system "$plist_path" >/dev/null 2>&1 || true
@@ -113,6 +135,16 @@ enum PrivilegedHelperManager {
         /bin/mkdir -p "$root_dir"
         /usr/sbin/chown root:wheel "$root_dir"
         /bin/chmod 0755 "$root_dir"
+        if lidswitch_terminal_ledger_valid; then
+          /usr/sbin/chown root:wheel "$terminal_generations_path"
+          /bin/chmod 0600 "$terminal_generations_path"
+        else
+          /bin/rm -rf "$terminal_generations_path"
+          : > "$terminal_generations_temp"
+          /usr/sbin/chown root:wheel "$terminal_generations_temp"
+          /bin/chmod 0600 "$terminal_generations_temp"
+          /bin/mv -f "$terminal_generations_temp" "$terminal_generations_path"
+        fi
 
         /usr/bin/install -o root -g wheel -m 0755 "$source_helper" "$temp_helper"
         /usr/bin/codesign --verify --strict --verbose=2 "$temp_helper" >/dev/null

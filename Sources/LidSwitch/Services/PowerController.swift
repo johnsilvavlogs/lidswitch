@@ -11,12 +11,10 @@ final class PowerController: ObservableObject {
     @Published var errorMessage: String?
 
     nonisolated private static let refreshInterval: TimeInterval = 30
-    nonisolated private static let heartbeatInterval: TimeInterval = 8
-    nonisolated private static let acknowledgementTimeout: TimeInterval = 6
     nonisolated private static let restoreTimeout: TimeInterval = 8
 
     private var refreshTimer: Timer?
-    private var heartbeatTimer: Timer?
+    private var heartbeat: SessionHeartbeatCoordinator?
     private var activeSessionID: UUID?
     private var sessionWasAcknowledged = false
     private var activityToken: NSObjectProtocol?
@@ -152,8 +150,8 @@ final class PowerController: ObservableObject {
 
         do {
             try DesiredStateStore.write(.disabled)
-            _ = try ActivationLeaseStore.issue(sessionID: sessionID)
-            scheduleHeartbeat(for: sessionID)
+            let lease = try ActivationLeaseStore.issue(sessionID: sessionID)
+            scheduleHeartbeat(for: sessionID, initialLeaseExpiresMonotonic: lease.expiresMonotonic)
         } catch {
             endLocalSession(revokeLease: true)
             isBusy = false
@@ -162,33 +160,8 @@ final class PowerController: ObservableObject {
             return
         }
 
-        Task.detached {
-            let next = Self.waitForSnapshot(
-                timeout: Self.acknowledgementTimeout,
-                ownedSessionID: sessionID
-            ) { candidate in
-                candidate.sessionActive
-                    && candidate.activationLease?.sessionID == sessionID
-                    && candidate.helperStatus?.sessionID == sessionID
-            }
-            await MainActor.run {
-                guard self.activeSessionID == sessionID else { return }
-                self.snapshot = next
-                self.isBusy = false
-                if next.sessionActive,
-                   next.activationLease?.sessionID == sessionID,
-                   next.source.isAC
-                {
-                    self.sessionWasAcknowledged = true
-                    self.announce("Protection active — plugged in.")
-                } else {
-                    self.endLocalSession(revokeLease: true)
-                    self.errorMessage = "The helper did not verify the live system override. Check the current status; use Restore Sleep whenever recovery or power verification is required."
-                    self.snapshot = PowerInspector.snapshot(ownedSessionID: self.activeSessionID)
-                    self.announce(self.errorMessage ?? "The monitored session did not start.")
-                }
-            }
-        }
+        // Acknowledgement is intentionally owned by the serial heartbeat.
+        // Full UI inspection can be arbitrarily slow without starving start.
     }
 
     func stopSession() {
@@ -347,45 +320,70 @@ final class PowerController: ObservableObject {
         }
     }
 
-    private func scheduleHeartbeat(for sessionID: UUID) {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.heartbeatInterval,
-            repeats: true
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.renewLease(for: sessionID)
+    private func scheduleHeartbeat(for sessionID: UUID, initialLeaseExpiresMonotonic: TimeInterval) {
+        heartbeat?.stop(reason: "superseded-session")
+        let coordinator = SessionHeartbeatCoordinator(
+            observe: { PowerInspector.sessionHeartbeatObservation(sessionID: $0) },
+            renew: { _, commitGuard in
+                try ActivationLeaseStore.issue(sessionID: sessionID, commitGuard: commitGuard).expiresMonotonic
+            },
+            revoke: { try? ActivationLeaseStore.revoke() },
+            onAcknowledged: { [weak self] acknowledgedID in
+                Task { @MainActor in self?.heartbeatDidAcknowledge(acknowledgedID) }
+            },
+            onEnded: { [weak self] endedID, reason in
+                Task { @MainActor in self?.heartbeatDidEnd(endedID, reason: reason) }
+            }
+        )
+        heartbeat = coordinator
+        coordinator.start(
+            sessionID: sessionID,
+            initialLeaseExpiresMonotonic: initialLeaseExpiresMonotonic
+        )
+    }
+
+    private func heartbeatDidAcknowledge(_ sessionID: UUID) {
+        guard activeSessionID == sessionID else { return }
+        sessionWasAcknowledged = true
+        isBusy = false
+        announce("Protection active — plugged in.")
+        Task.detached {
+            let next = PowerInspector.snapshot(ownedSessionID: sessionID)
+            await MainActor.run {
+                guard self.activeSessionID == sessionID else { return }
+                self.snapshot = next
             }
         }
     }
 
-    private func renewLease(for sessionID: UUID) {
+    private func heartbeatDidEnd(_ sessionID: UUID, reason: String) {
         guard activeSessionID == sessionID else { return }
-        let live = PowerInspector.snapshot(ownedSessionID: sessionID)
-        guard live.sessionActive,
-              live.activationLease?.sessionID == sessionID
-        else {
-            snapshot = live
-            endLocalSession(
-                revokeLease: true,
-                announcement: "The plugged-in session ended and will not restart automatically."
-            )
-            return
-        }
-
-        do {
-            _ = try ActivationLeaseStore.issue(sessionID: sessionID)
-        } catch {
-            endLocalSession(revokeLease: true)
-            errorMessage = errorMessage(for: error, fallback: "The safety heartbeat failed. Protection is ending now.")
-            snapshot = PowerInspector.snapshot(ownedSessionID: activeSessionID)
-            announce(errorMessage ?? "The safety heartbeat failed.")
+        heartbeat = nil
+        activeSessionID = nil
+        sessionWasAcknowledged = false
+        isBusy = false
+        endActivity()
+        errorMessage = reason == "power-disconnected"
+            ? nil
+            : "The safety monitor ended this session (\(reason)). System sleep is being restored."
+        announce(
+            reason == "power-disconnected"
+                ? "Power disconnected. The LidSwitch session ended and will not restart automatically."
+                : "The LidSwitch session ended and will not restart automatically."
+        )
+        Task.detached {
+            let next = PowerInspector.snapshot(ownedSessionID: nil)
+            await MainActor.run { self.snapshot = next }
         }
     }
 
-    private func endLocalSession(revokeLease: Bool, announcement: String? = nil) {
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
+    private func endLocalSession(
+        revokeLease: Bool,
+        reason: String = "local-session-ended",
+        announcement: String? = nil
+    ) {
+        heartbeat?.stop(reason: reason)
+        heartbeat = nil
         activeSessionID = nil
         sessionWasAcknowledged = false
         if revokeLease {

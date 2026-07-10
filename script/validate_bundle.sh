@@ -2,10 +2,11 @@
 set -euo pipefail
 
 APP_NAME="LidSwitch"
-EXPECTED_VERSION="0.2.1"
-EXPECTED_BUILD="3"
-EXPECTED_ID="com.johnsilva.LidSwitch"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT_DIR/script/release.env"
+EXPECTED_VERSION="$LIDSWITCH_APP_VERSION"
+EXPECTED_BUILD="$LIDSWITCH_APP_BUILD"
+EXPECTED_ID="com.johnsilva.LidSwitch"
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT="${TMP_ROOT%/}"
 APP_BUNDLE="${LIDSWITCH_APP_BUNDLE:-${LIDSWITCH_APP_STAGE_ROOT:-$TMP_ROOT/lidswitch-app}/$APP_NAME.app}"

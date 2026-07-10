@@ -2,11 +2,11 @@ import Foundation
 
 enum AppPaths {
     static let appName = "LidSwitch"
-    static let appVersion = "0.2.1"
-    static let appBuild = "3"
+    static let appVersion = "0.2.2"
+    static let appBuild = "4"
     static let bundleIdentifier = "com.johnsilva.LidSwitch"
     static let helperLabel = "com.johnsilva.lidswitch.helper"
-    static let helperVersion = "3"
+    static let helperVersion = "4"
     static let legacyLoginLabel = "com.johnsilva.LidSwitch.login"
 
     static var userSupportDirectory: URL {
@@ -21,6 +21,10 @@ enum AppPaths {
 
     static var activationLeaseFile: URL {
         userSupportDirectory.appendingPathComponent("activation-lease", isDirectory: false)
+    }
+
+    static var sessionHistoryFile: URL {
+        userSupportDirectory.appendingPathComponent("session-history.json", isDirectory: false)
     }
 
     static var legacyLoginAgentFile: URL {
@@ -41,5 +45,6 @@ enum AppPaths {
     static let rootOriginalBatterySleepPath = "/Library/Application Support/LidSwitch/original-battery-sleep"
     static let rootAppliedStatePath = "/Library/Application Support/LidSwitch/applied-state"
     static let rootHelperStatusPath = "/Library/Application Support/LidSwitch/helper-status"
+    static let rootTerminalGenerationsPath = "/Library/Application Support/LidSwitch/terminal-generations"
     static let launchDaemonPath = "/Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist"
 }
