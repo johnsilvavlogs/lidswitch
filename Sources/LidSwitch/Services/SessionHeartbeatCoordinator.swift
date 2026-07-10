@@ -66,6 +66,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             cancelTimer()
             let startedMonotonic = monotonicNow()
             self.sessionID = sessionID
+            lastRecoveryAcknowledgement = nil
             phase = .starting(deadlineMonotonic: startedMonotonic + acknowledgementTimeout)
             nextRenewalMonotonic = startedMonotonic + renewalInterval
             leaseExpiresMonotonic = initialLeaseExpiresMonotonic

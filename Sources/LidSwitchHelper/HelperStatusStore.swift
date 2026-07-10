@@ -10,7 +10,10 @@ enum HelperStatusStore {
         evidence: [String: String] = [:]
     ) {
         let boundedEvidence = evidence
-            .filter { $0.key.range(of: "^[a-z_]{1,48}$", options: .regularExpression) != nil }
+            .filter {
+                $0.key.range(of: "^[a-z_]{1,48}$", options: .regularExpression) != nil
+                    && !["state", "reason", "session", "updated"].contains($0.key)
+            }
             .sorted { $0.key < $1.key }
             .prefix(8)
             .map { "\($0.key)=\($0.value.prefix(96))" }

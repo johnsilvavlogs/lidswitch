@@ -23,8 +23,9 @@ The `SessionSafetyTests` suite covers:
 - unplug restoration and no rearm;
 - helper terminal-generation replay rejection after unplug and blocked preflight;
 - helper and controller override/status drift termination;
-- owned SleepDisabled-only drift recovery with the same session UUID, fresh
+- one owned SleepDisabled-only drift recovery with the same session UUID, fresh
   recovery acknowledgement, bounded diagnostics, and no AC-sleep overwrite;
+- a second owned SleepDisabled drift terminalizing without rearm;
 - bounded, structured, owner-only diagnostic history;
 - abnormal helper recovery;
 - restoration failure retaining applied-state;

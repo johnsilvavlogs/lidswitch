@@ -20,6 +20,9 @@ final class HelperRuntime: @unchecked Sendable {
     private let terminalGenerationAllows: (UUID, String) -> Bool
     private let terminalGenerationRecord: (UUID, String) -> Bool
     private var activeSessionID: UUID?
+    // A session gets one bounded repair for an owned SleepDisabled-only loss.
+    // A second loss is terminal so we never fight another power-policy actor.
+    private var successfulOverrideRecoveries = 0
     private var shouldExit = false
     private var exitCode: Int32 = 0
     private var leaseTimer: Timer?
@@ -182,6 +185,7 @@ final class HelperRuntime: @unchecked Sendable {
         }
 
         activeSessionID = lease.sessionID
+        successfulOverrideRecoveries = 0
         HelperStatusStore.write(
             state: "active",
             reason: "verified",
@@ -213,6 +217,7 @@ final class HelperRuntime: @unchecked Sendable {
                power.acSleepMinutes() == 0
             {
                 activeSessionID = lease.sessionID
+                successfulOverrideRecoveries = 0
                 HelperStatusStore.write(
                     state: "active",
                     reason: "recovered-after-abnormal-exit",
@@ -269,6 +274,7 @@ final class HelperRuntime: @unchecked Sendable {
     ) -> Bool {
         let status = HelperStatusTombstone.read(path: configuration.statusPath)
         guard activeSessionID == lease.sessionID,
+              successfulOverrideRecoveries == 0,
               terminalGenerationAllows(lease.sessionID, terminalGenerationsPath),
               !(status?.sessionID == lease.sessionID && status?.isTerminal == true),
               case let .success(applied) = AppliedStateStore.load(
@@ -315,6 +321,7 @@ final class HelperRuntime: @unchecked Sendable {
             path: configuration.statusPath,
             evidence: evidence.merging(["recovered_at": String(Int(Date().timeIntervalSince1970))]) { _, new in new }
         )
+        successfulOverrideRecoveries = 1
         return true
     }
 

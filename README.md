@@ -7,7 +7,7 @@ Version `0.2.4` build `1` adds bounded same-session recovery for an owned SleepD
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `5` and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `1` and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app writes a same-boot, same-user, same-build lease with a maximum lifetime of 30 seconds and renews it every 8 seconds.
 - The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and live `pmset` state.
