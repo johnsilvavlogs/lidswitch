@@ -10,7 +10,7 @@ The helper reads local power state through IOKit and `pmset`. It does not contac
 
 ## Battery
 
-Version `0.2.4` has no battery keep-awake mode. Unplugging ends the session and restoring power does not restart it.
+Version `0.2.5` has no battery keep-awake mode. Unplugging ends the session and restoring power does not restart it.
 
 ## Website and GitHub
 

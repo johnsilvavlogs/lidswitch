@@ -5,6 +5,7 @@ import SwiftUI
 struct LidSwitchApp: App {
     @NSApplicationDelegateAdaptor(LidSwitchApplicationDelegate.self) private var appDelegate
     @StateObject private var controller: PowerController
+    @StateObject private var confirmationPresenter: NativeConfirmationPresenter
 
     init() {
         // Diagnostic/packaging commands must exit before a controller is created.
@@ -12,12 +13,13 @@ struct LidSwitchApp: App {
         DebugCommands.handleIfNeeded()
         let controller = PowerController()
         _controller = StateObject(wrappedValue: controller)
+        _confirmationPresenter = StateObject(wrappedValue: NativeConfirmationPresenter())
         LidSwitchApplicationDelegate.controller = controller
     }
 
     var body: some Scene {
         MenuBarExtra {
-            LidSwitchPanel(controller: controller)
+            LidSwitchPanel(controller: controller, confirmationPresenter: confirmationPresenter)
                 .frame(width: 370)
         } label: {
             Label(controller.snapshot.statusTitle, systemImage: controller.menuBarSymbol)

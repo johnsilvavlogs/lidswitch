@@ -8,6 +8,7 @@ import LidSwitchCore
 final class PowerController: ObservableObject {
     @Published private(set) var snapshot: PowerSnapshot = .empty
     @Published private(set) var isBusy = false
+    @Published private(set) var isStarting = false
     @Published var errorMessage: String?
 
     nonisolated private static let refreshInterval: TimeInterval = 30
@@ -21,10 +22,17 @@ final class PowerController: ObservableObject {
     private var powerSourceRunLoopSource: CFRunLoopSource?
     private var nextTerminationIsAuthorized = false
     private var pendingStopCompletion: ((Bool) -> Void)?
+    private var startRequestID: UUID?
+    private let snapshotProvider: (UUID?) -> PowerSnapshot
 
-    init() {
+    init(
+        bootstrap: Bool = true,
+        snapshotProvider: @escaping (UUID?) -> PowerSnapshot = { PowerInspector.snapshot(ownedSessionID: $0) }
+    ) {
+        self.snapshotProvider = snapshotProvider
         // A session belongs to one app process. A fresh process never adopts a
         // predecessor's lease; revoking it makes the helper restore immediately.
+        guard bootstrap else { return }
         try? ActivationLeaseStore.revoke()
         refresh()
         installPowerSourceObserver()
@@ -63,7 +71,7 @@ final class PowerController: ObservableObject {
 
     func refresh() {
         let previousStatus = snapshot.statusTitle
-        let next = PowerInspector.snapshot(ownedSessionID: activeSessionID)
+        let next = snapshotProvider(activeSessionID)
         snapshot = next
 
         guard let sessionID = activeSessionID else {
@@ -134,15 +142,31 @@ final class PowerController: ObservableObject {
 
     func startSession() {
         guard !isBusy else { return }
+        let requestID = UUID()
+        startRequestID = requestID
+        isBusy = true
+        isStarting = true
+        errorMessage = nil
+        announce("Starting LidSwitch session. Waiting for helper confirmation.")
+
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.continueStart(requestID: requestID)
+        }
+    }
+
+    private func continueStart(requestID: UUID) {
+        guard startRequestID == requestID, isStarting else { return }
         refresh()
         guard snapshot.canStartSession else {
-            errorMessage = snapshot.statusDetail
-            announce(snapshot.statusDetail)
+            isStarting = false
+            isBusy = false
+            startRequestID = nil
+            errorMessage = "Session did not start. \(snapshot.statusDetail) Protection remains off."
+            announce(errorMessage ?? "Session did not start. Protection remains off.")
             return
         }
 
-        isBusy = true
-        errorMessage = nil
         let sessionID = UUID()
         activeSessionID = sessionID
         sessionWasAcknowledged = false
@@ -154,15 +178,26 @@ final class PowerController: ObservableObject {
             scheduleHeartbeat(for: sessionID, initialLeaseExpiresMonotonic: lease.expiresMonotonic)
         } catch {
             endLocalSession(revokeLease: true)
+            isStarting = false
             isBusy = false
-            errorMessage = errorMessage(for: error, fallback: "The monitored session could not start. Nothing was enabled.")
-            announce(errorMessage ?? "The monitored session could not start.")
+            startRequestID = nil
+            let detail = errorMessage(for: error, fallback: "Nothing was enabled.")
+            errorMessage = "Session did not start. \(detail) Protection remains off."
+            announce(errorMessage ?? "Session did not start. Protection remains off.")
             return
         }
 
         // Acknowledgement is intentionally owned by the serial heartbeat.
         // Full UI inspection can be arbitrarily slow without starving start.
     }
+
+#if DEBUG
+    func invalidateStartRequestForTesting() {
+        startRequestID = nil
+        isStarting = false
+        isBusy = false
+    }
+#endif
 
     func stopSession() {
         stopSession(quitWhenRestored: false, completion: nil)
@@ -345,7 +380,9 @@ final class PowerController: ObservableObject {
     private func heartbeatDidAcknowledge(_ sessionID: UUID) {
         guard activeSessionID == sessionID else { return }
         sessionWasAcknowledged = true
+        isStarting = false
         isBusy = false
+        startRequestID = nil
         announce("Protection active — plugged in.")
         Task.detached {
             let next = PowerInspector.snapshot(ownedSessionID: sessionID)
@@ -361,7 +398,9 @@ final class PowerController: ObservableObject {
         heartbeat = nil
         activeSessionID = nil
         sessionWasAcknowledged = false
+        isStarting = false
         isBusy = false
+        startRequestID = nil
         endActivity()
         errorMessage = reason == "power-disconnected"
             ? nil
@@ -386,6 +425,8 @@ final class PowerController: ObservableObject {
         heartbeat = nil
         activeSessionID = nil
         sessionWasAcknowledged = false
+        isStarting = false
+        startRequestID = nil
         if revokeLease {
             try? ActivationLeaseStore.revoke()
         }

@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.4` is a SwiftPM menu bar app with three targets:
+LidSwitch `0.2.5` is a SwiftPM menu bar app with three targets:
 
 - `LidSwitch`: UI, inspection, lease writer, installation and recovery controls.
 - `LidSwitchCore`: lease schema, monotonic clock, boot identity, and compatibility policy.
@@ -34,6 +34,6 @@ launchd uses `KeepAlive.SuccessfulExit=false` with throttling only to recover ab
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.4`, `CFBundleVersion=1`, and the signed native helper under `Contents/Library/LaunchServices`.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.5`, `CFBundleVersion=1`, and the signed native helper under `Contents/Library/LaunchServices`.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.
