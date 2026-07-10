@@ -283,17 +283,16 @@ final class HelperRuntime: @unchecked Sendable {
     private func restoreOwnedChanges(_ applied: AppliedState) -> Bool {
         var sleepRestored = true
         if applied.changedSleepDisabled {
-            switch power.sleepDisabled() {
-            case false:
-                break
-            case true:
-                do {
-                    try power.setSleepDisabled(false)
-                    sleepRestored = power.sleepDisabled() == false
-                } catch {
-                    sleepRestored = false
+            if let sleepDisabled = power.sleepDisabled() {
+                if sleepDisabled {
+                    do {
+                        try power.setSleepDisabled(false)
+                        sleepRestored = power.sleepDisabled() == false
+                    } catch {
+                        sleepRestored = false
+                    }
                 }
-            case nil:
+            } else {
                 sleepRestored = false
             }
         }
