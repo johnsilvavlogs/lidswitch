@@ -52,6 +52,7 @@ enum PowerInspector {
             || manager.fileExists(atPath: AppPaths.rootHelperVersionPath)
             || manager.fileExists(atPath: AppPaths.rootAppliedStatePath)
             || manager.fileExists(atPath: AppPaths.rootHelperStatusPath)
+            || manager.fileExists(atPath: AppPaths.rootTerminalGenerationsPath)
             || manager.fileExists(atPath: AppPaths.rootOriginalACSleepPath)
             || manager.fileExists(atPath: AppPaths.rootOriginalBatterySleepPath)
     }
@@ -62,11 +63,43 @@ enum PowerInspector {
               readFile(AppPaths.rootHelperVersionPath)?.trimmingCharacters(in: .whitespacesAndNewlines) == AppPaths.helperVersion,
               artifact(readFile(AppPaths.launchDaemonPath), matches: PrivilegedHelperManager.diagnosticLaunchDaemonPlist()),
               filesMatch(AppPaths.rootHelperPath, AppPaths.bundledHelperFile.path),
+              terminalGenerationsValid(),
               !FileManager.default.fileExists(atPath: AppPaths.legacyRootHelperPath)
         else {
             return true
         }
         return false
+    }
+
+    static func terminalGenerationsValid(
+        path: String = AppPaths.rootTerminalGenerationsPath,
+        expectedOwnerUID: uid_t = 0
+    ) -> Bool {
+        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+              status.st_uid == expectedOwnerUID,
+              (status.st_mode & S_IFMT) == S_IFREG,
+              status.st_nlink == 1,
+              status.st_mode & (S_IWGRP | S_IWOTH) == 0,
+              status.st_size >= 0,
+              status.st_size <= TerminalGenerationLedger.maximumBytes
+        else { return false }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 1_024)
+        while data.count <= TerminalGenerationLedger.maximumBytes {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count > 0 { data.append(buffer, count: count); continue }
+            if count == 0 { break }
+            if errno == EINTR { continue }
+            return false
+        }
+        guard data.count <= TerminalGenerationLedger.maximumBytes,
+              let raw = String(data: data, encoding: .utf8)
+        else { return false }
+        return TerminalGenerationLedger.parse(raw) != nil
     }
 
     static func parsePowerSource(from output: String) -> PowerSource {
@@ -123,7 +156,7 @@ enum PowerInspector {
         return lease
     }
 
-    private static func helperStatus() -> HelperStatusRecord? {
+    static func helperStatus() -> HelperStatusRecord? {
         var status = stat()
         guard lstat(AppPaths.rootHelperStatusPath, &status) == 0,
               status.st_uid == 0,
@@ -134,6 +167,51 @@ enum PowerInspector {
               let raw = readFile(AppPaths.rootHelperStatusPath)
         else { return nil }
         return HelperStatusRecord.parse(raw)
+    }
+
+    static func sessionHeartbeatObservation(sessionID: UUID) -> SessionHeartbeatObservation {
+        let power: SessionHeartbeatObservation.Power
+        if let unmanagedInfo = IOPSCopyPowerSourcesInfo() {
+            let powerInfo = unmanagedInfo.takeRetainedValue()
+            if let unmanagedSource = IOPSGetProvidingPowerSourceType(powerInfo) {
+                let source = unmanagedSource.takeUnretainedValue() as String
+                if source == kIOPMACPowerKey {
+                    power = .ac
+                } else if source == kIOPMBatteryPowerKey {
+                    power = .disconnected
+                } else {
+                    power = .unknown
+                }
+            } else {
+                power = .unknown
+            }
+        } else {
+            power = .unknown
+        }
+
+        let leaseIsValid: Bool
+        if let lease = ActivationLeaseStore.read(),
+           lease.sessionID == sessionID,
+           let bootID = BootIdentity.current(),
+           let systemBuild = SystemBuild.current(),
+           lease.validationFailure(
+               now: Date(),
+               nowMonotonic: MonotonicClock.seconds(),
+               currentBootID: bootID,
+               expectedOwnerUID: getuid(),
+               currentSystemBuild: systemBuild
+           ) == nil
+        {
+            leaseIsValid = true
+        } else {
+            leaseIsValid = false
+        }
+
+        return SessionHeartbeatObservation(
+            power: power,
+            leaseIsValid: leaseIsValid,
+            helperStatus: helperStatus()
+        )
     }
 
     private static func readFile(_ path: String) -> String? {

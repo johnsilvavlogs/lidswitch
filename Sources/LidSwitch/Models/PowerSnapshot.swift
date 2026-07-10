@@ -23,7 +23,7 @@ enum PowerSource: Equatable {
     }
 }
 
-struct HelperStatusRecord: Equatable {
+struct HelperStatusRecord: Equatable, Sendable {
     let state: String
     let reason: String
     let sessionID: UUID?

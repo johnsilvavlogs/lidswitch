@@ -6,6 +6,335 @@ import XCTest
 @testable import LidSwitchHelper
 
 final class SessionSafetyTests: XCTestCase {
+    func testHeartbeatRenewsFourTimesDuringFortySecondInspectionDelay() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        let clock = LockedBox(startedAt)
+        let monotonic = LockedBox<TimeInterval>(0)
+        let renewals = LockedBox([Date]())
+        let acknowledgements = LockedBox(0)
+        let diagnostics = SessionDiagnosticStore(file: root.appendingPathComponent("history.json"))
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            acknowledgementTimeout: 20,
+            now: { clock.value },
+            monotonicNow: { monotonic.value },
+            observe: { _ in
+                let current = clock.value
+                return SessionHeartbeatObservation(
+                    power: .ac,
+                    leaseIsValid: true,
+                    helperStatus: HelperStatusRecord(
+                        state: "active", reason: "verified", sessionID: sessionID, updatedAt: current
+                    )
+                )
+            },
+            renew: { _, commitGuard in
+                guard commitGuard() else { throw TestError.commitRejected }
+                renewals.withValue { $0.append(clock.value) }
+                return monotonic.value + 30
+            },
+            revoke: {},
+            diagnostics: diagnostics,
+            onAcknowledged: { _ in acknowledgements.withValue { $0 += 1 } },
+            onEnded: { _, _ in }
+        )
+        coordinator.start(sessionID: sessionID, initialLeaseExpiresMonotonic: 30)
+        defer { coordinator.stop(reason: "test-complete") }
+
+        coordinator.evaluateForTesting()
+        for second in [8, 16, 24, 32, 40] {
+            clock.value = startedAt.addingTimeInterval(TimeInterval(second))
+            monotonic.value = TimeInterval(second)
+            coordinator.evaluateForTesting()
+        }
+
+        XCTAssertGreaterThanOrEqual(renewals.value.count, 4)
+        XCTAssertEqual(renewals.value.map { Int($0.timeIntervalSince(startedAt)) }, [8, 16, 24, 32, 40])
+        XCTAssertEqual(acknowledgements.value, 1)
+        XCTAssertTrue(diagnostics.entries().contains { $0.event == "acknowledged" })
+    }
+
+    func testHeartbeatAcknowledgementJustOutsideTimeoutFailsClosed() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 2_000)
+        let clock = LockedBox(startedAt)
+        let monotonic = LockedBox<TimeInterval>(0)
+        let revoked = LockedBox(0)
+        let endedReason = LockedBox<String?>(nil)
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            acknowledgementTimeout: 20,
+            now: { clock.value },
+            monotonicNow: { monotonic.value },
+            observe: { _ in SessionHeartbeatObservation(power: .ac, leaseIsValid: true, helperStatus: nil) },
+            renew: { _, commitGuard in
+                guard commitGuard() else { throw TestError.commitRejected }
+                return monotonic.value + 30
+            },
+            revoke: { revoked.withValue { $0 += 1 } },
+            diagnostics: SessionDiagnosticStore(file: root.appendingPathComponent("history.json")),
+            onAcknowledged: { _ in },
+            onEnded: { _, reason in endedReason.value = reason }
+        )
+        coordinator.start(sessionID: sessionID, initialLeaseExpiresMonotonic: 30)
+        clock.value = startedAt.addingTimeInterval(20)
+        monotonic.value = 20
+        coordinator.evaluateForTesting()
+
+        XCTAssertEqual(revoked.value, 1)
+        XCTAssertEqual(endedReason.value, "acknowledgement-timeout")
+    }
+
+    func testHeartbeatAcknowledgementJustInsideTimeoutCanRenew() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = UUID()
+        let base = Date(timeIntervalSince1970: 2_500)
+        let clock = LockedBox(base)
+        let monotonic = LockedBox<TimeInterval>(0)
+        let status = LockedBox<HelperStatusRecord?>(nil)
+        let acknowledged = LockedBox(0)
+        let renewed = LockedBox(0)
+        let revoked = LockedBox(0)
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            acknowledgementTimeout: 20,
+            now: { clock.value },
+            monotonicNow: { monotonic.value },
+            observe: { _ in SessionHeartbeatObservation(power: .ac, leaseIsValid: true, helperStatus: status.value) },
+            renew: { _, commitGuard in
+                guard commitGuard() else { throw TestError.commitRejected }
+                renewed.withValue { $0 += 1 }
+                return monotonic.value + 30
+            },
+            revoke: { revoked.withValue { $0 += 1 } },
+            diagnostics: SessionDiagnosticStore(file: root.appendingPathComponent("history.json")),
+            onAcknowledged: { _ in acknowledged.withValue { $0 += 1 } },
+            onEnded: { _, _ in }
+        )
+        coordinator.start(sessionID: sessionID, initialLeaseExpiresMonotonic: 30)
+        monotonic.value = 8
+        clock.value = base.addingTimeInterval(8)
+        coordinator.evaluateForTesting()
+        XCTAssertEqual(renewed.value, 0)
+        XCTAssertEqual(revoked.value, 0)
+
+        monotonic.value = 19.9
+        clock.value = base.addingTimeInterval(19.9)
+        status.value = HelperStatusRecord(
+            state: "active", reason: "verified", sessionID: sessionID, updatedAt: clock.value
+        )
+        coordinator.evaluateForTesting()
+        defer { coordinator.stop(reason: "test-complete") }
+
+        XCTAssertEqual(acknowledged.value, 1)
+        XCTAssertEqual(renewed.value, 1)
+    }
+
+    func testCommitBoundaryTerminalTransitionCannotPublishFreshLease() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = UUID()
+        let base = Date(timeIntervalSince1970: 2_750)
+        let clock = LockedBox(base)
+        let monotonic = LockedBox<TimeInterval>(0)
+        let status = LockedBox(HelperStatusRecord(
+            state: "active", reason: "verified", sessionID: sessionID, updatedAt: base
+        ))
+        let committed = LockedBox(0)
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            acknowledgementTimeout: 20,
+            now: { clock.value },
+            monotonicNow: { monotonic.value },
+            observe: { _ in SessionHeartbeatObservation(power: .ac, leaseIsValid: true, helperStatus: status.value) },
+            renew: { _, commitGuard in
+                status.value = HelperStatusRecord(
+                    state: "inactive",
+                    reason: "override-lost",
+                    sessionID: sessionID,
+                    updatedAt: clock.value
+                )
+                guard commitGuard() else { throw TestError.commitRejected }
+                committed.withValue { $0 += 1 }
+                return monotonic.value + 30
+            },
+            revoke: {},
+            diagnostics: SessionDiagnosticStore(file: root.appendingPathComponent("history.json")),
+            onAcknowledged: { _ in },
+            onEnded: { _, _ in }
+        )
+        coordinator.start(sessionID: sessionID, initialLeaseExpiresMonotonic: 30)
+        coordinator.evaluateForTesting()
+        monotonic.value = 8
+        clock.value = base.addingTimeInterval(8)
+        coordinator.evaluateForTesting()
+
+        XCTAssertEqual(committed.value, 0)
+    }
+
+    func testHeartbeatRunsOffMainThreadWithoutRunLoopTimer() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = UUID()
+        let renewedOffMain = LockedBox(false)
+        let signal = DispatchSemaphore(value: 0)
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 0.005,
+            renewalInterval: 0.01,
+            acknowledgementTimeout: 1,
+            observe: { _ in
+                SessionHeartbeatObservation(
+                    power: .ac,
+                    leaseIsValid: true,
+                    helperStatus: HelperStatusRecord(
+                        state: "active",
+                        reason: "verified",
+                        sessionID: sessionID,
+                        updatedAt: Date()
+                    )
+                )
+            },
+            renew: { _, commitGuard in
+                guard commitGuard() else { throw TestError.commitRejected }
+                renewedOffMain.value = !Thread.isMainThread
+                signal.signal()
+                return MonotonicClock.seconds() + 30
+            },
+            revoke: {},
+            diagnostics: SessionDiagnosticStore(file: root.appendingPathComponent("history.json")),
+            onAcknowledged: { _ in },
+            onEnded: { _, _ in }
+        )
+        coordinator.start(
+            sessionID: sessionID,
+            initialLeaseExpiresMonotonic: MonotonicClock.seconds() + 30
+        )
+        XCTAssertEqual(signal.wait(timeout: .now() + 1), .success)
+        coordinator.stop(reason: "test-complete")
+        XCTAssertTrue(renewedOffMain.value)
+    }
+
+    func testObservedUnplugAndReconnectCannotRearmGeneration() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessionID = UUID()
+        let clock = LockedBox(Date(timeIntervalSince1970: 3_000))
+        let monotonic = LockedBox<TimeInterval>(0)
+        let power = LockedBox(SessionHeartbeatObservation.Power.ac)
+        let renewals = LockedBox(0)
+        let revocations = LockedBox(0)
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            acknowledgementTimeout: 20,
+            now: { clock.value },
+            monotonicNow: { monotonic.value },
+            observe: { _ in
+                SessionHeartbeatObservation(
+                    power: power.value,
+                    leaseIsValid: true,
+                    helperStatus: HelperStatusRecord(
+                        state: "active", reason: "verified", sessionID: sessionID, updatedAt: clock.value
+                    )
+                )
+            },
+            renew: { _, commitGuard in
+                guard commitGuard() else { throw TestError.commitRejected }
+                renewals.withValue { $0 += 1 }
+                return monotonic.value + 30
+            },
+            revoke: { revocations.withValue { $0 += 1 } },
+            diagnostics: SessionDiagnosticStore(file: root.appendingPathComponent("history.json")),
+            onAcknowledged: { _ in },
+            onEnded: { _, _ in }
+        )
+        coordinator.start(sessionID: sessionID, initialLeaseExpiresMonotonic: 30)
+        coordinator.evaluateForTesting()
+        power.value = .disconnected
+        coordinator.evaluateForTesting()
+        power.value = .ac
+        clock.withValue { $0 = $0.addingTimeInterval(40) }
+        monotonic.value = 40
+        coordinator.evaluateForTesting()
+
+        XCTAssertEqual(revocations.value, 1)
+        XCTAssertEqual(renewals.value, 0)
+    }
+
+    func testHelperOverrideLostAndStatusMismatchEndHeartbeatPermanently() throws {
+        for drift in ["override-lost", "lease-expired-or-invalid"] {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let sessionID = UUID()
+            let clock = LockedBox(Date(timeIntervalSince1970: 4_000))
+            let monotonic = LockedBox<TimeInterval>(0)
+            let status = LockedBox(HelperStatusRecord(
+                state: "active", reason: "verified", sessionID: sessionID, updatedAt: clock.value
+            ))
+            let renewals = LockedBox(0)
+            let endedReason = LockedBox<String?>(nil)
+            let coordinator = SessionHeartbeatCoordinator(
+                observationInterval: 3_600,
+                renewalInterval: 8,
+                acknowledgementTimeout: 20,
+                now: { clock.value },
+                monotonicNow: { monotonic.value },
+                observe: { _ in SessionHeartbeatObservation(power: .ac, leaseIsValid: true, helperStatus: status.value) },
+                renew: { _, commitGuard in
+                    guard commitGuard() else { throw TestError.commitRejected }
+                    renewals.withValue { $0 += 1 }
+                    return monotonic.value + 30
+                },
+                revoke: {},
+                diagnostics: SessionDiagnosticStore(file: root.appendingPathComponent("history.json")),
+                onAcknowledged: { _ in },
+                onEnded: { _, reason in endedReason.value = reason }
+            )
+            coordinator.start(sessionID: sessionID, initialLeaseExpiresMonotonic: 30)
+            coordinator.evaluateForTesting()
+            status.value = HelperStatusRecord(state: "inactive", reason: drift, sessionID: sessionID, updatedAt: clock.value)
+            clock.withValue { $0 = $0.addingTimeInterval(8) }
+            monotonic.value = 8
+            coordinator.evaluateForTesting()
+            status.value = HelperStatusRecord(state: "active", reason: "verified", sessionID: sessionID, updatedAt: clock.value)
+            coordinator.evaluateForTesting()
+
+            XCTAssertEqual(renewals.value, 0)
+            XCTAssertTrue(endedReason.value?.contains(drift) == true)
+        }
+    }
+
+    func testSessionDiagnosticsAreBoundedStructuredOwnerOnlyAndSanitized() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("history.json")
+        let store = SessionDiagnosticStore(file: file, maximumEntries: 3, maximumBytes: 2_048)
+        for index in 0..<8 {
+            store.record(event: "renew", reason: "reason-\(index)", sessionID: UUID())
+        }
+        store.record(event: "end", reason: "token=secret/value", sessionID: UUID())
+
+        let entries = store.entries()
+        XCTAssertLessThanOrEqual(entries.count, 3)
+        XCTAssertTrue(entries.allSatisfy { $0.schema == 1 && !$0.sessionID.isEmpty })
+        XCTAssertEqual(entries.last?.reason, "redacted")
+        XCTAssertLessThanOrEqual(try Data(contentsOf: file).count, 2_048)
+        var metadata = stat()
+        XCTAssertEqual(lstat(file.path, &metadata), 0)
+        XCTAssertEqual(metadata.st_mode & 0o777, 0o600)
+        XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("secret/value"))
+    }
+
     func testFreshManualSessionRequiresVerifiedCurrentAcknowledgement() {
         let now = Date()
         let lease = makeLease(sessionID: UUID(), lifetime: 30)
@@ -180,6 +509,45 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertNil(ActivationLease.parse(lease.storagePayload + "unexpected=value\n"))
     }
 
+    func testTerminalGenerationLedgerParserMatchesBoundedHelperSemantics() {
+        let first = UUID()
+        let second = UUID()
+        XCTAssertEqual(TerminalGenerationLedger.parse(""), [])
+        XCTAssertEqual(
+            TerminalGenerationLedger.parse("\(first.uuidString)\n\(second.uuidString)\n"),
+            [first, second]
+        )
+        XCTAssertNil(TerminalGenerationLedger.parse("not-a-uuid\n"))
+        XCTAssertNil(TerminalGenerationLedger.parse("\(first.uuidString)\n\(first.uuidString)\n"))
+        let tooMany = (0...TerminalGenerationLedger.maximumEntries)
+            .map { _ in UUID().uuidString }
+            .joined(separator: "\n") + "\n"
+        XCTAssertNil(TerminalGenerationLedger.parse(tooMany))
+    }
+
+    func testAppLedgerReadinessRejectsMalformedDuplicateWritableAndSymlinkState() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ledger = root.appendingPathComponent("terminal-generations")
+        let first = UUID()
+        let second = UUID()
+        try "\(first.uuidString)\n\(second.uuidString)\n".write(to: ledger, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(ledger.path, 0o600), 0)
+        XCTAssertTrue(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
+
+        try "\(first.uuidString)\n\(first.uuidString.lowercased())\n".write(to: ledger, atomically: true, encoding: .utf8)
+        XCTAssertFalse(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
+        try "malformed\n".write(to: ledger, atomically: true, encoding: .utf8)
+        XCTAssertFalse(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
+
+        try "\(first.uuidString)\n".write(to: ledger, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(ledger.path, 0o622), 0)
+        XCTAssertFalse(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
+        XCTAssertEqual(unlink(ledger.path), 0)
+        XCTAssertEqual(symlink("missing-target", ledger.path), 0)
+        XCTAssertFalse(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
+    }
+
     func testLeaseRejectsRebootExpiryAndExcessiveLifetime() {
         let now = Date()
         let mono = MonotonicClock.seconds()
@@ -235,6 +603,26 @@ final class SessionSafetyTests: XCTestCase {
             ),
             .excessiveLifetime
         )
+    }
+
+    func testLeaseCommitGuardRejectsPublicationAndPreservesPriorLease() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("activation-lease")
+        let prior = makeLease(sessionID: UUID(), lifetime: 30)
+        let replacement = makeLease(sessionID: UUID(), lifetime: 30)
+        try ActivationLeaseStore.write(prior, to: file)
+        let priorBytes = try Data(contentsOf: file)
+
+        XCTAssertThrowsError(try ActivationLeaseStore.write(replacement, to: file, commitGuard: { false })) { error in
+            guard case ActivationLeaseStore.StoreError.commitRejected = error else {
+                return XCTFail("Expected commitRejected, got \(error)")
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: file), priorBytes)
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".activation-lease.") }
+        XCTAssertTrue(leftovers.isEmpty)
     }
 
     func testSecureLeaseReaderRejectsSymlinkWritableAndMalformedFiles() throws {
@@ -315,6 +703,153 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(harness.power.enableSleepOverrideCalls, 1)
     }
 
+    func testNativeHelperOverrideLostCleansUpWithoutOverwritingExternalDrift() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.02)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.forceSleepDisabled(false)
+            power.forceACSleep(7)
+        }
+
+        let code = harness.runtime.run()
+        let status = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+
+        XCTAssertEqual(code, 0)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 7)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(status.contains("state=inactive"))
+        XCTAssertTrue(status.contains("reason=override-lost"))
+    }
+
+    func testNativeHelperTerminalGenerationTombstoneBlocksSameSessionReplay() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.setSource(.battery)
+        }
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 1)
+        let terminalStatus = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(terminalStatus.contains("state=inactive"))
+        XCTAssertTrue(terminalStatus.contains("reason=power-source-changed"))
+        XCTAssertTrue(terminalStatus.contains("session=\(harness.lease.sessionID.uuidString.lowercased())"))
+
+        XCTAssertEqual(unlink(harness.configuration.leasePath), 0)
+        let noLeaseRuntime = HelperRuntime(
+            configuration: harness.configuration,
+            power: power,
+            currentBootID: { harness.lease.bootID },
+            currentSystemBuild: { "25F84" },
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+        XCTAssertEqual(noLeaseRuntime.run(), 0)
+        let afterNoLease = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(afterNoLease.contains("session=\(harness.lease.sessionID.uuidString.lowercased())"))
+
+        power.setSource(.ac)
+        let replay = makeLease(sessionID: harness.lease.sessionID, lifetime: 5)
+        try replay.storagePayload.write(toFile: harness.configuration.leasePath, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(harness.configuration.leasePath, 0o600), 0)
+        let replayRuntime = HelperRuntime(
+            configuration: harness.configuration,
+            power: power,
+            currentBootID: { replay.bootID },
+            currentSystemBuild: { "25F84" },
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+
+        XCTAssertEqual(replayRuntime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 1)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+    }
+
+    func testNoValidLeaseTerminalizesActiveStatusWhenLedgerRecordFails() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+        XCTAssertEqual(unlink(harness.configuration.leasePath), 0)
+        HelperStatusStore.write(
+            state: "active",
+            reason: "verified",
+            sessionID: harness.lease.sessionID,
+            path: harness.configuration.statusPath
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let terminalized = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(terminalized.contains("state=inactive"))
+        XCTAssertTrue(terminalized.contains("reason=no-valid-lease"))
+        XCTAssertTrue(terminalized.contains("session=\(harness.lease.sessionID.uuidString.lowercased())"))
+
+        let replay = makeLease(sessionID: harness.lease.sessionID, lifetime: 5)
+        try replay.storagePayload.write(toFile: harness.configuration.leasePath, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(harness.configuration.leasePath, 0o600), 0)
+        let replayRuntime = HelperRuntime(
+            configuration: harness.configuration,
+            power: power,
+            currentBootID: { replay.bootID },
+            currentSystemBuild: { "25F84" },
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+
+        XCTAssertEqual(replayRuntime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 0)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+    }
+
+    func testNativeHelperBlockedPreflightGenerationCannotReplayAfterReconnect() throws {
+        let power = FakePowerSystem(source: .battery, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 0)
+        let blockedStatus = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(blockedStatus.contains("session=\(harness.lease.sessionID.uuidString.lowercased())"))
+
+        power.setSource(.ac)
+        let replay = makeLease(sessionID: harness.lease.sessionID, lifetime: 5)
+        try replay.storagePayload.write(toFile: harness.configuration.leasePath, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(harness.configuration.leasePath, 0o600), 0)
+        let replayRuntime = HelperRuntime(
+            configuration: harness.configuration,
+            power: power,
+            currentBootID: { replay.bootID },
+            currentSystemBuild: { "25F84" },
+            reconciliationInterval: 0.02,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in false }
+        )
+
+        XCTAssertEqual(replayRuntime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 0)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+    }
+
     func testNativeHelperRetainsAppliedStateAndExitsCleanlyWhenRestoreCannotBeVerified() throws {
         let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
         power.failSleepRestore = true
@@ -386,6 +921,16 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(uninstall.contains("force=0"))
         XCTAssertTrue(restore.contains("force=1"))
         XCTAssertTrue(install.contains("lidswitch_parse_applied_state"))
+        XCTAssertTrue(install.contains(AppPaths.rootTerminalGenerationsPath))
+        XCTAssertTrue(install.contains("/bin/chmod 0600 \"$terminal_generations_path\""))
+        XCTAssertTrue(install.contains("[ ! -L \"$terminal_generations_path\" ]"))
+        XCTAssertTrue(install.contains("/usr/bin/stat -f '%u %g %Lp %l %z'"))
+        XCTAssertTrue(install.contains("/usr/bin/grep -Eqv"))
+        XCTAssertTrue(install.contains("/usr/bin/awk 'END { print NR }'"))
+        XCTAssertTrue(install.contains("/usr/bin/tr '[:upper:]' '[:lower:]'"))
+        XCTAssertTrue(install.contains("/usr/bin/uniq -d"))
+        XCTAssertTrue(install.contains("/bin/rm -rf \"$terminal_generations_path\""))
+        XCTAssertTrue(install.contains("/bin/mv -f \"$terminal_generations_temp\" \"$terminal_generations_path\""))
         XCTAssertTrue(uninstall.contains("lidswitch_parse_applied_state"))
         XCTAssertTrue(restore.contains("|0) return 1"))
         XCTAssertTrue(restore.contains("alarm(shift @ARGV)"))
@@ -704,6 +1249,7 @@ final class SessionSafetyTests: XCTestCase {
     private struct RuntimeHarness {
         let root: URL
         let configuration: HelperConfiguration
+        let lease: ActivationLease
         let power: FakePowerSystem
         let runtime: HelperRuntime
     }
@@ -711,7 +1257,14 @@ final class SessionSafetyTests: XCTestCase {
     private func makeRuntimeHarness(
         lifetime: TimeInterval,
         power: FakePowerSystem = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5),
-        preapplyState: Bool = false
+        preapplyState: Bool = false,
+        reconciliationInterval: TimeInterval = 2,
+        terminalGenerationAllows: @escaping (UUID, String) -> Bool = { sessionID, path in
+            TerminalGenerationStore.allowsActivation(sessionID: sessionID, path: path)
+        },
+        terminalGenerationRecord: @escaping (UUID, String) -> Bool = { sessionID, path in
+            TerminalGenerationStore.record(sessionID: sessionID, path: path)
+        }
     ) throws -> RuntimeHarness {
         let root = try temporaryDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
@@ -750,12 +1303,16 @@ final class SessionSafetyTests: XCTestCase {
         return RuntimeHarness(
             root: root,
             configuration: configuration,
+            lease: lease,
             power: power,
             runtime: HelperRuntime(
                 configuration: configuration,
                 power: power,
                 currentBootID: { lease.bootID },
-                currentSystemBuild: { "25F84" }
+                currentSystemBuild: { "25F84" },
+                reconciliationInterval: reconciliationInterval,
+                terminalGenerationAllows: terminalGenerationAllows,
+                terminalGenerationRecord: terminalGenerationRecord
             )
         )
     }
@@ -792,6 +1349,14 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
         withLock { self.source = source }
     }
 
+    func forceSleepDisabled(_ enabled: Bool) {
+        withLock { sleepDisabledValue = enabled }
+    }
+
+    func forceACSleep(_ minutes: Int) {
+        withLock { acSleepValue = minutes }
+    }
+
     func powerSource() -> HelperPowerSource { withLock { source } }
     func sleepDisabled() -> Bool? { withLock { sleepDisabledValue } }
     func acSleepMinutes() -> Int? { withLock { acSleepValue } }
@@ -820,4 +1385,29 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
         defer { lock.unlock() }
         return try body()
     }
+}
+
+private final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value
+
+    init(_ value: Value) {
+        storage = value
+    }
+
+    var value: Value {
+        get { withValue { $0 } }
+        set { withValue { $0 = newValue } }
+    }
+
+    @discardableResult
+    func withValue<Result>(_ body: (inout Value) throws -> Result) rethrows -> Result {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(&storage)
+    }
+}
+
+private enum TestError: Error {
+    case commitRejected
 }

@@ -3,11 +3,12 @@ set -euo pipefail
 
 APP_NAME="LidSwitch"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT_DIR/script/release.env"
 DIST_DIR="$ROOT_DIR/dist"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 CHECKSUM_PATH="$DMG_PATH.sha256"
-EXPECTED_VERSION="0.2.1"
-EXPECTED_BUILD="3"
+EXPECTED_VERSION="$LIDSWITCH_APP_VERSION"
+EXPECTED_BUILD="$LIDSWITCH_APP_BUILD"
 
 process_ids() {
   /usr/bin/pgrep -x "$APP_NAME" 2>/dev/null | /usr/bin/sort -n | /usr/bin/tr '\n' ' ' || true

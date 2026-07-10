@@ -15,9 +15,15 @@ These checks never start the GUI, install the helper, invoke administrator autho
 The `SessionSafetyTests` suite covers:
 
 - explicit current-session acknowledgement;
+- acknowledgement just inside and outside the bounded start timeout;
+- more than 30 simulated seconds of full-inspection delay with at least four independent renewals;
+- monotonic lease-expiry and atomic commit-boundary rejection;
 - stale acknowledgement rejection;
 - lease expiry, excessive lifetime, and reboot mismatch;
 - unplug restoration and no rearm;
+- helper terminal-generation replay rejection after unplug and blocked preflight;
+- helper and controller override/status drift termination;
+- bounded, structured, owner-only diagnostic history;
 - abnormal helper recovery;
 - restoration failure retaining applied-state;
 - malformed, writable, duplicate, unknown, and symlinked input;
@@ -37,7 +43,7 @@ The controlled live canary is an explicit manual deployment command, intentional
 LIDSWITCH_CONTROLLED_CANARY=1 ./script/validate_live_state.sh
 ```
 
-The script observes 10 seconds of fresh acknowledgements, sends `SIGKILL` to the app, waits up to 45 seconds for verified restoration, and proves there is no automatic rearm. A later human-observed unplug/replug and short lid-close test completes local deployment qualification.
+The script observes at least 40 seconds of fresh acknowledgements (`LIDSWITCH_LIVE_OBSERVATION_SECONDS`, minimum `40`), sends `SIGKILL` to the app, waits up to 45 seconds for verified restoration, and proves there is no automatic rearm. A later human-observed unplug/replug and short lid-close test completes local deployment qualification.
 
 ## Public surface
 

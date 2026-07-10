@@ -2,12 +2,13 @@
 set -euo pipefail
 
 APP_NAME="LidSwitch"
-APP_VERSION="0.2.1"
-APP_BUILD="3"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT_DIR/script/release.env"
+APP_VERSION="$LIDSWITCH_APP_VERSION"
+APP_BUILD="$LIDSWITCH_APP_BUILD"
 BUNDLE_ID="com.johnsilva.LidSwitch"
 MIN_SYSTEM_VERSION="14.0"
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}"
 TMP_ROOT="${TMP_ROOT%/}"
 SCRATCH_PATH="${LIDSWITCH_SCRATCH_PATH:-$TMP_ROOT/lidswitch-swift-build}"
