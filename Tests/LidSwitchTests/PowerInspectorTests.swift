@@ -789,6 +789,185 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(power.currentACSleep, 5)
     }
 
+    func testTerminalGenerationCannotSuppressOwnedStateRestoration() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: true, acSleep: 0)
+        let recordedAfterRestore = LockedBox(false)
+        let statusWasPendingBeforeRestore = LockedBox(false)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            preapplyState: true,
+            terminalGenerationAllows: { _, _ in false },
+            terminalGenerationRecord: { _, ledgerPath in
+                let appliedStatePath = URL(fileURLWithPath: ledgerPath)
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("applied-state")
+                    .path
+                recordedAfterRestore.value = power.currentSleepDisabled == false
+                    && power.currentACSleep == 5
+                    && !FileManager.default.fileExists(atPath: appliedStatePath)
+                return true
+            }
+        )
+        power.onSleepRestore = {
+            statusWasPendingBeforeRestore.value = (
+                try? String(contentsOfFile: harness.configuration.statusPath)
+            )?.contains("reason=terminal-session-recovery-restore-pending") == true
+        }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertTrue(statusWasPendingBeforeRestore.value)
+        XCTAssertTrue(recordedAfterRestore.value)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(
+            try String(contentsOfFile: harness.configuration.statusPath)
+                .contains("reason=terminal-session-recovery")
+        )
+    }
+
+    func testTerminalGenerationRetriesRecoveryRequiredRestoreOnRestart() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: true, acSleep: 0)
+        power.failSleepRestore = true
+        let recordCalls = LockedBox(0)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            preapplyState: true,
+            terminalGenerationAllows: { _, _ in false },
+            terminalGenerationRecord: { _, _ in
+                recordCalls.withValue { $0 += 1 }
+                return true
+            }
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(recordCalls.value, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(
+            try String(contentsOfFile: harness.configuration.statusPath)
+                .contains("state=recovery-required")
+        )
+
+        power.failSleepRestore = false
+        let restartedRuntime = HelperRuntime(
+            configuration: harness.configuration,
+            power: power,
+            currentBootID: { harness.lease.bootID },
+            currentSystemBuild: { "25F84" },
+            terminalGenerationAllows: { _, _ in false },
+            terminalGenerationRecord: { _, _ in
+                recordCalls.withValue { $0 += 1 }
+                return true
+            }
+        )
+
+        XCTAssertEqual(restartedRuntime.run(), 0)
+        XCTAssertEqual(recordCalls.value, 1)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(
+            try String(contentsOfFile: harness.configuration.statusPath)
+                .contains("state=inactive")
+        )
+    }
+
+    func testTerminalStatusCannotSuppressOwnedStateRestoration() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: true, acSleep: 0)
+        let recordCalls = LockedBox(0)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            preapplyState: true,
+            terminalGenerationAllows: { _, _ in true },
+            terminalGenerationRecord: { _, _ in
+                recordCalls.withValue { $0 += 1 }
+                return true
+            }
+        )
+        HelperStatusStore.write(
+            state: "recovery-required",
+            reason: "interrupted-restore",
+            sessionID: harness.lease.sessionID,
+            path: harness.configuration.statusPath
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(recordCalls.value, 1)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(
+            try String(contentsOfFile: harness.configuration.statusPath)
+                .contains("reason=terminal-session-recovery")
+        )
+    }
+
+    func testRestorePendingRestartDoesNotReactivateAfterPowerWasAlreadyRestored() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            preapplyState: true,
+            terminalGenerationAllows: { _, _ in true }
+        )
+        HelperStatusStore.write(
+            state: "recovery-required",
+            reason: "signal-restore-pending",
+            sessionID: harness.lease.sessionID,
+            path: harness.configuration.statusPath
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 0)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(
+            try String(contentsOfFile: harness.configuration.statusPath)
+                .contains("state=inactive")
+        )
+    }
+
+    func testNoValidLeaseRecordsTerminalOnlyAfterOwnedStateRestoration() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: true, acSleep: 0)
+        let recordedAfterRestore = LockedBox(false)
+        let harness = try makeRuntimeHarness(
+            lifetime: 5,
+            power: power,
+            preapplyState: true,
+            terminalGenerationRecord: { _, ledgerPath in
+                let appliedStatePath = URL(fileURLWithPath: ledgerPath)
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("applied-state")
+                    .path
+                recordedAfterRestore.value = power.currentSleepDisabled == false
+                    && power.currentACSleep == 5
+                    && !FileManager.default.fileExists(atPath: appliedStatePath)
+                return true
+            }
+        )
+        XCTAssertEqual(unlink(harness.configuration.leasePath), 0)
+        HelperStatusStore.write(
+            state: "active",
+            reason: "verified",
+            sessionID: harness.lease.sessionID,
+            path: harness.configuration.statusPath
+        )
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        XCTAssertTrue(recordedAfterRestore.value)
+        XCTAssertEqual(power.currentSleepDisabled, false)
+        XCTAssertEqual(power.currentACSleep, 5)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(
+            try String(contentsOfFile: harness.configuration.statusPath)
+                .contains("reason=no-valid-lease")
+        )
+    }
+
     func testNoValidLeaseTerminalizesActiveStatusWhenLedgerRecordFails() throws {
         let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
         let harness = try makeRuntimeHarness(
@@ -1342,6 +1521,7 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
     private var enableCalls = 0
     private var failRestoreValue = false
     private var unplugOnEnableValue = false
+    private var sleepRestoreObserver: (() -> Void)?
 
     init(source: HelperPowerSource, sleepDisabled: Bool?, acSleep: Int?) {
         self.source = source
@@ -1359,6 +1539,10 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
     var unplugWhenEnablingSleepOverride: Bool {
         get { withLock { unplugOnEnableValue } }
         set { withLock { unplugOnEnableValue = newValue } }
+    }
+    var onSleepRestore: (() -> Void)? {
+        get { withLock { sleepRestoreObserver } }
+        set { withLock { sleepRestoreObserver = newValue } }
     }
 
     func setSource(_ source: HelperPowerSource) {
@@ -1381,6 +1565,9 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
         try withLock {
             if !enabled, failRestoreValue {
                 throw NSError(domain: "FakePowerSystem", code: 1)
+            }
+            if !enabled {
+                sleepRestoreObserver?()
             }
             if enabled {
                 enableCalls += 1
