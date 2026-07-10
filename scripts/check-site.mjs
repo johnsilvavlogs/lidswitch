@@ -31,11 +31,13 @@ const required = [
   'The Mac app sends no passwords',
   'Vercel Web Analytics',
   'GitHub counts release downloads',
-  'Battery stays opt-in',
+  'Battery stays unchanged',
   'Trust through control',
-  'Keep awake when plugged in',
-  'Allow on battery',
-  'Apple Silicon Macs on macOS 14 or newer',
+  'Prepare Safe Helper',
+  'Start Plugged-In Session',
+  'Stop and Restore',
+  'never rearms automatically',
+  'macOS 26.5.2 build 25F84',
   'Source is public on GitHub',
   'https://github.com/johnsilvavlogs/lidswitch',
   'https://github.com/johnsilvavlogs/lidswitch/releases/latest',
@@ -65,7 +67,10 @@ const forbidden = [
   /testimonial/i,
   /enterprise[- ]grade security/i,
   /collects? analytics/i,
-  /tracks? users/i
+  /tracks? users/i,
+  /Allow on battery/i,
+  /Battery stays opt-in/i,
+  /StartInterval/i
 ];
 
 for (const pattern of forbidden) {

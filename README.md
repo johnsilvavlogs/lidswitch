@@ -1,194 +1,97 @@
 # LidSwitch
 
-Close the lid. Let the job finish.
+LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-LidSwitch is a minimal native macOS menu bar app for Apple Silicon MacBooks with one job: keep a plugged-in MacBook awake when the lid is closed. It defaults to the safer AC-only mode and includes an explicit battery opt-in for users who need processing to continue while unplugged.
+Version `0.2.0` build `2` is a crash-recovery release. It removes the old persistent toggle, battery mode, login launch, and five-second root shell polling design.
 
-![LidSwitch running](screenshots/lidswitch-working.png)
+## Safety model
 
-## Public Preview
+- Protection is off after install, app launch, login, reboot, or reconnecting power.
+- **Prepare Safe Helper** installs helper version `3` and removes old startup artifacts. It does not enable a session.
+- **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
+- The app writes a same-boot, same-user, same-build lease with a maximum lifetime of 30 seconds and renews it every 8 seconds.
+- The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and live `pmset` state.
+- The helper applies power changes only on state transitions. It has no `StartInterval` loop.
+- Unplugging, quitting, restarting, app death, lease expiry, invalid state, lost acknowledgement, or power-setting drift ends the session and restores LidSwitch-owned changes.
+- Reconnecting power never starts a new session.
+- There is no battery keep-awake mode in this release.
+- A root-owned applied-state record is removed only after restoration is verified. Failed restoration keeps that evidence and reports **Restore required**.
 
-The landing page lives in `site/` and is configured for Vercel.
+The app currently qualifies macOS `26.5.2` build `25F84`. Other OS builds remain off until separately validated. The Swift package minimum remains macOS 14 for compilation.
 
-Run it locally:
+## Repository
+
+- GitHub: <https://github.com/johnsilvavlogs/lidswitch>
+- Releases: <https://github.com/johnsilvavlogs/lidswitch/releases/latest>
+- App target: `Sources/LidSwitch`
+- Shared lease model: `Sources/LidSwitchCore`
+- Native helper target: `Sources/LidSwitchHelper`
+
+## Build without launching
 
 ```bash
-npm install
-npm run site:serve
+./script/build_app_bundle.sh
+./script/validate_bundle.sh
 ```
 
-Then open:
+The app bundle is staged under the temporary directory unless `LIDSWITCH_APP_BUNDLE` is provided. Both commands preserve the running LidSwitch process set and never alter live power state.
 
-```text
-http://127.0.0.1:4173
+Launching is explicit:
+
+```bash
+./script/build_and_run.sh --run
 ```
 
-The public launch copy is intentionally explicit: LidSwitch is a free manual DMG,
-not a Mac App Store app, not notarized, and may require **Open Anyway** approval
-in macOS Security settings.
+## Tests
 
-## Download
+```bash
+swift test --scratch-path /tmp/lidswitch-tests
+./script/validate_session_safety.sh
+```
 
-Release DMGs should be attached to GitHub Releases. The current release build is for Apple Silicon Macs. Build one locally with:
+The session suite covers current acknowledgement, expiry, reboot mismatch, unplug/no-rearm, app-death rollback, abnormal helper recovery, malformed and symlinked state, unknown power, restore failure, stale zero baselines, and event-driven launchd configuration.
+
+## Package without launching
 
 ```bash
 ./script/build_dmg.sh
-```
-
-This writes `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`. See
-[Install](docs/INSTALL.md) and [Distribution](docs/DISTRIBUTION.md) for the
-manual approval and release checklist.
-
-Validate the release artifact with:
-
-```bash
 ./script/validate_dmg.sh
 ```
 
-## What It Does
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.0` build `2`, helper version `3`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
-- Adds a compact `MenuBarExtra` with one primary switch: **Keep awake when plugged in**.
-- Adds a secondary **Allow on battery** switch that stays off unless explicitly enabled.
-- Shows live power source and sleep-override state.
-- Enables `SleepDisabled` only when the app is enabled and macOS reports AC Power.
-- Automatically clears `SleepDisabled` on battery unless both switches are enabled.
-- Warns clearly when the Mac is on battery and lid-close sleep is still allowed.
-- Provides **Restore** and **Uninstall** controls from the menu bar panel.
-- Uses the standard macOS administrator prompt for privileged helper install, restore, and uninstall.
+This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 
-## Safety Model
+## Controlled live canary
 
-macOS exposes `disablesleep` as a system-wide power flag, not as a clean AC-only preference. LidSwitch handles that by installing a small root LaunchDaemon helper that polls the current power source and a user-owned desired-state file.
+Automatic CI and the `full-release` gate never launch LidSwitch or enable `SleepDisabled`. A live canary is a separate, explicit profile after all simulations pass.
 
-The helper behavior is intentionally conservative:
-
-- If keep-awake is enabled and power source is AC: set AC idle sleep to `0` and set `SleepDisabled` to `1`.
-- If keep-awake is enabled, battery opt-in is enabled, and power source is battery: set battery idle sleep to `0` and set `SleepDisabled` to `1`.
-- If power source is battery and battery opt-in is disabled: set `SleepDisabled` to `0`.
-- If keep-awake is disabled: set `SleepDisabled` to `0` and restore saved AC and battery idle-sleep values if LidSwitch saved them.
-
-The app never stores credentials. It delegates privileged work to macOS via the normal authorization dialog.
-
-## Requirements
-
-- Apple Silicon Mac
-- macOS 14 or newer
-- Apple Swift toolchain / Xcode command line tools
-- Accessibility permission for validation scripts that inspect the menu bar UI
-- Administrator access for first install, restore, and uninstall actions
-
-## Build And Run
-
-Use the project runner:
+The canary requires the app to be installed and a session to be started through the UI. It observes the active state, kills the app to simulate a crash, waits for lease-expiry restoration, and proves there is no automatic rearm:
 
 ```bash
-./script/build_and_run.sh
+LIDSWITCH_CONTROLLED_CANARY=1 ./script/validate_live_state.sh
 ```
 
-Verify launch:
+See `docs/VALIDATION.md` and `docs/OPERATIONS.md` before running it.
 
-```bash
-./script/build_and_run.sh --verify
-```
-
-The runner builds the SwiftPM executable, stages a local app bundle at:
+## Installed files
 
 ```text
-${TMPDIR}/lidswitch-app/LidSwitch.app
-```
-
-and launches it as a real macOS app bundle rather than a raw executable.
-Use `LIDSWITCH_APP_STAGE_ROOT` or `LIDSWITCH_APP_BUNDLE` to override that path.
-The app is staged outside the repository so macOS FileProvider metadata from
-Documents/iCloud folders cannot corrupt codesign verification.
-
-## Test
-
-Run unit tests:
-
-```bash
-swift test
-```
-
-Validate the landing page:
-
-```bash
-npm install
-npm run validate:site
-```
-
-Run the release-oriented local checks:
-
-```bash
-npm run scan:secrets
-npm run scan:secrets:test
-npm run public:hygiene
-./script/build_dmg.sh --dry-run
-./script/validate_dmg.sh
-```
-
-After the repository is public and the release is published, verify that anonymous
-visitors can reach the GitHub repo, license metadata, latest release, DMG, and
-checksum:
-
-```bash
-npm run launch:check-public
-```
-
-Website visits are tracked with Vercel Web Analytics. DMG download intent is
-visible as visits to `/download/`, and actual release-asset counts are available
-from GitHub:
-
-```bash
-npm run analytics:downloads
-```
-
-For native changes, also run `swift build`, `swift test`, and
-`./script/build_and_run.sh --verify`. For installed-helper changes, run
-`./script/validate_live_state.sh` on a Mac where LidSwitch is installed and
-enabled.
-
-## Installed Files
-
-When enabled for the first time, LidSwitch installs:
-
-```text
+/Applications/LidSwitch.app
 /Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist
-/Library/Application Support/LidSwitch/lidswitch-helper
+/Library/Application Support/LidSwitch/LidSwitchHelper
 /Library/Application Support/LidSwitch/helper-version
-/Library/Application Support/LidSwitch/original-ac-sleep
-/Library/Application Support/LidSwitch/original-battery-sleep
-~/Library/Application Support/LidSwitch/desired-state
+/Library/Application Support/LidSwitch/applied-state
+/Library/Application Support/LidSwitch/helper-status
+~/Library/Application Support/LidSwitch/activation-lease
 ```
 
-The root-owned files are removed by **Uninstall**. The desired-state file is user-owned and stores only the keep-awake mode and battery opt-in:
+The old `~/Library/LaunchAgents/com.johnsilva.LidSwitch.login.plist` and root `lidswitch-helper` shell script are legacy residue and must be disabled, unloaded, and removed before activation.
 
-```text
-mode=enabled
-battery=disabled
-```
+## Privacy
 
-Legacy `enabled` and `disabled` files still read safely; legacy `enabled` means AC-only.
+The Mac app has no telemetry and sends no passwords, tokens, account identifiers, or power data. The public website uses Vercel Web Analytics for aggregate traffic; GitHub records release downloads. See `docs/PRIVACY.md`.
 
-## Local Verification Notes
+## License
 
-The implementation was verified on macOS 26.3 with the app enabled while connected to AC power:
-
-- `SleepDisabled 1`
-- desired state `mode=enabled`, `battery=disabled`
-- LaunchDaemon loaded as `com.johnsilva.lidswitch.helper`
-- battery power profile preserved with `sleep 1`
-- menu bar UI showed `Keeping awake when plugged in` and the battery opt-in control
-
-Those checks are environment-specific. Re-run the commands above on the release
-machine before publishing a new DMG.
-
-## More Documentation
-
-- [Architecture](docs/ARCHITECTURE.md)
-- [Install](docs/INSTALL.md)
-- [Operations](docs/OPERATIONS.md)
-- [Privacy And Safety](docs/PRIVACY.md)
-- [Security Policy](SECURITY.md)
-- [Distribution](docs/DISTRIBUTION.md)
-- [Validation](docs/VALIDATION.md)
+MIT. See `LICENSE`.

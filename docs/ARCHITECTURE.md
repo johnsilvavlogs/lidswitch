@@ -1,138 +1,36 @@
 # Architecture
 
-LidSwitch is a small SwiftPM macOS app with a SwiftUI menu bar surface and a generated root helper.
+LidSwitch `0.2.0` is a SwiftPM menu bar app with three targets:
 
-## Main Components
+- `LidSwitch`: UI, inspection, lease writer, installation and recovery controls.
+- `LidSwitchCore`: lease schema, monotonic clock, boot identity, and compatibility policy.
+- `LidSwitchHelper`: compiled root helper using IOKit power notifications and bounded timers.
 
-```text
-Sources/LidSwitch/App/LidSwitchApp.swift
-Sources/LidSwitch/Views/LidSwitchPanel.swift
-Sources/LidSwitch/Models/PowerPreferences.swift
-Sources/LidSwitch/Models/PowerPolicy.swift
-Sources/LidSwitch/Models/PowerSnapshot.swift
-Sources/LidSwitch/Services/PowerController.swift
-Sources/LidSwitch/Services/PowerInspector.swift
-Sources/LidSwitch/Services/DesiredStateStore.swift
-Sources/LidSwitch/Services/PrivilegedHelperManager.swift
-Sources/LidSwitch/Services/Shell.swift
-Sources/LidSwitch/Support/AppPaths.swift
-Sources/LidSwitch/Support/DebugCommands.swift
-```
+## Session flow
 
-## UI Layer
+1. The user prepares helper version `3`; legacy login and shell-helper artifacts are removed while protection remains off.
+2. The user confirms **Start Plugged-In Session** on AC power.
+3. The app writes a user-owned `0600` activation lease atomically. It contains the session UUID, boot identity, monotonic issue/expiry times, UID, and macOS build.
+4. launchd reacts to the lease path. There is no `StartInterval`.
+5. The helper securely reopens the lease with `O_NOFOLLOW | O_NONBLOCK`, validates its file descriptor metadata, and verifies current AC power and settings.
+6. Before changing anything, the helper writes a root-owned applied-state record. It then applies AC sleep `0` when needed and `SleepDisabled=1`, verifying both.
+7. The app accepts **active** only when the lease, fresh helper acknowledgement, session UUID, AC source, and live override all agree.
+8. The app renews the same session every 8 seconds; each lease is valid for no more than 30 seconds.
 
-`LidSwitchApp` defines a SwiftUI `MenuBarExtra` with `.window` style.
+## End and recovery
 
-`LidSwitchPanel` renders:
+Unplug, quit, reboot, app death, lease expiry, invalid input, lost acknowledgement, signal, or setting drift ends the session. Restoration:
 
-- app identity and power source
-- primary `Keep awake when plugged in` toggle
-- secondary `Allow on battery` opt-in toggle
-- live status text
-- explicit battery warning when AC-only mode is enabled while the Mac is on battery
-- `SleepDisabled`, AC sleep, and battery sleep summary
-- refresh, restore, install-helper, and uninstall actions depending on state
+- clears `SleepDisabled` only when LidSwitch recorded ownership;
+- restores AC sleep only if the current value still equals LidSwitch's applied `0`;
+- never applies a stale saved value of `0`;
+- retries and verifies restoration;
+- retains applied-state and emits `recovery-required` on failure.
 
-The UI uses SF Symbols, semantic colors, system controls, and an accessory-style app bundle (`LSUIElement=true`) so the app lives in the menu bar without a Dock icon.
+launchd uses `KeepAlive.SuccessfulExit=false` with throttling only to recover abnormal helper exits. Clean expiry and clean restoration exit successfully and do not persist.
 
-## State Layer
+## Compatibility and packaging
 
-`PowerController` owns app state and periodically refreshes:
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.0`, `CFBundleVersion=2`, and the signed native helper under `Contents/Library/LaunchServices`.
 
-- power source
-- `SleepDisabled`
-- AC idle-sleep setting
-- battery idle-sleep setting
-- keep-awake and battery opt-in preferences
-- helper installation status
-- helper loaded, version, and installed-artifact freshness status
-
-`PowerSnapshot` turns raw system values into user-facing status labels.
-
-`PowerPolicy` is the table-tested mirror of the helper decision rules. The root helper still performs privileged changes, but the Swift policy tests protect the AC-only default and the battery opt-in matrix from drift.
-
-## System Inspection
-
-`PowerInspector` shells out to:
-
-```bash
-pmset -g batt
-pmset -g live
-pmset -g custom
-launchctl print system/com.johnsilva.lidswitch.helper
-```
-
-Parser coverage lives in `Tests/LidSwitchTests/PowerInspectorTests.swift`.
-
-## Desired State
-
-The app stores the user's intent in:
-
-```text
-~/Library/Application Support/LidSwitch/desired-state
-```
-
-Accepted values:
-
-```text
-mode=enabled
-battery=disabled
-```
-
-Legacy values are still accepted:
-
-```text
-enabled   # treated as AC-only
-disabled
-```
-
-This file is user-owned so turning menu bar toggles on or off after helper installation does not need administrator authorization.
-
-## Privileged Helper
-
-`PrivilegedHelperManager` generates, installs, restores, and uninstalls helper scripts through macOS authorization.
-
-The helper is installed at:
-
-```text
-/Library/Application Support/LidSwitch/lidswitch-helper
-```
-
-The LaunchDaemon is installed at:
-
-```text
-/Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist
-```
-
-The helper runs at load and every 5 seconds. It exits quickly after reconciling state.
-
-Version `2` adds battery opt-in handling and writes:
-
-```text
-/Library/Application Support/LidSwitch/helper-version
-```
-
-Older installed helpers, unloaded LaunchDaemons, or installed helper/plist content that no longer matches the generated current artifacts show **Install Helper** or **Update Helper** in the menu bar panel.
-
-## Helper Decision Table
-
-| Keep awake | Battery opt-in | Power source | Action |
-| --- | --- | --- |
-| enabled | disabled | AC Power | remember AC sleep, set `pmset -c sleep 0`, set `pmset -a disablesleep 1`, restore saved battery sleep if needed |
-| enabled | disabled | Battery Power | set `pmset -a disablesleep 0`, restore saved battery sleep |
-| enabled | enabled | AC Power | remember AC and battery sleep, set `pmset -c sleep 0`, set `pmset -b sleep 0`, set `pmset -a disablesleep 1` |
-| enabled | enabled | Battery Power | remember battery sleep, set `pmset -b sleep 0`, set `pmset -a disablesleep 1` |
-| disabled | any | Any | set `pmset -a disablesleep 0`, restore saved AC and battery sleep |
-
-## Diagnostic Commands
-
-The executable supports diagnostic output used by tests and release validation:
-
-```bash
-.build/debug/LidSwitch --print-helper
-.build/debug/LidSwitch --print-plist
-.build/debug/LidSwitch --print-install-script
-.build/debug/LidSwitch --print-uninstall-script
-```
-
-These commands print generated artifacts without installing anything.
+Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

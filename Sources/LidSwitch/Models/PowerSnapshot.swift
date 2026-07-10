@@ -1,4 +1,5 @@
 import Foundation
+import LidSwitchCore
 
 enum PowerSource: Equatable {
     case ac
@@ -8,178 +9,267 @@ enum PowerSource: Equatable {
     var title: String {
         switch self {
         case .ac:
-            return "Power adapter"
-        case .battery(let percent):
-            if let percent {
-                return "Battery \(percent)%"
-            }
-            return "Battery"
+            return "Plugged in"
+        case let .battery(percent):
+            return percent.map { "Battery · \($0)%" } ?? "Battery"
         case .unknown:
-            return "Unknown"
+            return "Power source unavailable"
         }
     }
 
     var isAC: Bool {
-        if case .ac = self {
-            return true
-        }
+        if case .ac = self { return true }
         return false
     }
 }
 
-struct PowerSnapshot: Equatable {
-    var source: PowerSource
-    var sleepDisabled: Bool
-    var acIdleSleepMinutes: Int?
-    var batteryIdleSleepMinutes: Int?
-    var preferences: PowerPreferences
-    var helperInstalled: Bool
-    var helperNeedsUpdate: Bool
-    var checkedAt: Date
+struct HelperStatusRecord: Equatable {
+    let state: String
+    let reason: String
+    let sessionID: UUID?
+    let updatedAt: Date
 
-    static let empty = PowerSnapshot(
-        source: .unknown("Not checked"),
-        sleepDisabled: false,
-        acIdleSleepMinutes: nil,
-        batteryIdleSleepMinutes: nil,
-        preferences: .disabled,
-        helperInstalled: false,
-        helperNeedsUpdate: false,
-        checkedAt: Date()
-    )
-
-    var desiredEnabled: Bool {
-        preferences.keepAwakeEnabled
+    static func parse(_ raw: String) -> HelperStatusRecord? {
+        var values: [String: String] = [:]
+        for line in raw.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            let key = String(parts[0])
+            guard values[key] == nil else { return nil }
+            values[key] = String(parts[1])
+        }
+        guard let state = values["state"],
+              let reason = values["reason"],
+              let sessionRaw = values["session"],
+              let updatedRaw = values["updated"],
+              let updatedSeconds = TimeInterval(updatedRaw)
+        else {
+            return nil
+        }
+        let sessionID: UUID?
+        if sessionRaw == "none" {
+            sessionID = nil
+        } else if let parsed = UUID(uuidString: sessionRaw) {
+            sessionID = parsed
+        } else {
+            return nil
+        }
+        return HelperStatusRecord(
+            state: state,
+            reason: reason,
+            sessionID: sessionID,
+            updatedAt: Date(timeIntervalSince1970: updatedSeconds)
+        )
     }
 
-    var batteryKeepAwakeEnabled: Bool {
-        preferences.allowBatteryKeepAwake
+    func isFresh(at date: Date) -> Bool {
+        let age = date.timeIntervalSince(updatedAt)
+        return age >= -2 && age <= 12
+    }
+}
+
+struct PowerSnapshot: Equatable {
+    let source: PowerSource
+    let sleepDisabled: Bool
+    let sleepDisabledVerified: Bool
+    let acIdleSleepMinutes: Int?
+    let preferences: PowerPreferences
+    let helperArtifactsPresent: Bool
+    let helperLoaded: Bool
+    let helperNeedsUpdate: Bool
+    let legacyLoginItemPresent: Bool
+    let legacyLoginItemLoaded: Bool
+    let activationLease: ActivationLease?
+    let ownedSessionID: UUID?
+    let helperStatus: HelperStatusRecord?
+    let systemBuild: String?
+    let systemBuildQualified: Bool
+    let bundleIntegrityValid: Bool
+    let bundleVersionValid: Bool
+    let checkedAt: Date
+
+    static let empty = PowerSnapshot(
+        source: .unknown(""),
+        sleepDisabled: false,
+        sleepDisabledVerified: false,
+        acIdleSleepMinutes: nil,
+        preferences: .disabled,
+        helperArtifactsPresent: false,
+        helperLoaded: false,
+        helperNeedsUpdate: false,
+        legacyLoginItemPresent: false,
+        legacyLoginItemLoaded: false,
+        activationLease: nil,
+        ownedSessionID: nil,
+        helperStatus: nil,
+        systemBuild: nil,
+        systemBuildQualified: false,
+        bundleIntegrityValid: false,
+        bundleVersionValid: false,
+        checkedAt: .distantPast
+    )
+
+    var helperReady: Bool {
+        helperArtifactsPresent && helperLoaded && !helperNeedsUpdate
+    }
+
+    var legacyResiduePresent: Bool {
+        legacyLoginItemPresent
+            || legacyLoginItemLoaded
+            || (helperArtifactsPresent && helperNeedsUpdate)
+            || preferences.keepAwakeEnabled
+            || preferences.allowBatteryKeepAwake
+    }
+
+    var sessionActive: Bool {
+        guard let lease = activationLease,
+              let ownedSessionID,
+              lease.sessionID == ownedSessionID
+        else { return false }
+        return source.isAC
+            && sleepDisabledVerified
+            && sleepDisabled
+            && helperStatus?.state == "active"
+            && helperStatus?.sessionID == lease.sessionID
+            && helperStatus?.isFresh(at: checkedAt) == true
+    }
+
+    var sessionPending: Bool {
+        guard let lease = activationLease, lease.sessionID == ownedSessionID else { return false }
+        return !sessionActive
+    }
+
+    var helperRecoveryRequired: Bool {
+        helperStatus?.state == "recovery-required"
+    }
+
+    var orphanedLeasePresent: Bool {
+        guard let lease = activationLease else { return false }
+        return lease.sessionID != ownedSessionID
+    }
+
+    var restoreRequired: Bool {
+        helperRecoveryRequired
+            || orphanedLeasePresent
+            || (sleepDisabledVerified && sleepDisabled && !sessionActive)
+    }
+
+    var hasCriticalSafetyIssue: Bool {
+        restoreRequired
+            || !sleepDisabledVerified
+            || !bundleVersionValid
+            || !bundleIntegrityValid
+            || !systemBuildQualified
+            || legacyResiduePresent
+    }
+
+    var canPrepareHelper: Bool {
+        systemBuildQualified && bundleIntegrityValid && bundleVersionValid
+    }
+
+    var canStartSession: Bool {
+        source.isAC
+            && helperReady
+            && !legacyResiduePresent
+            && systemBuildQualified
+            && bundleIntegrityValid
+            && bundleVersionValid
+            && sleepDisabledVerified
+            && !sleepDisabled
+            && activationLease == nil
+            && !helperRecoveryRequired
     }
 
     var statusTitle: String {
-        if helperInstalled && helperNeedsUpdate {
-            return "Helper update needed"
+        if helperRecoveryRequired {
+            return "Recovery required"
         }
-
-        if desiredEnabled && isOnBattery && !batteryKeepAwakeEnabled {
-            return sleepDisabled ? "Clearing battery override" : "Battery sleep allowed"
+        if restoreRequired {
+            return "Restore required"
         }
-
-        if desiredEnabled && source.isAC && sleepDisabled {
-            return "Keeping awake when plugged in"
+        if !sleepDisabledVerified {
+            return "Power status unavailable"
         }
-
-        if desiredEnabled && batteryKeepAwakeEnabled && isOnBattery && sleepDisabled {
-            return "Keeping awake on battery"
+        if !bundleVersionValid || !bundleIntegrityValid {
+            return "Build verification failed"
         }
-
-        if desiredEnabled && source.isAC {
-            return helperInstalled ? "Turning on" : "Helper needed"
+        if !systemBuildQualified {
+            return "Compatibility not confirmed"
         }
-
-        if desiredEnabled && batteryKeepAwakeEnabled && isOnBattery {
-            return helperInstalled ? "Turning on battery" : "Helper needed"
+        if legacyResiduePresent {
+            return "Old startup files found"
         }
-
-        if desiredEnabled && batteryKeepAwakeEnabled {
-            return "Battery mode armed"
+        if sessionActive {
+            return "Protection active — plugged in"
         }
-
-        if desiredEnabled {
-            return "Plug in to block lid sleep"
+        if sessionPending {
+            return "Starting monitored session"
         }
-
-        return "Normal sleep"
+        if helperReady {
+            switch source {
+            case .ac:
+                return "Ready for monitored session"
+            case .battery:
+                return "Connect power to start"
+            case .unknown:
+                return "Power source unavailable"
+            }
+        }
+        if helperArtifactsPresent || helperLoaded {
+            return "Helper update required"
+        }
+        return "Protection off"
     }
 
     var statusDetail: String {
-        if helperInstalled && helperNeedsUpdate {
-            return "Update the helper so it can honor battery settings."
+        if helperRecoveryRequired {
+            return "The helper could not verify a complete rollback. Use Restore Sleep before starting another session or quitting."
         }
-
-        if desiredEnabled && isOnBattery && !batteryKeepAwakeEnabled {
-            if sleepDisabled {
-                return "Battery mode is off. The helper is clearing the sleep override now."
+        if restoreRequired {
+            return "LidSwitch is inactive, but macOS still reports an active system sleep override. Restore it before doing anything else."
+        }
+        if !sleepDisabledVerified {
+            return "LidSwitch could not verify the live macOS sleep override. Starting a session is blocked."
+        }
+        if !bundleVersionValid || !bundleIntegrityValid {
+            return "This copy of LidSwitch cannot safely control power settings. Protection remains off."
+        }
+        if !systemBuildQualified {
+            return "This macOS build has not passed LidSwitch safety checks. Protection remains off."
+        }
+        if legacyResiduePresent {
+            return "Disabled legacy components remain on this Mac. Replace them before starting a new session."
+        }
+        if sessionActive {
+            return "Lid-close sleep is blocked for this session. Quit, unplug, restart, or a missed safety check ends it."
+        }
+        if sessionPending {
+            return "Waiting for the helper to verify the live system override."
+        }
+        if helperReady {
+            if source.isAC {
+                return "Protection is off. LidSwitch starts only when you explicitly begin a plugged-in session."
             }
-
-            return "Battery mode is off. Closing the lid on battery will still sleep."
-        }
-
-        if desiredEnabled && source.isAC && sleepDisabled {
-            if batteryKeepAwakeEnabled {
-                return "Lid-close sleep is blocked while charging. Battery mode is also allowed."
+            if case .battery = source {
+                return "Protection remains off on battery. Reconnecting power never starts it automatically."
             }
-
-            return "Lid-close sleep is blocked while charging. Battery lid-close sleep remains allowed."
+            return "LidSwitch could not verify AC power. Starting a session is blocked."
         }
-
-        if desiredEnabled && batteryKeepAwakeEnabled && isOnBattery && sleepDisabled {
-            return "Lid-close sleep is blocked on battery. Watch remaining charge."
-        }
-
-        if desiredEnabled && source.isAC {
-            return "Waiting for the helper to apply the AC profile."
-        }
-
-        if desiredEnabled && batteryKeepAwakeEnabled && isOnBattery {
-            return "Waiting for the helper to apply the battery profile."
-        }
-
-        if desiredEnabled && batteryKeepAwakeEnabled {
-            return "Battery keep-awake will run only while the main switch stays on."
-        }
-
-        if desiredEnabled {
-            return "Only plugged-in mode is enabled. Battery lid-close sleep remains allowed."
-        }
-
-        if sleepDisabled {
-            return "SleepDisabled is still on. Restore now."
-        }
-
-        return "No lid-awake override is active."
+        return "Prepare the crash-safe helper. Protection remains off until you explicitly start a session."
     }
 
-    var batteryToggleDetail: String {
-        if !desiredEnabled {
-            return "Turn on keep-awake first."
+    var systemSummary: String {
+        let override: String
+        if sleepDisabledVerified {
+            override = sleepDisabled ? "System sleep override on" : "System sleep override off"
+        } else {
+            override = "System sleep override unavailable"
         }
-
-        if batteryKeepAwakeEnabled {
-            if helperInstalled && helperNeedsUpdate {
-                return "Update the helper before battery mode can run."
-            }
-
-            if !helperInstalled {
-                return "Install the helper before battery mode can run."
-            }
-
-            if isOnBattery {
-                if sleepDisabled {
-                    return "On now: lid-close sleep is blocked. Watch remaining charge."
-                }
-
-                return "On now: waiting for the helper to block lid-close sleep."
-            }
-
-            return "Will also keep awake after unplugging. Battery can drain."
-        }
-
-        if isOnBattery {
-            return "Off now: lid close will sleep."
-        }
-
-        return "Off unless you explicitly allow it."
+        let ac = acIdleSleepMinutes.map { $0 == 0 ? "AC idle sleep: Never" : "AC idle sleep: \($0)m" } ?? "AC idle sleep unavailable"
+        return "\(override) · \(ac)"
     }
 
-    var isOnBattery: Bool {
-        if case .battery = source {
-            return true
-        }
-        return false
-    }
-
-    var batterySleepAllowedNow: Bool {
-        desiredEnabled && isOnBattery && !batteryKeepAwakeEnabled
+    var accessibilityState: String {
+        "LidSwitch, \(statusTitle). \(statusDetail)"
     }
 }

@@ -44,8 +44,11 @@
           <h1 id="hero-title">Close the lid. Let the job finish.</h1>
           <p class="hero-lede">
             Keep long builds, downloads, backups, and remote jobs running after
-            the lid closes. LidSwitch stays AC-only by default, so battery sleep
-            only changes when you deliberately opt in.
+            the lid closes. Each session is manual, AC-only, and tied to the
+            running app. Unplugging, quitting, restarting, or missing the safety
+            heartbeat ends the session, attempts a verified rollback, and never
+            rearms automatically. If rollback cannot be verified, LidSwitch shows
+            Recovery required instead of claiming success.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
             <a class="button button-primary" href="/download/">
@@ -63,6 +66,7 @@
             </a>
           </div>
           <p class="manual-note">
+            Activation is qualified only for macOS 26.5.2 build 25F84.
             Manual install, disclosed up front: LidSwitch is not App Store distributed or
             notarized, so macOS may ask you to approve <strong>Open Anyway</strong>
             in Security settings.
@@ -83,45 +87,40 @@
           <div
             class="app-panel-preview"
             role="img"
-            aria-label="LidSwitch menu panel showing Keep awake when plugged in, Allow on battery, SleepDisabled on, AC sleep never, Battery 1m, Restore, and Uninstall controls."
+            aria-label="LidSwitch menu panel showing Protection off, Prepare Safe Helper, Start Plugged-In Session, Protection active plugged in, Stop and Restore, and Remove Helper controls."
           >
             <div class="panel-header">
               <span class="panel-bolt" aria-hidden="true">↯</span>
               <span>
                 <strong>LidSwitch</strong>
-                <small>Power adapter</small>
+                <small>Plugged in</small>
               </span>
             </div>
             <div class="panel-setting panel-setting-main">
               <span>
-                <strong>Keep awake when plugged in</strong>
-                <small>Battery lid-close sleep remains allowed.</small>
+                <strong>Protection off</strong>
+                <small>Nothing starts until you choose a session.</small>
               </span>
-              <span class="panel-toggle panel-toggle-on" aria-hidden="true"></span>
             </div>
-            <div class="panel-setting">
-              <span>
-                <strong>Allow on battery</strong>
-                <small>Off unless you explicitly allow it.</small>
-              </span>
-              <span class="panel-toggle" aria-hidden="true"></span>
+            <div class="panel-actions" aria-hidden="true">
+              <span>Prepare Safe Helper</span>
+              <span>Start Plugged-In Session</span>
             </div>
             <div class="panel-status">
               <span class="panel-dot" aria-hidden="true"></span>
               <span>
-                <strong>Keeping awake when plugged in</strong>
-                <small>Lid-close sleep is blocked while charging. Battery lid-close sleep remains allowed.</small>
+                <strong>Protection active — plugged in</strong>
+                <small>Quit, unplug, restart, or a missed safety check ends this session.</small>
               </span>
             </div>
             <div class="panel-metrics" aria-hidden="true">
-              <span>☾ SleepDisabled on</span>
-              <span>⌁ AC sleep never</span>
-              <span>▭ Battery 1m</span>
+              <span>☾ System override verified</span>
+              <span>⌁ 30-second session lease</span>
             </div>
             <div class="panel-actions" aria-hidden="true">
               <span>↻</span>
-              <span>☾ Restore</span>
-              <span>⌫ Uninstall</span>
+              <span>■ Stop and Restore</span>
+              <span>⌫ Remove Helper</span>
             </div>
           </div>
         </div>
@@ -177,13 +176,13 @@
           </li>
           <li>
             <span class="step-number">3</span>
-            <h3>Install the helper</h3>
-            <p>Admin permission is requested only to install, restore, or remove the local sleep helper.</p>
+            <h3>Prepare the safe helper</h3>
+            <p>Admin permission installs the compiled helper and removes old startup behavior. Protection remains off.</p>
           </li>
           <li>
             <span class="step-number">4</span>
-            <h3>Restore or remove</h3>
-            <p>Use the menu bar controls to turn it off, restore defaults, or uninstall cleanly.</p>
+            <h3>Start one plugged-in session</h3>
+            <p>Confirm Start Plugged-In Session, wait for Protection active — plugged in, then close the lid. Use Stop and Restore when the job finishes.</p>
           </li>
         </ol>
       </section>
@@ -193,9 +192,9 @@
           <p class="eyebrow">Trust through control</p>
           <h2 id="safety-title">Know what changes. Undo it fast.</h2>
           <p>
-            LidSwitch has one job: prevent lid-close sleep while plugged in.
-            Battery behavior stays normal unless you opt in, and the restore and
-            uninstall controls are built into the menu.
+            LidSwitch has one job: prevent lid-close sleep during a session you
+            explicitly start while plugged in. It has no battery mode and no
+            login launch. Restore and removal controls stay in the menu.
           </p>
         </div>
         <div class="trust-grid">
@@ -208,12 +207,12 @@
             <p>Review the app, helper, docs, and packaging scripts before you run the DMG.</p>
           </article>
           <article>
-            <h3>Battery stays opt-in</h3>
-            <p>Battery lid-close sleep stays allowed unless you deliberately enable it.</p>
+            <h3>Battery stays unchanged</h3>
+            <p>Unplugging ends the session. Reconnecting power never restarts it automatically.</p>
           </article>
           <article>
             <h3>Restore is not hidden</h3>
-            <p>Restore and Uninstall sit in the menu bar panel, not buried in a script.</p>
+            <p>Stop and Restore and Remove Helper sit in the menu bar panel, not buried in a script.</p>
           </article>
         </div>
       </section>
@@ -224,9 +223,8 @@
           <p class="eyebrow">Free manual DMG. Manual approval expected.</p>
           <h2 id="final-title">Use it when sleep would waste the run.</h2>
           <p>
-            For Apple Silicon Macs on macOS 14 or newer, and for people comfortable
-            inspecting source, approving a local helper, and removing the tool if it is
-            no longer useful.
+            This recovery release activates only on macOS 26.5.2 build 25F84.
+            Other builds remain off until they pass the same safety qualification.
           </p>
         </div>
         <div class="final-actions">

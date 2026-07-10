@@ -1,65 +1,17 @@
-# Privacy And Safety
+# Privacy
 
-LidSwitch does one job locally: it controls macOS power-management settings so a
-plugged-in MacBook can stay awake with the lid closed.
+## Mac app
 
-## Data
+LidSwitch has no app telemetry and sends no passwords, API keys, tokens, account identifiers, power state, or session data.
 
-The LidSwitch Mac app does not collect, transmit, or store:
+Local user-owned state is limited to the disabled migration preference and the short-lived activation lease. Root-owned state records helper version, current acknowledgement, and only the settings needed to restore a LidSwitch-owned change.
 
-- passwords
-- API keys
-- tokens
-- account identifiers
-- personal analytics
-- telemetry
+The helper reads local power state through IOKit and `pmset`. It does not contact a network service.
 
-The app stores only local preference intent in:
+## Battery
 
-```text
-~/Library/Application Support/LidSwitch/desired-state
-```
+Version `0.2.0` has no battery keep-awake mode. Unplugging ends the session and restoring power does not restart it.
 
-Example:
+## Website and GitHub
 
-```text
-mode=enabled
-battery=disabled
-```
-
-## Helper
-
-The privileged helper is local. It is installed through the normal macOS
-administrator prompt and is used to apply or restore power-management settings.
-
-Root-owned files live under:
-
-```text
-/Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist
-/Library/Application Support/LidSwitch/
-```
-
-## Battery Default
-
-LidSwitch is AC-only by default. Battery lid-close sleep remains allowed unless
-you explicitly enable battery keep-awake in the app.
-
-## Network
-
-LidSwitch does not require a network connection for normal operation.
-
-## Website Analytics
-
-The public landing page uses Vercel Web Analytics for aggregate website traffic:
-page views, referrers, device/browser class, geography, and visited paths such
-as `/download/`.
-
-The website does not add ad pixels, marketing cookies, or fingerprinting scripts.
-
-The download button routes through `/download/` so the Vercel dashboard can show
-download intent. The DMG itself is hosted on GitHub Releases, and actual release
-asset download counts are reported by GitHub for `LidSwitch.dmg` and
-`LidSwitch.dmg.sha256`.
-
-The Mac app still sends no telemetry and does not contact LidSwitch servers for
-normal operation.
+The public website uses Vercel Web Analytics for aggregate traffic and download intent. GitHub records release download counts. Those public services are separate from the Mac app.

@@ -37,12 +37,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Swift build
-        run: swift build
+        run: swift build --scratch-path /tmp/lidswitch-ci-build
       - name: Swift tests
-        run: swift test
-      - name: Helper scripts lint
+        run: swift test --scratch-path /tmp/lidswitch-ci-build
+      - name: Session safety simulations
+        run: ./script/validate_session_safety.sh
+      - name: Admin scripts and helper plist lint
         run: |
-          .build/debug/LidSwitch --print-helper | zsh -n /dev/stdin
-          .build/debug/LidSwitch --print-install-script | zsh -n /dev/stdin
-          .build/debug/LidSwitch --print-uninstall-script | zsh -n /dev/stdin
-          .build/debug/LidSwitch --print-plist | plutil -lint -
+          BIN="$(swift build --scratch-path /tmp/lidswitch-ci-build --show-bin-path)/LidSwitch"
+          "$BIN" --print-install-script | zsh -n /dev/stdin
+          "$BIN" --print-uninstall-script | zsh -n /dev/stdin
+          "$BIN" --print-restore-script | zsh -n /dev/stdin
+          "$BIN" --print-plist | plutil -lint -
+      - name: No-launch app bundle validation
+        run: ./script/validate_bundle.sh
+      - name: No-launch DMG validation
+        run: ./script/validate_dmg.sh

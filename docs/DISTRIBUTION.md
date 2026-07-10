@@ -1,71 +1,28 @@
 # Distribution
 
-This project is set up for a small technical-friends release.
+## Current channel
 
-## What This Is
+LidSwitch `0.2.0` build `2` is distributed as a public manual DMG. It is ad-hoc signed, not Developer ID signed, and not notarized. Recipients must expect Gatekeeper's **Open Anyway** flow.
 
-- A native macOS menu bar utility for Apple Silicon Macs
-- A free manual DMG
-- Source-visible and inspectable
-- Designed for people comfortable with GitHub, manual macOS approval, and local
-  helper tools
+Do not claim App Store distribution, Apple notarization, automatic background protection, battery support, or compatibility beyond qualified build `25F84`.
 
-## What This Is Not
+## Release checklist
 
-- Not a Mac App Store app
-- Not notarized
-- Not affiliated with Apple
-- The Mac app is not a background account, analytics, or cloud service
+1. Confirm the branch diff contains no unrelated user work.
+2. Run the JTBD impact plan and `full-release` profile.
+3. Confirm session simulations and the no-launch bundle/DMG checks are green.
+4. Confirm the bundle reports app version `0.2.0`, build `2`, helper version `3`, arm64, and strict ad-hoc signature validity.
+5. Confirm Gatekeeper rejection is expected and documented.
+6. Run public hygiene, site Playwright, and secret scans.
+7. Run the explicit local canary after automated gates, then the unplug/replug and short lid-close observations.
+8. Publish `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256` on GitHub Releases.
+9. State the exact qualified macOS build and manual approval requirement in release notes.
 
-## Release Checklist
+Packaging commands:
 
-1. Run native and site validation.
-2. Run the public secret scan:
+```bash
+./script/build_dmg.sh
+./script/validate_dmg.sh
+```
 
-   ```bash
-   npm run scan:secrets
-   npm run scan:secrets:test
-   npm run public:hygiene
-   ```
-
-3. Build the DMG:
-
-   ```bash
-   ./script/build_dmg.sh
-   ```
-
-4. Validate the release artifact:
-
-   ```bash
-   ./script/validate_dmg.sh
-   ```
-
-   This confirms the checksum, mounted app signature, release-artifact secret
-   scan, and expected Gatekeeper rejection for the manual approval flow.
-
-5. Create a GitHub Release.
-6. Attach the Apple Silicon `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256`.
-7. Make the repository public and publish the release.
-8. Confirm the public GitHub surface is reachable without authentication:
-
-   ```bash
-   npm run launch:check-public
-   ```
-
-9. Confirm the landing page download CTA reaches the release.
-10. Confirm Web Analytics is enabled for the Vercel project:
-
-   ```bash
-   npx -y vercel@latest project web-analytics --format json --scope team_fs4VucfgpyXLHSRITEcuK5gu
-   ```
-
-11. Check current release asset download counts:
-
-   ```bash
-   npm run analytics:downloads
-   ```
-
-12. Tell recipients to expect macOS manual approval on first launch.
-
-Do not make the repository public until the final secret scan and launch review
-are complete.
+Neither command launches the app or changes live power state.

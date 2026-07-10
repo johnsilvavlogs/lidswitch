@@ -6,6 +6,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 CHECKSUM_PATH="$DMG_PATH.sha256"
+EXPECTED_VERSION="0.2.0"
+EXPECTED_BUILD="2"
+
+process_ids() {
+  /usr/bin/pgrep -x "$APP_NAME" 2>/dev/null | /usr/bin/sort -n | /usr/bin/tr '\n' ' ' || true
+}
 
 clean_file_metadata() {
   local target="$1"
@@ -72,7 +78,13 @@ assert_no_release_blocking_tree_metadata() {
   fi
 }
 
+before_pids="$(process_ids)"
 "$ROOT_DIR/script/build_dmg.sh"
+after_build_pids="$(process_ids)"
+if [ "$before_pids" != "$after_build_pids" ]; then
+  echo "DMG build changed the running LidSwitch process set" >&2
+  exit 1
+fi
 
 (
   cd "$DIST_DIR"
@@ -119,6 +131,10 @@ fi
 assert_no_release_blocking_tree_metadata "$APP_ON_DMG"
 
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_ON_DMG" >/dev/null
+/usr/bin/codesign --verify --strict --verbose=2 "$APP_ON_DMG/Contents/Library/LaunchServices/LidSwitchHelper" >/dev/null
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_ON_DMG/Contents/Info.plist")" = "$EXPECTED_VERSION"
+test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_ON_DMG/Contents/Info.plist")" = "$EXPECTED_BUILD"
+test -x "$APP_ON_DMG/Contents/Library/LaunchServices/LidSwitchHelper"
 node "$ROOT_DIR/scripts/scan-public-secrets.mjs" --release-artifacts --path "$DIST_DIR" --path "$APP_ON_DMG"
 
 if /usr/sbin/spctl --assess --type execute --verbose=2 "$APP_ON_DMG" >"$SPCTL_OUT" 2>&1; then
@@ -135,6 +151,12 @@ fi
 
 /usr/bin/hdiutil detach "$MOUNT_DIR" >/dev/null
 DETACHED=1
+
+after_validation_pids="$(process_ids)"
+if [ "$before_pids" != "$after_validation_pids" ]; then
+  echo "DMG validation changed the running LidSwitch process set" >&2
+  exit 1
+fi
 
 cat <<EOF
 DMG validation passed:

@@ -2,32 +2,36 @@ import SwiftUI
 
 struct LidSwitchPanel: View {
     @ObservedObject var controller: PowerController
+    @State private var confirmation: Confirmation?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
-            enableToggle
-            batteryToggle
             statusBlock
+            primaryAction
 
             if let errorMessage = controller.errorMessage {
-                Text(errorMessage)
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Error. \(errorMessage)")
             }
 
             Divider()
             controls
         }
         .padding(18)
+        .alert(item: $confirmation) { confirmation in
+            confirmation.alert(controller: controller)
+        }
     }
 
     private var header: some View {
         HStack(spacing: 10) {
             Image(systemName: controller.menuBarSymbol)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(controller.snapshot.desiredEnabled ? .green : .secondary)
+                .foregroundStyle(statusColor)
                 .frame(width: 24)
                 .accessibilityHidden(true)
 
@@ -41,73 +45,24 @@ struct LidSwitchPanel: View {
             }
 
             Spacer()
-        }
-    }
 
-    private var enableToggle: some View {
-        Toggle(
-            isOn: Binding(
-                get: { controller.snapshot.desiredEnabled },
-                set: { controller.setEnabled($0) }
-            )
-        ) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Keep awake when plugged in")
-                    .font(.subheadline.weight(.medium))
-
-                Text(controller.snapshot.batteryKeepAwakeEnabled ? "Also allowed on battery." : "Battery lid-close sleep remains allowed.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if controller.isBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("LidSwitch operation in progress")
             }
         }
-        .toggleStyle(.switch)
-        .accessibilityLabel("Keep awake when plugged in")
-        .accessibilityHint(enableToggleHint)
-        .accessibilityValue(controller.snapshot.desiredEnabled ? "On" : "Off")
-        .keyboardShortcut("k", modifiers: [.command])
-        .disabled(controller.isBusy)
-    }
-
-    private var batteryToggle: some View {
-        Toggle(
-            isOn: Binding(
-                get: { controller.snapshot.batteryKeepAwakeEnabled },
-                set: { controller.setBatteryEnabled($0) }
-            )
-        ) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Allow on battery")
-                    .font(.subheadline.weight(.medium))
-
-                Text(controller.snapshot.batteryToggleDetail)
-                    .font(.caption)
-                    .foregroundStyle(controller.snapshot.batteryKeepAwakeEnabled ? .orange : .secondary)
-            }
-        }
-        .toggleStyle(.switch)
-        .accessibilityLabel("Allow on battery")
-        .accessibilityHint(controller.snapshot.batteryToggleDetail)
-        .accessibilityValue(controller.snapshot.batteryKeepAwakeEnabled ? "On" : "Off")
-        .disabled(controller.isBusy || !controller.snapshot.desiredEnabled)
     }
 
     private var statusBlock: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
+                Image(systemName: statusSymbol)
+                    .foregroundStyle(statusColor)
                     .accessibilityHidden(true)
 
                 Text(controller.snapshot.statusTitle)
-                    .font(.subheadline.weight(.medium))
-
-                Spacer()
-
-                if controller.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                }
+                    .font(.subheadline.weight(.semibold))
             }
 
             Text(controller.snapshot.statusDetail)
@@ -115,25 +70,68 @@ struct LidSwitchPanel: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if controller.snapshot.batterySleepAllowedNow {
-                Label("On battery now: closing the lid will sleep unless Allow on battery is on.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Label(controller.snapshot.systemSummary, systemImage: "moon.zzz")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(controller.snapshot.accessibilityState)
+        .accessibilityValue(controller.snapshot.systemSummary)
+    }
 
-            HStack(spacing: 10) {
-                Label(controller.snapshot.sleepDisabled ? "SleepDisabled on" : "SleepDisabled off", systemImage: "moon")
-                if let acSleep = controller.snapshot.acIdleSleepMinutes {
-                    Label("AC sleep \(acSleep == 0 ? "never" : "\(acSleep)m")", systemImage: "powerplug")
-                }
-                if let batterySleep = controller.snapshot.batteryIdleSleepMinutes {
-                    Label("Battery \(batterySleep == 0 ? "never" : "\(batterySleep)m")", systemImage: "battery.100percent")
-                }
+    @ViewBuilder
+    private var primaryAction: some View {
+        if controller.snapshot.sessionActive || controller.snapshot.sessionPending {
+            Button {
+                controller.stopSession()
+            } label: {
+                Label("Stop and Restore", systemImage: "stop.circle.fill")
+                    .frame(maxWidth: .infinity)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut("k", modifiers: [.command])
+            .disabled(controller.isBusy)
+            .accessibilityLabel("Stop and restore system sleep")
+            .accessibilityHint("Ends this session, stops lease renewal, and verifies that the sleep override is off.")
+        } else if controller.snapshot.restoreRequired {
+            Button {
+                controller.restoreNow()
+            } label: {
+                Label("Restore Sleep", systemImage: "moon.zzz.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut("k", modifiers: [.command])
+            .disabled(controller.isBusy)
+            .accessibilityHint("Clears the remaining system sleep override with administrator approval.")
+        } else if !controller.snapshot.helperReady || controller.snapshot.legacyResiduePresent {
+            Button {
+                controller.prepareHelper()
+            } label: {
+                Label("Prepare Safe Helper", systemImage: "shield.lefthalf.filled")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut("p", modifiers: [.command])
+            .disabled(
+                controller.isBusy
+                    || !controller.snapshot.canPrepareHelper
+                    || !controller.snapshot.sleepDisabledVerified
+            )
+            .accessibilityHint("Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off.")
+        } else {
+            Button {
+                confirmation = .startSession
+            } label: {
+                Label("Start Plugged-In Session", systemImage: "play.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut("k", modifiers: [.command])
+            .disabled(controller.isBusy || !controller.snapshot.canStartSession)
+            .accessibilityLabel("Start plugged-in session")
+            .accessibilityHint("Asks for confirmation, then starts one monitored session only while this Mac remains plugged in and LidSwitch stays open.")
         }
     }
 
@@ -145,86 +143,102 @@ struct LidSwitchPanel: View {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .labelStyle(.iconOnly)
-            .help("Refresh power state")
+            .help("Refresh power and helper state")
             .keyboardShortcut("r", modifiers: [.command])
             .disabled(controller.isBusy)
+            .accessibilityLabel("Refresh LidSwitch state")
+            .accessibilityHint("Reads the current power source, helper status, and system sleep override.")
 
             Spacer()
 
-            if !controller.snapshot.helperInstalled {
-                Button {
-                    controller.installHelper()
-                } label: {
-                    Label("Install Helper", systemImage: "plus.circle")
-                }
-                .controlSize(.small)
-                .disabled(controller.isBusy)
-            } else if controller.snapshot.helperNeedsUpdate {
-                Button {
-                    controller.updateHelper()
-                } label: {
-                    Label("Update Helper", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .controlSize(.small)
-                .disabled(controller.isBusy)
-            }
-
-            if controller.snapshot.sleepDisabled {
-                Button {
-                    controller.restoreNow()
-                } label: {
-                    Label("Restore", systemImage: "moon.zzz")
-                }
-                .controlSize(.small)
-                .disabled(controller.isBusy)
-            }
-
-            if controller.snapshot.helperInstalled {
+            if controller.snapshot.helperArtifactsPresent || controller.snapshot.helperLoaded {
                 Button(role: .destructive) {
-                    controller.uninstallHelper()
+                    confirmation = .uninstall
                 } label: {
-                    Label("Uninstall", systemImage: "trash")
+                    Label("Remove Helper", systemImage: "trash")
                 }
                 .controlSize(.small)
                 .disabled(controller.isBusy)
+                .accessibilityHint("Asks for confirmation, restores system sleep, and removes LidSwitch helper files.")
             }
+
+            Button {
+                confirmation = .quit
+            } label: {
+                Label("Quit", systemImage: "power")
+            }
+            .controlSize(.small)
+            .disabled(controller.isBusy)
+            .keyboardShortcut("q", modifiers: [.command])
+            .accessibilityLabel("Restore and quit LidSwitch")
+            .accessibilityHint("Asks for confirmation and verifies system sleep is restored before quitting.")
         }
+    }
+
+    private var statusSymbol: String {
+        if controller.snapshot.hasCriticalSafetyIssue {
+            return "exclamationmark.triangle.fill"
+        }
+        if controller.snapshot.sessionActive {
+            return "checkmark.circle.fill"
+        }
+        if controller.snapshot.sessionPending {
+            return "clock.fill"
+        }
+        return "circle"
     }
 
     private var statusColor: Color {
-        if controller.snapshot.helperInstalled && controller.snapshot.helperNeedsUpdate {
+        if controller.snapshot.hasCriticalSafetyIssue {
             return .orange
         }
-
-        if controller.snapshot.desiredEnabled && controller.snapshot.batteryKeepAwakeEnabled && controller.snapshot.sleepDisabled {
-            return controller.snapshot.source.isAC ? .green : .orange
-        }
-
-        if controller.snapshot.batterySleepAllowedNow {
-            return .orange
-        }
-
-        if controller.snapshot.desiredEnabled && controller.snapshot.source.isAC && controller.snapshot.sleepDisabled {
+        if controller.snapshot.sessionActive {
             return .green
         }
-
-        if controller.snapshot.desiredEnabled {
+        if controller.snapshot.sessionPending {
             return .yellow
         }
-
-        if controller.snapshot.sleepDisabled {
-            return .orange
-        }
-
         return .secondary
     }
+}
 
-    private var enableToggleHint: String {
-        if controller.snapshot.batteryKeepAwakeEnabled {
-            return "Prevents lid-close sleep while connected to power and while running on battery."
+private enum Confirmation: String, Identifiable {
+    case startSession
+    case uninstall
+    case quit
+
+    var id: String { rawValue }
+
+    @MainActor
+    func alert(controller: PowerController) -> Alert {
+        switch self {
+        case .startSession:
+            return Alert(
+                title: Text("Start this plugged-in session?"),
+                message: Text("LidSwitch will block lid-close sleep only for this session. Unplugging, quitting, restarting, or a missed safety check ends it. Reconnecting power never restarts it automatically."),
+                primaryButton: .default(Text("Start Session")) {
+                    controller.startSession()
+                },
+                secondaryButton: .cancel()
+            )
+        case .uninstall:
+            return Alert(
+                title: Text("Remove the LidSwitch helper?"),
+                message: Text("LidSwitch will end the current session, restore system sleep, and remove both current and old helper files."),
+                primaryButton: .destructive(Text("Remove Helper")) {
+                    controller.uninstallHelper()
+                },
+                secondaryButton: .cancel()
+            )
+        case .quit:
+            return Alert(
+                title: Text("Restore sleep and quit LidSwitch?"),
+                message: Text("LidSwitch will stop renewing this session and verify that the system sleep override is off before it quits."),
+                primaryButton: .default(Text("Restore and Quit")) {
+                    controller.quitSafely()
+                },
+                secondaryButton: .cancel()
+            )
         }
-
-        return "Prevents lid-close sleep while connected to power. Battery lid-close sleep remains allowed."
     }
-
 }

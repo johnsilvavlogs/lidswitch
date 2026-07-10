@@ -65,7 +65,7 @@ verify_bundle_signature() {
 
 if [ "$DRY_RUN" = "1" ]; then
   cat <<EOF
-Would build $APP_BUNDLE using ./script/build_and_run.sh --verify
+Would build $APP_BUNDLE using ./script/build_app_bundle.sh without launching
 Would stage a metadata-free app bundle before packaging
 Would create unsigned DMG at $DMG_PATH
 Would write SHA-256 checksum at $CHECKSUM_PATH
@@ -74,8 +74,7 @@ EOF
 fi
 
 /bin/mkdir -p "$DIST_DIR"
-"$ROOT_DIR/script/build_and_run.sh" --verify
-/usr/bin/pkill -x "$APP_NAME" >/dev/null 2>&1 || true
+"$ROOT_DIR/script/build_app_bundle.sh" >/dev/null
 clean_bundle_metadata "$APP_BUNDLE"
 
 STAGE_DIR="$(/usr/bin/mktemp -d /tmp/lidswitch-dmg.XXXXXX)"
