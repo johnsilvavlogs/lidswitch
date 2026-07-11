@@ -5,6 +5,15 @@ import XCTest
 @testable import LidSwitch
 @testable import LidSwitchHelper
 
+private func waitForSemaphore(_ semaphore: DispatchSemaphore) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            semaphore.wait()
+            continuation.resume()
+        }
+    }
+}
+
 final class SessionSafetyTests: XCTestCase {
     @MainActor
     func testNativeConfirmationPresenterMapsConfirmedActionsExactlyOnce() {
@@ -81,6 +90,8 @@ final class SessionSafetyTests: XCTestCase {
 
     @MainActor
     func testHeartbeatEndWaitsForSafeRollbackAndClearsTransientRecoveryAlert() async {
+        let waiterEntered = DispatchSemaphore(value: 0)
+        let releaseWaiter = DispatchSemaphore(value: 0)
         let safe = makeSnapshot(
             source: .ac,
             sleepDisabled: false,
@@ -93,18 +104,18 @@ final class SessionSafetyTests: XCTestCase {
             bootstrap: false,
             snapshotProvider: { _ in .empty },
             safeRollbackWaiter: {
-                Thread.sleep(forTimeInterval: 0.08)
+                waiterEntered.signal()
+                releaseWaiter.wait()
                 return safe
             }
         )
         controller.errorMessage = "old transient error"
 
         controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "helper-recovery-required-override-lost-restore-pending")
+        await waitForSemaphore(waiterEntered)
         XCTAssertTrue(controller.isBusy)
         XCTAssertNil(controller.errorMessage)
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        XCTAssertTrue(controller.isBusy)
-        XCTAssertNil(controller.errorMessage)
+        releaseWaiter.signal()
         for _ in 0..<200 where controller.isBusy {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
@@ -118,21 +129,23 @@ final class SessionSafetyTests: XCTestCase {
 
     @MainActor
     func testHeartbeatEndRetainsRecoveryAlertWhenBoundedRollbackVerificationFails() async {
+        let waiterEntered = DispatchSemaphore(value: 0)
+        let releaseWaiter = DispatchSemaphore(value: 0)
         let controller = PowerController(
             bootstrap: false,
             snapshotProvider: { _ in .empty },
             safeRollbackWaiter: {
-                Thread.sleep(forTimeInterval: 0.08)
+                waiterEntered.signal()
+                releaseWaiter.wait()
                 return .empty
             }
         )
 
         controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "helper-recovery-required-override-lost-restore-pending")
+        await waitForSemaphore(waiterEntered)
         XCTAssertTrue(controller.isBusy)
         XCTAssertNil(controller.errorMessage)
-        try? await Task.sleep(nanoseconds: 20_000_000)
-        XCTAssertTrue(controller.isBusy)
-        XCTAssertNil(controller.errorMessage)
+        releaseWaiter.signal()
         for _ in 0..<200 where controller.isBusy {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
