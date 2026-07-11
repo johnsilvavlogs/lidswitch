@@ -2,7 +2,7 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.6` build `1` tolerates a bounded transient unreadable `pmset` override probe without ending a healthy session, while repeated unreadability and explicit drift still fail closed. After any safety termination, the menu waits for bounded rollback verification before presenting a recovery-required alert, preventing a completed rollback from leaving stale red UI. It retains the application-owned native confirmations, serial monotonic lease coordinator, and root-owned terminal generation tombstones introduced in `0.2.5`.
+Version `0.2.7` build `1` tolerates a bounded transient unreadable `pmset` override probe without ending a healthy session, while repeated unreadability and explicit drift still fail closed. After any safety termination, the menu waits for bounded rollback verification before presenting a recovery-required alert. If a later authoritative refresh proves `SleepDisabled=0`, no lease, no recovery marker, and no newer local session, it clears only that provenanced rollback alert and returns to safe-idle UI. It retains the application-owned native confirmations, serial monotonic lease coordinator, and root-owned terminal generation tombstones introduced in `0.2.5`.
 
 ## Safety model
 
@@ -59,7 +59,7 @@ The session suite covers current acknowledgement, monotonic heartbeat starvation
 ./script/validate_dmg.sh
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.6` build `1`, helper version `2`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.7` build `1`, helper version `2`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 

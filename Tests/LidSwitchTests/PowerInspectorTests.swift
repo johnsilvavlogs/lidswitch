@@ -109,8 +109,6 @@ final class SessionSafetyTests: XCTestCase {
                 return safe
             }
         )
-        controller.errorMessage = "old transient error"
-
         controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "helper-recovery-required-override-lost-restore-pending")
         await waitForSemaphore(waiterEntered)
         XCTAssertTrue(controller.isBusy)
@@ -155,6 +153,185 @@ final class SessionSafetyTests: XCTestCase {
             controller.errorMessage?.contains("could not verify a complete rollback") == true,
             "unexpected error: \(controller.errorMessage ?? "nil")"
         )
+    }
+
+    @MainActor
+    func testAuthoritativeSafeRefreshClearsOnlyProvenancedRollbackFailureAndAnnouncesOnce() async {
+        let safe = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: nil
+        )
+        let current = LockedBox(safe)
+        let announcements = LockedBox([String]())
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in current.value },
+            safeRollbackWaiter: { .empty },
+            announcementHandler: { message in announcements.withValue { $0.append(message) } }
+        )
+
+        controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "rollback-timeout")
+        for _ in 0..<200 where controller.isBusy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(controller.alert, .rollbackVerificationFailure(reason: "rollback-timeout"))
+        controller.refresh()
+        XCTAssertNil(controller.alert)
+        XCTAssertEqual(controller.snapshot, safe)
+        XCTAssertEqual(
+            announcements.value.filter { $0 == "System sleep restored. Protection off." },
+            ["System sleep restored. Protection off."]
+        )
+
+        controller.refresh()
+        XCTAssertEqual(
+            announcements.value.filter { $0 == "System sleep restored. Protection off." }.count,
+            1
+        )
+    }
+
+    @MainActor
+    func testAuthoritativeUnsafeAndUnreadableRefreshRetainRollbackFailure() async {
+        let recoveryRequired = HelperStatusRecord(
+            state: "recovery-required",
+            reason: "restore-unverified",
+            sessionID: nil,
+            updatedAt: Date()
+        )
+        let current = LockedBox(makeSnapshot(
+            source: .ac,
+            sleepDisabled: true,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: recoveryRequired
+        ))
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in current.value },
+            safeRollbackWaiter: { .empty }
+        )
+
+        controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "rollback-timeout")
+        for _ in 0..<200 where controller.isBusy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        let recoveryAlert = PowerControllerAlert.rollbackVerificationFailure(reason: "rollback-timeout")
+        XCTAssertEqual(controller.alert, recoveryAlert)
+        controller.refresh()
+        XCTAssertEqual(controller.alert, recoveryAlert)
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+
+        current.value = .empty
+        controller.refresh()
+        XCTAssertEqual(controller.alert, recoveryAlert)
+        XCTAssertFalse(controller.snapshot.sleepDisabledVerified)
+        XCTAssertTrue(controller.snapshot.restoreRequired == false)
+        XCTAssertTrue(controller.snapshot.hasCriticalSafetyIssue)
+    }
+
+    @MainActor
+    func testAuthoritativeSafeRefreshDoesNotClearUnrelatedOperationFailure() async throws {
+        let safe = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: nil
+        )
+        let current = LockedBox(PowerSnapshot.empty)
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in current.value }
+        )
+
+        controller.startSession()
+        for _ in 0..<200 where controller.isBusy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let operationAlert = try XCTUnwrap(controller.alert)
+        guard case .operationFailure = operationAlert else {
+            return XCTFail("expected unrelated operation failure, got \(operationAlert)")
+        }
+
+        current.value = safe
+        controller.refresh()
+
+        XCTAssertEqual(controller.alert, operationAlert)
+        XCTAssertEqual(controller.errorMessage, operationAlert.message)
+    }
+
+    @MainActor
+    func testStaleRollbackWaiterCannotDisturbNewSession() async {
+        let waiterEntered = DispatchSemaphore(value: 0)
+        let releaseWaiter = DispatchSemaphore(value: 0)
+        let safe = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: nil
+        )
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in .empty },
+            safeRollbackWaiter: {
+                waiterEntered.signal()
+                releaseWaiter.wait()
+                return safe
+            }
+        )
+
+        controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "rollback-timeout")
+        await waitForSemaphore(waiterEntered)
+        let newSessionID = UUID()
+        controller.simulateNewSessionForTesting(newSessionID)
+        releaseWaiter.signal()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertFalse(controller.isBusy)
+        XCTAssertNil(controller.alert)
+        XCTAssertEqual(controller.snapshot, .empty)
+    }
+
+    @MainActor
+    func testFreshControllerRefreshDerivesTruthfulSafeAndUnsafeStateWithoutCachedAlert() {
+        let safe = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: nil
+        )
+        let recoveryRequired = HelperStatusRecord(
+            state: "recovery-required",
+            reason: "restore-unverified",
+            sessionID: nil,
+            updatedAt: Date()
+        )
+        let unsafe = makeSnapshot(
+            source: .ac,
+            sleepDisabled: true,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: recoveryRequired
+        )
+        let current = LockedBox(safe)
+        let controller = PowerController(bootstrap: false, snapshotProvider: { _ in current.value })
+
+        controller.refresh()
+        XCTAssertNil(controller.alert)
+        XCTAssertEqual(controller.snapshot.statusTitle, "Ready for monitored session")
+
+        current.value = unsafe
+        controller.refresh()
+        XCTAssertNil(controller.alert)
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+        XCTAssertEqual(controller.snapshot.statusTitle, "Recovery required")
     }
 
     func testHelperRollbackVerificationTimeoutHasSafetyMarginWithinAcceptanceLimit() {

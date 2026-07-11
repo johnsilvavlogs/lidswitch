@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.6` is a SwiftPM menu bar app with three targets:
+LidSwitch `0.2.7` is a SwiftPM menu bar app with three targets:
 
 - `LidSwitch`: UI, inspection, lease writer, installation and recovery controls.
 - `LidSwitchCore`: lease schema, monotonic clock, boot identity, and compatibility policy.
@@ -32,10 +32,10 @@ Unplug, quit, reboot, app death, lease expiry, invalid input, lost acknowledgeme
 
 launchd uses `KeepAlive.SuccessfulExit=false` with throttling only to recover abnormal helper exits. Clean expiry and clean restoration exit successfully and do not persist.
 
-After the app heartbeat observes a terminal helper state, the menu remains in a bounded restoring state for up to 30 seconds. This covers the helper's worst-case verified rollback retry path with margin while remaining below the 45-second live acceptance limit. A red recovery-required alert is shown only if that bounded verification still cannot prove `SleepDisabled=0`, no activation lease, and no helper recovery marker. User-invoked preparation and restore operations retain their separate shorter timeouts.
+After the app heartbeat observes a terminal helper state, the menu remains in a bounded restoring state for up to 30 seconds. This covers the helper's worst-case verified rollback retry path with margin while remaining below the 45-second live acceptance limit. A typed red rollback-verification alert is shown only if that bounded verification still cannot prove `SleepDisabled=0`, no activation lease, and no helper recovery marker. Every later authoritative snapshot (bootstrap, manual refresh, timer, and power-source observer) rechecks that exact predicate; it clears only that typed alert when no newer local session exists, announces the safe-idle transition once, and retains all generic operation errors and unsafe/unknown snapshots. User-invoked preparation and restore operations retain their separate shorter timeouts.
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.6`, `CFBundleVersion=1`, and the signed native helper under `Contents/Library/LaunchServices`.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.7`, `CFBundleVersion=1`, and the signed native helper under `Contents/Library/LaunchServices`.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.
