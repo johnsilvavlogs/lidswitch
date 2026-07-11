@@ -4,12 +4,31 @@ import Foundation
 import IOKit.ps
 import LidSwitchCore
 
+enum PowerControllerAlert: Equatable {
+    // This alert is emitted only when the bounded helper-rollback waiter fails
+    // to prove the terminal session safe. A later authoritative snapshot may
+    // clear it, but only after the exact same safe-idle predicate succeeds.
+    case rollbackVerificationFailure(reason: String)
+    case operationFailure(message: String)
+
+    var message: String {
+        switch self {
+        case let .rollbackVerificationFailure(reason):
+            return "The safety monitor ended this session (\(reason)), and LidSwitch could not verify a complete rollback. Use Restore Sleep before starting another session or quitting."
+        case let .operationFailure(message):
+            return message
+        }
+    }
+}
+
 @MainActor
 final class PowerController: ObservableObject {
     @Published private(set) var snapshot: PowerSnapshot = .empty
     @Published private(set) var isBusy = false
     @Published private(set) var isStarting = false
-    @Published var errorMessage: String?
+    @Published private(set) var alert: PowerControllerAlert?
+
+    var errorMessage: String? { alert?.message }
 
     nonisolated private static let refreshInterval: TimeInterval = 30
     nonisolated private static let restoreTimeout: TimeInterval = 8
@@ -31,21 +50,32 @@ final class PowerController: ObservableObject {
     private var startRequestID: UUID?
     private let snapshotProvider: (UUID?) -> PowerSnapshot
     private let safeRollbackWaiter: @Sendable () -> PowerSnapshot
+    private let announcementHandler: (String) -> Void
 
     init(
         bootstrap: Bool = true,
         snapshotProvider: @escaping (UUID?) -> PowerSnapshot = { PowerInspector.snapshot(ownedSessionID: $0) },
         safeRollbackWaiter: @escaping @Sendable () -> PowerSnapshot = {
-            PowerController.waitForSnapshot(timeout: PowerController.helperRollbackVerificationTimeout, ownedSessionID: nil) { candidate in
-                candidate.sleepDisabledVerified
-                    && !candidate.sleepDisabled
-                    && candidate.activationLease == nil
-                    && !candidate.helperRecoveryRequired
-            }
+            PowerController.waitForSnapshot(
+                timeout: PowerController.helperRollbackVerificationTimeout,
+                ownedSessionID: nil,
+                condition: PowerController.isVerifiedSafeIdle
+            )
+        },
+        announcementHandler: @escaping (String) -> Void = { message in
+            NSAccessibility.post(
+                element: NSApplication.shared,
+                notification: .announcementRequested,
+                userInfo: [
+                    .announcement: message,
+                    .priority: NSAccessibilityPriorityLevel.high.rawValue,
+                ]
+            )
         }
     ) {
         self.snapshotProvider = snapshotProvider
         self.safeRollbackWaiter = safeRollbackWaiter
+        self.announcementHandler = announcementHandler
         // A session belongs to one app process. A fresh process never adopts a
         // predecessor's lease; revoking it makes the helper restore immediately.
         guard bootstrap else { return }
@@ -89,6 +119,7 @@ final class PowerController: ObservableObject {
         let previousStatus = snapshot.statusTitle
         let next = snapshotProvider(activeSessionID)
         snapshot = next
+        reconcileRollbackVerificationFailure(after: next)
 
         guard let sessionID = activeSessionID else {
             if next.hasCriticalSafetyIssue, next.statusTitle != previousStatus {
@@ -114,14 +145,14 @@ final class PowerController: ObservableObject {
     func prepareHelper() {
         guard !isBusy else { return }
         guard snapshot.canPrepareHelper, snapshot.sleepDisabledVerified else {
-            errorMessage = snapshot.statusDetail
+            alert = .operationFailure(message: snapshot.statusDetail)
             announce(snapshot.statusDetail)
             return
         }
 
         endLocalSession(revokeLease: true)
         isBusy = true
-        errorMessage = nil
+        alert = nil
 
         Task.detached {
             do {
@@ -146,7 +177,7 @@ final class PowerController: ObservableObject {
                     if prepared {
                         self.announce("The crash-safe helper is ready. Protection remains off.")
                     } else {
-                        self.errorMessage = "The helper was installed, but its safe ready state could not be verified. Protection remains off."
+                        self.alert = .operationFailure(message: "The helper was installed, but its safe ready state could not be verified. Protection remains off.")
                         self.announce(self.errorMessage ?? "The helper safe state could not be verified.")
                     }
                 }
@@ -162,7 +193,7 @@ final class PowerController: ObservableObject {
         startRequestID = requestID
         isBusy = true
         isStarting = true
-        errorMessage = nil
+        alert = nil
         announce("Starting LidSwitch session. Waiting for helper confirmation.")
 
         Task { @MainActor [weak self] in
@@ -178,7 +209,7 @@ final class PowerController: ObservableObject {
             isStarting = false
             isBusy = false
             startRequestID = nil
-            errorMessage = "Session did not start. \(snapshot.statusDetail) Protection remains off."
+            alert = .operationFailure(message: "Session did not start. \(snapshot.statusDetail) Protection remains off.")
             announce(errorMessage ?? "Session did not start. Protection remains off.")
             return
         }
@@ -198,7 +229,7 @@ final class PowerController: ObservableObject {
             isBusy = false
             startRequestID = nil
             let detail = errorMessage(for: error, fallback: "Nothing was enabled.")
-            errorMessage = "Session did not start. \(detail) Protection remains off."
+            alert = .operationFailure(message: "Session did not start. \(detail) Protection remains off.")
             announce(errorMessage ?? "Session did not start. Protection remains off.")
             return
         }
@@ -223,28 +254,24 @@ final class PowerController: ObservableObject {
         guard !isBusy else { return }
         endLocalSession(revokeLease: true)
         isBusy = true
-        errorMessage = nil
+        alert = nil
 
         Task.detached {
             do {
                 try PrivilegedHelperManager.restoreSleepNow()
-                let next = Self.waitForSnapshot(timeout: Self.restoreTimeout, ownedSessionID: nil) { candidate in
-                    candidate.sleepDisabledVerified
-                        && !candidate.sleepDisabled
-                        && candidate.activationLease == nil
-                        && !candidate.helperRecoveryRequired
-                }
+                let next = Self.waitForSnapshot(
+                    timeout: Self.restoreTimeout,
+                    ownedSessionID: nil,
+                    condition: Self.isVerifiedSafeIdle
+                )
                 await MainActor.run {
-                    let restored = next.sleepDisabledVerified
-                        && !next.sleepDisabled
-                        && next.activationLease == nil
-                        && !next.helperRecoveryRequired
+                    let restored = Self.isVerifiedSafeIdle(next)
                     self.snapshot = next
                     self.isBusy = false
                     if restored {
                         self.announce("System sleep has been restored.")
                     } else {
-                        self.errorMessage = "LidSwitch could not verify that the macOS sleep override is off. Keep LidSwitch open and try Restore Sleep again."
+                        self.alert = .operationFailure(message: "LidSwitch could not verify that the macOS sleep override is off. Keep LidSwitch open and try Restore Sleep again.")
                         self.announce(self.errorMessage ?? "System sleep restoration could not be verified.")
                     }
                 }
@@ -258,7 +285,7 @@ final class PowerController: ObservableObject {
         guard !isBusy else { return }
         endLocalSession(revokeLease: true)
         isBusy = true
-        errorMessage = nil
+        alert = nil
 
         Task.detached {
             do {
@@ -285,7 +312,7 @@ final class PowerController: ObservableObject {
                     if removed {
                         self.announce("The helper was removed and system sleep was restored.")
                     } else {
-                        self.errorMessage = "Removal completed, but the safe uninstalled state could not be verified."
+                        self.alert = .operationFailure(message: "Removal completed, but the safe uninstalled state could not be verified.")
                         self.announce(self.errorMessage ?? "Helper removal could not be verified.")
                     }
                 }
@@ -302,7 +329,7 @@ final class PowerController: ObservableObject {
 
     func prepareForSystemTermination(completion: @escaping (Bool) -> Void) {
         guard !isBusy else {
-            errorMessage = "LidSwitch is still finishing a safety operation. Wait for it to complete, then use Restore and Quit again."
+            alert = .operationFailure(message: "LidSwitch is still finishing a safety operation. Wait for it to complete, then use Restore and Quit again.")
             announce(errorMessage ?? "A LidSwitch safety operation is still in progress.")
             completion(false)
             return
@@ -336,17 +363,14 @@ final class PowerController: ObservableObject {
 
         endLocalSession(revokeLease: true)
         isBusy = true
-        errorMessage = nil
+        alert = nil
         pendingStopCompletion = completion
 
         let safeRollbackWaiter = safeRollbackWaiter
         Task.detached {
             let next = safeRollbackWaiter()
             await MainActor.run {
-                let restored = next.sleepDisabledVerified
-                    && !next.sleepDisabled
-                    && next.activationLease == nil
-                    && !next.helperRecoveryRequired
+                let restored = Self.isVerifiedSafeIdle(next)
                 self.snapshot = next
                 self.isBusy = false
                 let completion = self.pendingStopCompletion
@@ -359,7 +383,7 @@ final class PowerController: ObservableObject {
                         NSApplication.shared.terminate(nil)
                     }
                 } else {
-                    self.errorMessage = "LidSwitch stopped renewing the session, but macOS still reports an active sleep override. Use Restore Sleep before quitting."
+                    self.alert = .operationFailure(message: "LidSwitch stopped renewing the session, but macOS still reports an active sleep override. Use Restore Sleep before quitting.")
                     self.announce(self.errorMessage ?? "Restore required before quitting.")
                     completion?(false)
                 }
@@ -375,6 +399,12 @@ final class PowerController: ObservableObject {
     func simulateHeartbeatEndForTesting(sessionID: UUID, reason: String) {
         activeSessionID = sessionID
         heartbeatDidEnd(sessionID, reason: reason)
+    }
+
+    func simulateNewSessionForTesting(_ sessionID: UUID) {
+        activeSessionID = sessionID
+        isBusy = false
+        isStarting = false
     }
 #endif
 
@@ -429,7 +459,7 @@ final class PowerController: ObservableObject {
         isBusy = true
         startRequestID = nil
         endActivity()
-        errorMessage = nil
+        alert = nil
         announce(
             reason == "power-disconnected"
                 ? "Power disconnected. The LidSwitch session ended and will not restart automatically."
@@ -440,17 +470,14 @@ final class PowerController: ObservableObject {
             let next = safeRollbackWaiter()
             await MainActor.run {
                 guard self.activeSessionID == nil else { return }
-                let restored = next.sleepDisabledVerified
-                    && !next.sleepDisabled
-                    && next.activationLease == nil
-                    && !next.helperRecoveryRequired
+                let restored = Self.isVerifiedSafeIdle(next)
                 self.snapshot = next
                 self.isBusy = false
                 if restored {
-                    self.errorMessage = nil
+                    self.alert = nil
                     self.announce("Protection off. System sleep has been restored.")
                 } else {
-                    self.errorMessage = "The safety monitor ended this session (\(reason)), and LidSwitch could not verify a complete rollback. Use Restore Sleep before starting another session or quitting."
+                    self.alert = .rollbackVerificationFailure(reason: reason)
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
                 }
             }
@@ -475,6 +502,20 @@ final class PowerController: ObservableObject {
         if let announcement {
             announce(announcement)
         }
+    }
+
+    // All authoritative refresh callers (bootstrap, the 30-second timer,
+    // power-source notifications, and manual Refresh) converge through this
+    // one reconciliation point. It deliberately clears no generic operation
+    // error and refuses to act while any newer local session exists.
+    private func reconcileRollbackVerificationFailure(after snapshot: PowerSnapshot) {
+        guard case .rollbackVerificationFailure = alert,
+              activeSessionID == nil,
+              Self.isVerifiedSafeIdle(snapshot)
+        else { return }
+
+        alert = nil
+        announce("System sleep restored. Protection off.")
     }
 
     private func beginActivity() {
@@ -508,7 +549,7 @@ final class PowerController: ObservableObject {
     private func finishFailure(_ error: Error, fallback: String) {
         snapshot = PowerInspector.snapshot(ownedSessionID: activeSessionID)
         isBusy = false
-        errorMessage = errorMessage(for: error, fallback: fallback)
+        alert = .operationFailure(message: errorMessage(for: error, fallback: fallback))
         announce(errorMessage ?? fallback)
     }
 
@@ -519,14 +560,14 @@ final class PowerController: ObservableObject {
     }
 
     private func announce(_ message: String) {
-        NSAccessibility.post(
-            element: NSApplication.shared,
-            notification: .announcementRequested,
-            userInfo: [
-                .announcement: message,
-                .priority: NSAccessibilityPriorityLevel.high.rawValue,
-            ]
-        )
+        announcementHandler(message)
+    }
+
+    nonisolated private static func isVerifiedSafeIdle(_ candidate: PowerSnapshot) -> Bool {
+        candidate.sleepDisabledVerified
+            && !candidate.sleepDisabled
+            && candidate.activationLease == nil
+            && !candidate.helperRecoveryRequired
     }
 
     nonisolated private static func waitForSnapshot(
