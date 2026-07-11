@@ -993,6 +993,35 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(PowerInspector.terminalGenerationsValid(path: ledger.path, expectedOwnerUID: getuid()))
     }
 
+    func testBootIdentityMatchesStableKernelBootSessionUUID() throws {
+        var size = 0
+        XCTAssertEqual(sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0), 0)
+        XCTAssertGreaterThan(size, 1)
+        var buffer = [CChar](repeating: 0, count: size)
+        XCTAssertEqual(sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0), 0)
+        if let terminator = buffer.firstIndex(of: 0) {
+            buffer.removeSubrange(terminator...)
+        }
+        let raw = String(decoding: buffer.map(UInt8.init(bitPattern:)), as: UTF8.self)
+        let expected = try XCTUnwrap(BootIdentity.normalizeBootSessionUUID(raw))
+
+        XCTAssertEqual(BootIdentity.current(), expected)
+        XCTAssertEqual(BootIdentity.current(), expected)
+        XCTAssertEqual(UUID(uuidString: expected)?.uuidString.lowercased(), expected)
+    }
+
+    func testBootIdentityNormalizerCanonicalizesAndRejectsMalformedValues() {
+        let uuid = "5D7D39F9-B485-44D9-87DE-422B1BF64F60"
+        XCTAssertEqual(
+            BootIdentity.normalizeBootSessionUUID(" \n\(uuid)\0\t"),
+            uuid.lowercased()
+        )
+        XCTAssertNil(BootIdentity.normalizeBootSessionUUID(""))
+        XCTAssertNil(BootIdentity.normalizeBootSessionUUID("\0\n"))
+        XCTAssertNil(BootIdentity.normalizeBootSessionUUID("1783623794.587307"))
+        XCTAssertNil(BootIdentity.normalizeBootSessionUUID("not-a-boot-session"))
+    }
+
     func testLeaseRejectsRebootExpiryAndExcessiveLifetime() {
         let now = Date()
         let mono = MonotonicClock.seconds()
