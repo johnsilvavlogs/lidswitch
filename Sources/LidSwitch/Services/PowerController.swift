@@ -13,6 +13,12 @@ final class PowerController: ObservableObject {
 
     nonisolated private static let refreshInterval: TimeInterval = 30
     nonisolated private static let restoreTimeout: TimeInterval = 8
+    // Helper rollback can perform three bounded read/write/read attempts for
+    // both SleepDisabled and AC sleep (~18.4s worst case). Keep automatic
+    // termination verification above that bound, with margin, but below the
+    // 45-second live acceptance deadline. User-invoked restore/preparation
+    // operations retain their existing, shorter bounds.
+    nonisolated private static let helperRollbackVerificationTimeout: TimeInterval = 30
 
     private var refreshTimer: Timer?
     private var heartbeat: SessionHeartbeatCoordinator?
@@ -24,12 +30,22 @@ final class PowerController: ObservableObject {
     private var pendingStopCompletion: ((Bool) -> Void)?
     private var startRequestID: UUID?
     private let snapshotProvider: (UUID?) -> PowerSnapshot
+    private let safeRollbackWaiter: @Sendable () -> PowerSnapshot
 
     init(
         bootstrap: Bool = true,
-        snapshotProvider: @escaping (UUID?) -> PowerSnapshot = { PowerInspector.snapshot(ownedSessionID: $0) }
+        snapshotProvider: @escaping (UUID?) -> PowerSnapshot = { PowerInspector.snapshot(ownedSessionID: $0) },
+        safeRollbackWaiter: @escaping @Sendable () -> PowerSnapshot = {
+            PowerController.waitForSnapshot(timeout: PowerController.helperRollbackVerificationTimeout, ownedSessionID: nil) { candidate in
+                candidate.sleepDisabledVerified
+                    && !candidate.sleepDisabled
+                    && candidate.activationLease == nil
+                    && !candidate.helperRecoveryRequired
+            }
+        }
     ) {
         self.snapshotProvider = snapshotProvider
+        self.safeRollbackWaiter = safeRollbackWaiter
         // A session belongs to one app process. A fresh process never adopts a
         // predecessor's lease; revoking it makes the helper restore immediately.
         guard bootstrap else { return }
@@ -323,13 +339,9 @@ final class PowerController: ObservableObject {
         errorMessage = nil
         pendingStopCompletion = completion
 
+        let safeRollbackWaiter = safeRollbackWaiter
         Task.detached {
-            let next = Self.waitForSnapshot(timeout: Self.restoreTimeout, ownedSessionID: nil) { candidate in
-                candidate.sleepDisabledVerified
-                    && !candidate.sleepDisabled
-                    && candidate.activationLease == nil
-                    && !candidate.helperRecoveryRequired
-            }
+            let next = safeRollbackWaiter()
             await MainActor.run {
                 let restored = next.sleepDisabledVerified
                     && !next.sleepDisabled
@@ -354,6 +366,17 @@ final class PowerController: ObservableObject {
             }
         }
     }
+
+#if DEBUG
+    nonisolated static var helperRollbackVerificationTimeoutForTesting: TimeInterval {
+        helperRollbackVerificationTimeout
+    }
+
+    func simulateHeartbeatEndForTesting(sessionID: UUID, reason: String) {
+        activeSessionID = sessionID
+        heartbeatDidEnd(sessionID, reason: reason)
+    }
+#endif
 
     private func scheduleHeartbeat(for sessionID: UUID, initialLeaseExpiresMonotonic: TimeInterval) {
         heartbeat?.stop(reason: "superseded-session")
@@ -399,20 +422,38 @@ final class PowerController: ObservableObject {
         activeSessionID = nil
         sessionWasAcknowledged = false
         isStarting = false
-        isBusy = false
+        // Keep the UI in a bounded restoring state until the helper's rollback
+        // becomes observable. An immediate snapshot can catch the helper's
+        // durable restore-pending marker and otherwise leave a stale red alert
+        // onscreen after rollback has already completed.
+        isBusy = true
         startRequestID = nil
         endActivity()
-        errorMessage = reason == "power-disconnected"
-            ? nil
-            : "The safety monitor ended this session (\(reason)). System sleep is being restored."
+        errorMessage = nil
         announce(
             reason == "power-disconnected"
                 ? "Power disconnected. The LidSwitch session ended and will not restart automatically."
                 : "The LidSwitch session ended and will not restart automatically."
         )
+        let safeRollbackWaiter = safeRollbackWaiter
         Task.detached {
-            let next = PowerInspector.snapshot(ownedSessionID: nil)
-            await MainActor.run { self.snapshot = next }
+            let next = safeRollbackWaiter()
+            await MainActor.run {
+                guard self.activeSessionID == nil else { return }
+                let restored = next.sleepDisabledVerified
+                    && !next.sleepDisabled
+                    && next.activationLease == nil
+                    && !next.helperRecoveryRequired
+                self.snapshot = next
+                self.isBusy = false
+                if restored {
+                    self.errorMessage = nil
+                    self.announce("Protection off. System sleep has been restored.")
+                } else {
+                    self.errorMessage = "The safety monitor ended this session (\(reason)), and LidSwitch could not verify a complete rollback. Use Restore Sleep before starting another session or quitting."
+                    self.announce(self.errorMessage ?? "Restore required before continuing.")
+                }
+            }
         }
     }
 

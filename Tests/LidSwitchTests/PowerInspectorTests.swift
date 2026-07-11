@@ -5,6 +5,15 @@ import XCTest
 @testable import LidSwitch
 @testable import LidSwitchHelper
 
+private func waitForSemaphore(_ semaphore: DispatchSemaphore) async {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async {
+            semaphore.wait()
+            continuation.resume()
+        }
+    }
+}
+
 final class SessionSafetyTests: XCTestCase {
     @MainActor
     func testNativeConfirmationPresenterMapsConfirmedActionsExactlyOnce() {
@@ -77,6 +86,81 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(snapshotCalls, 0)
         XCTAssertFalse(controller.isStarting)
         XCTAssertFalse(controller.isBusy)
+    }
+
+    @MainActor
+    func testHeartbeatEndWaitsForSafeRollbackAndClearsTransientRecoveryAlert() async {
+        let waiterEntered = DispatchSemaphore(value: 0)
+        let releaseWaiter = DispatchSemaphore(value: 0)
+        let safe = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: nil,
+            checkedAt: Date()
+        )
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in .empty },
+            safeRollbackWaiter: {
+                waiterEntered.signal()
+                releaseWaiter.wait()
+                return safe
+            }
+        )
+        controller.errorMessage = "old transient error"
+
+        controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "helper-recovery-required-override-lost-restore-pending")
+        await waitForSemaphore(waiterEntered)
+        XCTAssertTrue(controller.isBusy)
+        XCTAssertNil(controller.errorMessage)
+        releaseWaiter.signal()
+        for _ in 0..<200 where controller.isBusy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertFalse(controller.isBusy)
+        XCTAssertNil(controller.errorMessage)
+        XCTAssertTrue(controller.snapshot.sleepDisabledVerified)
+        XCTAssertFalse(controller.snapshot.sleepDisabled)
+        XCTAssertFalse(controller.snapshot.helperRecoveryRequired)
+    }
+
+    @MainActor
+    func testHeartbeatEndRetainsRecoveryAlertWhenBoundedRollbackVerificationFails() async {
+        let waiterEntered = DispatchSemaphore(value: 0)
+        let releaseWaiter = DispatchSemaphore(value: 0)
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in .empty },
+            safeRollbackWaiter: {
+                waiterEntered.signal()
+                releaseWaiter.wait()
+                return .empty
+            }
+        )
+
+        controller.simulateHeartbeatEndForTesting(sessionID: UUID(), reason: "helper-recovery-required-override-lost-restore-pending")
+        await waitForSemaphore(waiterEntered)
+        XCTAssertTrue(controller.isBusy)
+        XCTAssertNil(controller.errorMessage)
+        releaseWaiter.signal()
+        for _ in 0..<200 where controller.isBusy {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertFalse(controller.isBusy)
+        XCTAssertTrue(
+            controller.errorMessage?.contains("could not verify a complete rollback") == true,
+            "unexpected error: \(controller.errorMessage ?? "nil")"
+        )
+    }
+
+    func testHelperRollbackVerificationTimeoutHasSafetyMarginWithinAcceptanceLimit() {
+        XCTAssertEqual(PowerController.helperRollbackVerificationTimeoutForTesting, 30)
+        XCTAssertGreaterThan(PowerController.helperRollbackVerificationTimeoutForTesting, 18.4)
+        XCTAssertLessThanOrEqual(PowerController.helperRollbackVerificationTimeoutForTesting, 45)
     }
 
     func testExternalHDMIClamshellDoesNotChangePluggedInStartEligibility() {
@@ -1026,6 +1110,81 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(status.contains("observed_sleep_disabled=unreadable"))
     }
 
+    func testNativeHelperTransientUnreadableSleepDisabledRetriesAndStaysActive() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.05)
+        let statusWhileActive = LockedBox<String?>(nil)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.setSleepDisabledReadSequence([nil, true])
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.18, repeats: false) { _ in
+            statusWhileActive.value = try? String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+            power.setSource(.battery)
+        }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let active = try XCTUnwrap(statusWhileActive.value)
+        XCTAssertTrue(active.contains("state=active"))
+        XCTAssertTrue(active.contains("reason=verified"))
+        XCTAssertEqual(power.enableSleepOverrideCalls, 1)
+        XCTAssertGreaterThanOrEqual(power.sleepDisabledReadCalls, 2)
+    }
+
+    func testNativeHelperUnreadableThenExplicitOwnedLossUsesNormalRecovery() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.05)
+        let recoveredStatus = LockedBox<String?>(nil)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.forceSleepDisabled(false)
+            power.setSleepDisabledReadSequence([nil, false])
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.18, repeats: false) { _ in
+            recoveredStatus.value = try? String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+            power.setSource(.battery)
+        }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let recovered = try XCTUnwrap(recoveredStatus.value)
+        XCTAssertTrue(recovered.contains("state=active"))
+        XCTAssertTrue(recovered.contains("recovery_budget=spent"))
+        XCTAssertEqual(power.enableSleepOverrideCalls, 2)
+    }
+
+    func testNativeHelperTransientUnreadableACSleepRetriesAndStaysActive() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.05)
+        let statusWhileActive = LockedBox<String?>(nil)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.setACSleepReadSequence([nil, 0])
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.18, repeats: false) { _ in
+            statusWhileActive.value = try? String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+            power.setSource(.battery)
+        }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let active = try XCTUnwrap(statusWhileActive.value)
+        XCTAssertTrue(active.contains("state=active"))
+        XCTAssertTrue(active.contains("reason=verified"))
+        XCTAssertEqual(power.enableSleepOverrideCalls, 1)
+        XCTAssertGreaterThanOrEqual(power.acSleepReadCalls, 2)
+    }
+
+    func testNativeHelperPersistentUnreadableACSleepFailsClosed() throws {
+        let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
+        let harness = try makeRuntimeHarness(lifetime: 5, power: power, reconciliationInterval: 0.02)
+        Timer.scheduledTimer(withTimeInterval: 0.01, repeats: false) { _ in
+            power.forceACSleepUnknown()
+        }
+
+        XCTAssertEqual(harness.runtime.run(), 0)
+        let status = try String(contentsOfFile: harness.configuration.statusPath, encoding: .utf8)
+        XCTAssertEqual(power.enableSleepOverrideCalls, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: harness.configuration.appliedStatePath))
+        XCTAssertTrue(status.contains("state=recovery-required"))
+        XCTAssertTrue(status.contains("observed_ac_sleep=unreadable"))
+    }
+
     func testNativeHelperRecoveryUnplugRaceTerminatesWithoutRearm() throws {
         let power = FakePowerSystem(source: .ac, sleepDisabled: false, acSleep: 5)
         power.unplugOnEnableAfterCall = 2
@@ -1828,6 +1987,10 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
     private var unplugOnEnableValue = false
     private var unplugOnEnableAfterCallValue: Int?
     private var sleepRestoreObserver: (() -> Void)?
+    private var sleepDisabledSequence: [Bool?] = []
+    private var acSleepSequence: [Int?] = []
+    private var sleepReadCalls = 0
+    private var acReadCalls = 0
 
     init(source: HelperPowerSource, sleepDisabled: Bool?, acSleep: Int?) {
         self.source = source
@@ -1838,6 +2001,8 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
     var currentSleepDisabled: Bool? { withLock { sleepDisabledValue } }
     var currentACSleep: Int? { withLock { acSleepValue } }
     var enableSleepOverrideCalls: Int { withLock { enableCalls } }
+    var sleepDisabledReadCalls: Int { withLock { sleepReadCalls } }
+    var acSleepReadCalls: Int { withLock { acReadCalls } }
     var failSleepRestore: Bool {
         get { withLock { failRestoreValue } }
         set { withLock { failRestoreValue = newValue } }
@@ -1871,13 +2036,41 @@ private final class FakePowerSystem: HelperPowerSystem, @unchecked Sendable {
         withLock { sleepDisabledValue = nil }
     }
 
+    func setSleepDisabledReadSequence(_ values: [Bool?]) {
+        withLock { sleepDisabledSequence = values }
+    }
+
     func forceACSleep(_ minutes: Int) {
         withLock { acSleepValue = minutes }
     }
 
+    func forceACSleepUnknown() {
+        withLock { acSleepValue = nil }
+    }
+
+    func setACSleepReadSequence(_ values: [Int?]) {
+        withLock { acSleepSequence = values }
+    }
+
     func powerSource() -> HelperPowerSource { withLock { source } }
-    func sleepDisabled() -> Bool? { withLock { sleepDisabledValue } }
-    func acSleepMinutes() -> Int? { withLock { acSleepValue } }
+    func sleepDisabled() -> Bool? {
+        withLock {
+            sleepReadCalls += 1
+            if !sleepDisabledSequence.isEmpty {
+                return sleepDisabledSequence.removeFirst()
+            }
+            return sleepDisabledValue
+        }
+    }
+    func acSleepMinutes() -> Int? {
+        withLock {
+            acReadCalls += 1
+            if !acSleepSequence.isEmpty {
+                return acSleepSequence.removeFirst()
+            }
+            return acSleepValue
+        }
+    }
 
     func setSleepDisabled(_ enabled: Bool) throws {
         try withLock {

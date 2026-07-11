@@ -26,6 +26,12 @@ The `SessionSafetyTests` suite covers:
 - one owned SleepDisabled-only drift recovery with the same session UUID, fresh
   recovery acknowledgement, bounded diagnostics, and no AC-sleep overwrite;
 - a second owned SleepDisabled drift terminalizing without rearm;
+- transient unreadable override probes retrying into healthy state without
+  spending recovery budget, unreadable-to-explicit-drift following the normal
+  recovery path, and repeated unreadability still failing closed;
+- helper-ended UI remaining in a restoring state during delayed rollback,
+  clearing stale errors after bounded safe-idle proof, and retaining an
+  actionable error when the 30-second verification result is still unsafe;
 - helper restart after a reserved recovery failing closed, restart after a spent
   recovery retaining the budget, and a new UUID receiving a fresh budget;
 - application-owned native Start, Remove Helper, and Quit confirmations: exact

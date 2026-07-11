@@ -11,6 +11,12 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     private static let restoreRetryDelays: [useconds_t] = [100_000, 300_000]
+    // A single pmset read can transiently fail while the app, helper, and an
+    // observer sample power state at nearly the same time. Retry only values
+    // that were unreadable; explicit drift is never delayed or masked. With
+    // the one-second SystemPowerSystem command bound, the full probe remains
+    // inside the session's ten-second safety deadline.
+    private static let unreadableProbeRetryDelays: [useconds_t] = [100_000, 300_000]
 
     private let configuration: HelperConfiguration
     private let power: HelperPowerSystem
@@ -251,8 +257,7 @@ final class HelperRuntime: @unchecked Sendable {
             stop(reason: "lease-expired-or-invalid")
             return
         }
-        let sleepDisabled = power.sleepDisabled()
-        let acSleep = power.acSleepMinutes()
+        let (sleepDisabled, acSleep) = readOverrideStateWithBoundedUnreadableRetry()
         guard sleepDisabled == true, acSleep == 0 else {
             let evidence = overrideEvidence(
                 sessionID: lease.sessionID,
@@ -278,6 +283,30 @@ final class HelperRuntime: @unchecked Sendable {
             path: configuration.statusPath,
             evidence: successfulOverrideRecoveries == 1 ? ["recovery_budget": "spent"] : [:]
         )
+    }
+
+    private func readOverrideStateWithBoundedUnreadableRetry() -> (Bool?, Int?) {
+        var sleepDisabled = power.sleepDisabled()
+        var acSleep = power.acSleepMinutes()
+        guard sleepDisabled == nil || acSleep == nil else {
+            return (sleepDisabled, acSleep)
+        }
+
+        for delay in Self.unreadableProbeRetryDelays {
+            usleep(delay)
+            // A known value is evidence, including explicit drift. Only repeat
+            // the command whose previous result could not be parsed.
+            if sleepDisabled == nil {
+                sleepDisabled = power.sleepDisabled()
+            }
+            if acSleep == nil {
+                acSleep = power.acSleepMinutes()
+            }
+            if sleepDisabled != nil && acSleep != nil {
+                break
+            }
+        }
+        return (sleepDisabled, acSleep)
     }
 
     private func recoverOwnedSleepDisabledOverride(
