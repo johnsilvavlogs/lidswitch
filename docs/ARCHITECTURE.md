@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.7` is a SwiftPM menu bar app with three targets:
+LidSwitch `0.2.8` is a SwiftPM menu bar app with three targets:
 
 - `LidSwitch`: UI, inspection, lease writer, installation and recovery controls.
 - `LidSwitchCore`: lease schema, monotonic clock, boot identity, and compatibility policy.
@@ -8,9 +8,9 @@ LidSwitch `0.2.7` is a SwiftPM menu bar app with three targets:
 
 ## Session flow
 
-1. The user prepares helper version `2`; legacy login and shell-helper artifacts are removed while protection remains off.
+1. The user prepares helper version `3`; legacy login and shell-helper artifacts are removed while protection remains off.
 2. The user confirms **Start Plugged-In Session** on AC power.
-3. The app writes a user-owned `0600` activation lease atomically. It contains the session UUID, boot identity, monotonic issue/expiry times, UID, and macOS build.
+3. The app writes a user-owned `0600` activation lease atomically. It contains the session UUID, the immutable `kern.bootsessionuuid` boot identity, monotonic issue/expiry times, UID, and macOS build. Calendar/NTP adjustments to mutable `kern.boottime` cannot invalidate a same-boot lease.
 4. launchd reacts to the lease path. There is no `StartInterval`.
 5. The helper securely reopens the lease with `O_NOFOLLOW | O_NONBLOCK`, validates its file descriptor metadata, and verifies current AC power and settings.
 6. Before changing anything, the helper writes a root-owned applied-state record. It then applies AC sleep `0` when needed and `SleepDisabled=1`, verifying both.
@@ -36,6 +36,6 @@ After the app heartbeat observes a terminal helper state, the menu remains in a 
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.7`, `CFBundleVersion=1`, and the signed native helper under `Contents/Library/LaunchServices`.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.8`, `CFBundleVersion=1`, and helper version `3` under `Contents/Library/LaunchServices`.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

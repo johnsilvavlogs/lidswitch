@@ -144,12 +144,28 @@ public enum LeaseValidationFailure: String, Error, Equatable, Sendable {
 
 public enum BootIdentity {
     public static func current() -> String? {
-        var bootTime = timeval()
-        var size = MemoryLayout<timeval>.stride
-        guard sysctlbyname("kern.boottime", &bootTime, &size, nil, 0) == 0 else {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0,
+              size > 1
+        else {
             return nil
         }
-        return "\(bootTime.tv_sec).\(bootTime.tv_usec)"
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 else {
+            return nil
+        }
+        if let terminator = buffer.firstIndex(of: 0) {
+            buffer.removeSubrange(terminator...)
+        }
+        return normalizeBootSessionUUID(
+            String(decoding: buffer.map(UInt8.init(bitPattern:)), as: UTF8.self)
+        )
+    }
+
+    public static func normalizeBootSessionUUID(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
+        guard let uuid = UUID(uuidString: value) else { return nil }
+        return uuid.uuidString.lowercased()
     }
 }
 

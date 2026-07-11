@@ -2,12 +2,12 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.7` build `1` tolerates a bounded transient unreadable `pmset` override probe without ending a healthy session, while repeated unreadability and explicit drift still fail closed. After any safety termination, the menu waits for bounded rollback verification before presenting a recovery-required alert. If a later authoritative refresh proves `SleepDisabled=0`, no lease, no recovery marker, and no newer local session, it clears only that provenanced rollback alert and returns to safe-idle UI. It retains the application-owned native confirmations, serial monotonic lease coordinator, and root-owned terminal generation tombstones introduced in `0.2.5`.
+Version `0.2.8` build `1` binds leases to macOS's immutable boot-session UUID instead of the mutable `kern.boottime` clock value. Calendar/NTP corrections can no longer make a freshly renewed lease look as though it came from another boot; actual reboot, expiry, corruption, or ownership drift still fails closed immediately. It retains the bounded override-probe tolerance and verified rollback behavior introduced in `0.2.7`.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `2` and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `3` and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app writes a same-boot, same-user, same-build lease with a maximum lifetime of 30 seconds and renews it every 8 seconds.
 - The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and live `pmset` state.
@@ -50,7 +50,7 @@ swift test --scratch-path /tmp/lidswitch-tests
 ./script/validate_session_safety.sh
 ```
 
-The session suite covers current acknowledgement, monotonic heartbeat starvation, commit-boundary races, expiry, reboot mismatch, unplug/no-rearm, terminal-generation replay, app-death rollback, override drift, abnormal helper recovery, malformed and symlinked state, unknown power, restore failure, bounded diagnostics, stale zero baselines, and event-driven launchd configuration.
+The session suite covers stable boot-session identity, current acknowledgement, monotonic heartbeat starvation, commit-boundary races, expiry, reboot mismatch, unplug/no-rearm, terminal-generation replay, app-death rollback, override drift, abnormal helper recovery, malformed and symlinked state, unknown power, restore failure, bounded diagnostics, stale zero baselines, and event-driven launchd configuration.
 
 ## Package without launching
 
@@ -59,7 +59,7 @@ The session suite covers current acknowledgement, monotonic heartbeat starvation
 ./script/validate_dmg.sh
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.7` build `1`, helper version `2`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.8` build `1`, helper version `3`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 
