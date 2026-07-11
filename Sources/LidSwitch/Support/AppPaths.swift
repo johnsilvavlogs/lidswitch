@@ -2,11 +2,11 @@ import Foundation
 
 enum AppPaths {
     static let appName = "LidSwitch"
-    static let appVersion = "0.2.5"
+    static let appVersion = "0.2.6"
     static let appBuild = "1"
     static let bundleIdentifier = "com.johnsilva.LidSwitch"
     static let helperLabel = "com.johnsilva.lidswitch.helper"
-    static let helperVersion = "1"
+    static let helperVersion = "2"
     static let legacyLoginLabel = "com.johnsilva.LidSwitch.login"
 
     static var userSupportDirectory: URL {
