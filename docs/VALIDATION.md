@@ -29,6 +29,9 @@ The `SessionSafetyTests` suite covers:
 - transient unreadable override probes retrying into healthy state without
   spending recovery budget, unreadable-to-explicit-drift following the normal
   recovery path, and repeated unreadability still failing closed;
+- app and helper inspection reading native power preferences without launching
+  `pmset`, and an active UI refresh never terminating the heartbeat-owned
+  generation from an independently unreadable inspection field;
 - helper-ended UI remaining in a restoring state during delayed rollback,
   clearing stale errors after bounded safe-idle proof, and retaining an
   actionable error when the 30-second verification result is still unsafe;

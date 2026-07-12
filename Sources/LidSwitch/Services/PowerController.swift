@@ -121,24 +121,18 @@ final class PowerController: ObservableObject {
         snapshot = next
         reconcileRollbackVerificationFailure(after: next)
 
-        guard let sessionID = activeSessionID else {
-            if next.hasCriticalSafetyIssue, next.statusTitle != previousStatus {
-                announce(next.accessibilityState)
-            }
+        // The serial heartbeat is the sole authority for an owned active
+        // generation. A full UI refresh must never revoke a healthy lease from
+        // an independently unreadable inspection field; the heartbeat already
+        // checks native AC state, lease validity, and fresh helper status every
+        // second. This also prevents a power-source notification from creating
+        // a second, competing termination path.
+        if activeSessionID != nil {
             return
         }
 
-        let matchingStoppedStatus = next.helperStatus?.sessionID == sessionID
-            && next.helperStatus?.state != "active"
-        let acknowledgedSessionLostVerification = sessionWasAcknowledged && !next.sessionActive
-        if !next.source.isAC || matchingStoppedStatus || acknowledgedSessionLostVerification {
-            endLocalSession(
-                revokeLease: true,
-                announcement: !next.source.isAC
-                    ? "Power disconnected. The LidSwitch session ended and will not restart automatically."
-                    : "The LidSwitch session ended and the system sleep setting is being restored."
-            )
-            snapshot = PowerInspector.snapshot(ownedSessionID: activeSessionID)
+        if next.hasCriticalSafetyIssue, next.statusTitle != previousStatus {
+            announce(next.accessibilityState)
         }
     }
 
@@ -535,13 +529,14 @@ final class PowerController: ObservableObject {
 
     private func installPowerSourceObserver() {
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let source = IOPSNotificationCreateRunLoopSource({ context in
+        guard let unmanagedSource = IOPSNotificationCreateRunLoopSource({ context in
             guard let context else { return }
             let controller = Unmanaged<PowerController>.fromOpaque(context).takeUnretainedValue()
             MainActor.assumeIsolated {
                 controller.refresh()
             }
-        }, context).takeRetainedValue()
+        }, context) else { return }
+        let source = unmanagedSource.takeRetainedValue()
         powerSourceRunLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
     }
