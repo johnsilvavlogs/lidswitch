@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import IOKit.ps
 import LidSwitchCore
 import XCTest
 @testable import LidSwitch
@@ -15,6 +16,86 @@ private func waitForSemaphore(_ semaphore: DispatchSemaphore) async {
 }
 
 final class SessionSafetyTests: XCTestCase {
+    func testSystemPowerSystemReadsLiveOverrideAndNativePowerPreferencesWithoutPMSet() {
+        let values: [String: Any] = [
+            "AC Power": ["System Sleep Timer": NSNumber(value: 0)],
+        ]
+        let power = SystemPowerSystem(
+            liveSleepDisabledValue: { NSNumber(value: true) },
+            preferenceValue: { values[$0] }
+        )
+
+        XCTAssertEqual(power.sleepDisabled(), true)
+        XCTAssertEqual(power.acSleepMinutes(), 0)
+    }
+
+    func testSystemPowerSystemRejectsMalformedNativePowerPreferences() {
+        let values: [String: Any] = [
+            "AC Power": ["System Sleep Timer": NSNumber(value: 0.5)],
+        ]
+        let power = SystemPowerSystem(
+            liveSleepDisabledValue: { NSNumber(value: 2) },
+            preferenceValue: { values[$0] }
+        )
+
+        XCTAssertNil(power.sleepDisabled())
+        XCTAssertNil(power.acSleepMinutes())
+    }
+
+    func testStrictNativeNumberParsingRejectsBooleanFractionalAndOutOfDomainValues() {
+        XCTAssertEqual(PowerInspector.strictBool(NSNumber(value: false)), false)
+        XCTAssertEqual(PowerInspector.strictBool(NSNumber(value: true)), true)
+        XCTAssertNil(PowerInspector.strictBool(NSNumber(value: 0)))
+        XCTAssertNil(PowerInspector.strictBool(NSNumber(value: 1)))
+        XCTAssertNil(PowerInspector.strictBool(NSNumber(value: 2)))
+        XCTAssertNil(PowerInspector.strictBool(NSNumber(value: 0.5)))
+        XCTAssertEqual(PowerInspector.strictInt(NSNumber(value: 7)), 7)
+        XCTAssertNil(PowerInspector.strictInt(NSNumber(value: true)))
+        XCTAssertNil(PowerInspector.strictInt(NSNumber(value: 0.5)))
+        XCTAssertNil(PowerInspector.strictInt(NSNumber(value: -1)))
+        XCTAssertNil(PowerInspector.strictInt(NSNumber(value: Double(Int.max))))
+        XCTAssertNil(PowerInspector.strictInt(NSNumber(value: Double(Int32.max) + 1)))
+    }
+
+    func testNativeBatteryParserSelectsAndAggregatesOnlyValidInternalBatteries() {
+        let descriptions: [[String: Any]] = [
+            [kIOPSTypeKey: "UPS", kIOPSCurrentCapacityKey: 100, kIOPSMaxCapacityKey: 100],
+            [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSCurrentCapacityKey: 20, kIOPSMaxCapacityKey: 40],
+            [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSCurrentCapacityKey: 30, kIOPSMaxCapacityKey: 60],
+            [kIOPSTypeKey: kIOPSInternalBatteryType, kIOPSCurrentCapacityKey: 101, kIOPSMaxCapacityKey: 100],
+        ]
+
+        XCTAssertEqual(PowerInspector.internalBatteryPercent(from: descriptions), 50)
+        XCTAssertNil(PowerInspector.internalBatteryPercent(from: []))
+        XCTAssertNil(PowerInspector.internalBatteryPercent(from: [[
+            kIOPSTypeKey: kIOPSInternalBatteryType,
+            kIOPSCurrentCapacityKey: Double.greatestFiniteMagnitude,
+            kIOPSMaxCapacityKey: Double.greatestFiniteMagnitude,
+        ], [
+            kIOPSTypeKey: kIOPSInternalBatteryType,
+            kIOPSCurrentCapacityKey: Double.greatestFiniteMagnitude,
+            kIOPSMaxCapacityKey: Double.greatestFiniteMagnitude,
+        ]]))
+    }
+
+    @MainActor
+    func testActiveRefreshCannotTerminateSessionFromUnreadableInspection() {
+        let unreadable = makeSnapshot(
+            source: .unknown("inspection unavailable"),
+            sleepDisabled: false,
+            sleepDisabledVerified: false,
+            lease: nil,
+            status: nil
+        )
+        let controller = PowerController(bootstrap: false, snapshotProvider: { _ in unreadable })
+        controller.simulateNewSessionForTesting(UUID())
+
+        controller.refresh()
+
+        XCTAssertTrue(controller.requiresTerminationCleanup)
+        XCTAssertEqual(controller.snapshot, unreadable)
+    }
+
     @MainActor
     func testNativeConfirmationPresenterMapsConfirmedActionsExactlyOnce() {
         var actions: [NativeConfirmationAction] = []

@@ -2,7 +2,7 @@
 
 ## Current channel
 
-LidSwitch `0.2.8` build `1` is distributed as a public manual DMG. It is ad-hoc signed, not Developer ID signed, and not notarized. Recipients must expect Gatekeeper's **Open Anyway** flow.
+LidSwitch `0.2.9` build `1` is distributed as a public manual DMG. It is ad-hoc signed, not Developer ID signed, and not notarized. Recipients must expect Gatekeeper's **Open Anyway** flow.
 
 Do not claim App Store distribution, Apple notarization, automatic background protection, battery support, or compatibility beyond qualified build `25F84`.
 
@@ -11,7 +11,7 @@ Do not claim App Store distribution, Apple notarization, automatic background pr
 1. Confirm the branch diff contains no unrelated user work.
 2. Run the JTBD impact plan and `full-release` profile.
 3. Confirm session simulations and the no-launch bundle/DMG checks are green.
-4. Confirm the bundle reports app version `0.2.8`, build `1`, helper version `3`, arm64, and strict ad-hoc signature validity.
+4. Confirm the bundle reports app version `0.2.9`, build `1`, helper version `4`, arm64, and strict ad-hoc signature validity.
 5. Confirm Gatekeeper rejection is expected and documented.
 6. Run public hygiene, site Playwright, and secret scans.
 7. Run the explicit local canary after automated gates, then the unplug/replug and short lid-close observations.

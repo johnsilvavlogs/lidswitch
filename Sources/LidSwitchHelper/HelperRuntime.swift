@@ -11,11 +11,9 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     private static let restoreRetryDelays: [useconds_t] = [100_000, 300_000]
-    // A single pmset read can transiently fail while the app, helper, and an
-    // observer sample power state at nearly the same time. Retry only values
-    // that were unreadable; explicit drift is never delayed or masked. With
-    // the one-second SystemPowerSystem command bound, the full probe remains
-    // inside the session's ten-second safety deadline.
+    // A native preference read can transiently race powerd publication. Retry
+    // only values that were unreadable; explicit drift is never delayed or
+    // masked, and no reconciliation read launches a pmset subprocess.
     private static let unreadableProbeRetryDelays: [useconds_t] = [100_000, 300_000]
 
     private let configuration: HelperConfiguration
@@ -109,7 +107,13 @@ final class HelperRuntime: @unchecked Sendable {
             return 0
         }
 
-        installPowerNotification()
+        guard installPowerNotification() else {
+            _ = restoreOwnedStateThenRecordTerminal(
+                reason: "power-notification-unavailable",
+                sessionID: lease.sessionID
+            )
+            return 0
+        }
         installSignalHandlers()
         leaseTimer = Timer.scheduledTimer(withTimeInterval: reconciliationInterval, repeats: true) { [weak self] _ in
             self?.reconcile()
@@ -531,15 +535,17 @@ final class HelperRuntime: @unchecked Sendable {
         return sleepRestored && acSleepRestored
     }
 
-    private func installPowerNotification() {
+    private func installPowerNotification() -> Bool {
         let context = Unmanaged.passUnretained(self).toOpaque()
-        let source = IOPSNotificationCreateRunLoopSource({ context in
+        guard let unmanagedSource = IOPSNotificationCreateRunLoopSource({ context in
             guard let context else { return }
             let runtime = Unmanaged<HelperRuntime>.fromOpaque(context).takeUnretainedValue()
             runtime.reconcile()
-        }, context).takeRetainedValue()
+        }, context) else { return false }
+        let source = unmanagedSource.takeRetainedValue()
         powerSourceRunLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .defaultMode)
+        return true
     }
 
     private func installSignalHandlers() {

@@ -2,15 +2,15 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.8` build `1` binds leases to macOS's immutable boot-session UUID instead of the mutable `kern.boottime` clock value. Calendar/NTP corrections can no longer make a freshly renewed lease look as though it came from another boot; actual reboot, expiry, corruption, or ownership drift still fails closed immediately. It retains the bounded override-probe tolerance and verified rollback behavior introduced in `0.2.7`.
+Version `0.2.9` build `1` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, lease/status loss, corruption, or explicit setting drift still fails closed.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `3` and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `4` and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app writes a same-boot, same-user, same-build lease with a maximum lifetime of 30 seconds and renews it every 8 seconds.
-- The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and live `pmset` state.
+- The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and native power-preference state.
 - The helper applies power changes only on state transitions. It has no `StartInterval` loop.
 - Unplugging, quitting, restarting, app death, lease expiry, invalid state, lost acknowledgement, or power-setting drift ends the session and restores LidSwitch-owned changes.
 - Reconnecting power never starts a new session.
@@ -59,7 +59,7 @@ The session suite covers stable boot-session identity, current acknowledgement, 
 ./script/validate_dmg.sh
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.8` build `1`, helper version `3`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+The DMG and checksum are written to `dist/`. Packaging validates version `0.2.9` build `1`, helper version `4`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 

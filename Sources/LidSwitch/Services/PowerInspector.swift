@@ -1,25 +1,25 @@
 import Darwin
 import Foundation
+import IOKit
 import LidSwitchCore
 
 enum PowerInspector {
     private static let bundleValidation = validateBundle()
+    private static let powerManagementDomain = "com.apple.PowerManagement"
 
     static func snapshot(ownedSessionID: UUID? = nil) -> PowerSnapshot {
-        let battery = Shell.run("/usr/bin/pmset", ["-g", "batt"])
-        let live = Shell.run("/usr/bin/pmset", ["-g", "live"])
-        let custom = Shell.run("/usr/bin/pmset", ["-g", "custom"])
-        let parsedSleepDisabled = live.exitCode == 0 ? parseSleepDisabled(from: live.stdout) : nil
+        let source = nativePowerSource()
+        let parsedSleepDisabled = nativeSleepDisabled()
         let helperLoaded = helperInstalled()
         let helperArtifactsPresent = artifactsPresent()
         let systemBuild = SystemBuild.current()
         let lease = validActivationLease(systemBuild: systemBuild)
 
         return PowerSnapshot(
-            source: battery.exitCode == 0 ? parsePowerSource(from: battery.stdout) : .unknown("pmset failed"),
+            source: source,
             sleepDisabled: parsedSleepDisabled ?? false,
             sleepDisabledVerified: parsedSleepDisabled != nil,
-            acIdleSleepMinutes: custom.exitCode == 0 ? parseACIdleSleep(from: custom.stdout) : nil,
+            acIdleSleepMinutes: nativeACIdleSleep(),
             preferences: DesiredStateStore.readPreferences(),
             helperArtifactsPresent: helperArtifactsPresent,
             helperLoaded: helperLoaded,
@@ -132,6 +132,121 @@ enum PowerInspector {
             if inAC, parts.first == "sleep", parts.count >= 2 { return Int(parts[1]) }
         }
         return nil
+    }
+
+    private static func nativePowerSource() -> PowerSource {
+        guard let unmanagedInfo = IOPSCopyPowerSourcesInfo() else {
+            return .unknown("IOKit power source unavailable")
+        }
+        let info = unmanagedInfo.takeRetainedValue()
+        guard let unmanagedSource = IOPSGetProvidingPowerSourceType(info) else {
+            return .unknown("IOKit power source unavailable")
+        }
+        let source = unmanagedSource.takeUnretainedValue() as String
+        if source == kIOPMACPowerKey { return .ac }
+        guard source == kIOPMBatteryPowerKey else {
+            return .unknown(source)
+        }
+
+        guard let unmanagedSources = IOPSCopyPowerSourcesList(info) else {
+            return .battery(percent: nil)
+        }
+        let sources = unmanagedSources.takeRetainedValue() as NSArray
+        var descriptions: [[String: Any]] = []
+        for source in sources {
+            guard let unmanagedDescription = IOPSGetPowerSourceDescription(info, source as CFTypeRef) else {
+                continue
+            }
+            guard let description = unmanagedDescription.takeUnretainedValue() as? [String: Any] else { continue }
+            descriptions.append(description)
+        }
+        return .battery(percent: internalBatteryPercent(from: descriptions))
+    }
+
+    static func internalBatteryPercent(from descriptions: [[String: Any]]) -> Int? {
+        var currentTotal = 0.0
+        var maximumTotal = 0.0
+        for description in descriptions {
+            guard (description[kIOPSTypeKey] as? String) == kIOPSInternalBatteryType,
+                  let current = description[kIOPSCurrentCapacityKey] as? NSNumber,
+                  let maximum = description[kIOPSMaxCapacityKey] as? NSNumber,
+                  let currentValue = strictNonnegativeNumber(current),
+                  let maximumValue = strictPositiveNumber(maximum),
+                  currentValue <= maximumValue
+            else { continue }
+            currentTotal += currentValue
+            maximumTotal += maximumValue
+        }
+        guard currentTotal.isFinite,
+              maximumTotal.isFinite,
+              maximumTotal > 0
+        else { return nil }
+        let percent = (currentTotal / maximumTotal) * 100
+        guard percent.isFinite, percent >= 0, percent <= 100 else { return nil }
+        return Int(percent.rounded())
+    }
+
+    private static func nativeSleepDisabled() -> Bool? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard service != IO_OBJECT_NULL else { return nil }
+        defer { IOObjectRelease(service) }
+        let raw = IORegistryEntryCreateCFProperty(
+            service,
+            "SleepDisabled" as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue()
+        return strictBool(raw)
+    }
+
+    private static func nativeACIdleSleep() -> Int? {
+        guard let settings = currentPowerPreference("AC Power") as? [String: Any] else { return nil }
+        return strictInt(settings["System Sleep Timer"])
+    }
+
+    private static func currentPowerPreference(_ key: String) -> Any? {
+        _ = CFPreferencesSynchronize(
+            powerManagementDomain as CFString,
+            kCFPreferencesAnyUser,
+            kCFPreferencesCurrentHost
+        )
+        return CFPreferencesCopyValue(
+            key as CFString,
+            powerManagementDomain as CFString,
+            kCFPreferencesAnyUser,
+            kCFPreferencesCurrentHost
+        )
+    }
+
+    static func strictBool(_ raw: Any?) -> Bool? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID()
+        else { return nil }
+        return number.boolValue
+    }
+
+    static func strictInt(_ raw: Any?) -> Int? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID()
+        else { return nil }
+        let value = number.doubleValue
+        guard value.isFinite,
+              value.rounded(.towardZero) == value,
+              value >= 0,
+              value <= Double(Int32.max)
+        else { return nil }
+        return Int(value)
+    }
+
+    private static func strictNonnegativeNumber(_ number: NSNumber) -> Double? {
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value = number.doubleValue
+        return value.isFinite && value >= 0 ? value : nil
+    }
+
+    private static func strictPositiveNumber(_ number: NSNumber) -> Double? {
+        guard let value = strictNonnegativeNumber(number), value > 0 else { return nil }
+        return value
     }
 
     private static func parseBatteryPercent(from output: String) -> Int? {
