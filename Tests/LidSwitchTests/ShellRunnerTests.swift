@@ -81,12 +81,6 @@ final class ContainedProcessRunnerFixtureTests: XCTestCase {
         XCTAssertNil(ContainedProcessReceipt.parse(receipt.storagePayload.replacingOccurrences(of: "fedcba9876543210", with: "not-a-fingerprint")))
     }
 
-    func testInventoryAdapterRejectsFullBufferAndSizeRace() {
-        XCTAssertTrue(ContainedProcessRunner.inventoryReadIsStable(initialBytes: 8, capacity: 12, actualBytes: 8, afterBytes: 8))
-        XCTAssertFalse(ContainedProcessRunner.inventoryReadIsStable(initialBytes: 8, capacity: 12, actualBytes: 12, afterBytes: 12))
-        XCTAssertFalse(ContainedProcessRunner.inventoryReadIsStable(initialBytes: 8, capacity: 12, actualBytes: 8, afterBytes: 16))
-    }
-
     func testDarwinWaitStatusDecodingDoesNotDependOnUnavailableCMacros() {
         XCTAssertEqual(ContainedProcessRunner.waitStatusNormalExitCode(0x2a00), 42)
         XCTAssertNil(ContainedProcessRunner.waitStatusSignal(0x2a00))
@@ -257,6 +251,55 @@ final class ContainedProcessRunnerFixtureTests: XCTestCase {
 /// Closed-adapter coverage: `Shell.run` is exercised only with scripted system
 /// adapters, so these fixtures cannot spawn, signal, inspect, or reap a process.
 final class ShellRunnerTests: XCTestCase {
+    func testLaunchctlPresenceAcceptsExactDarwinMissingServiceDiagnostics() {
+        let system = ProcessResult(
+            stdout: "",
+            stderr: "Bad request.\nCould not find service \"com.example.helper\" in domain for system\n",
+            exitCode: 113
+        )
+        XCTAssertEqual(
+            Shell.launchctlPresence(system, serviceLabel: "com.example.helper", domain: .system),
+            .absent
+        )
+
+        let gui = ProcessResult(
+            stdout: "",
+            stderr: "Could not find service \"com.example.login\" in domain for user gui: 501\n",
+            exitCode: 113
+        )
+        XCTAssertEqual(
+            Shell.launchctlPresence(gui, serviceLabel: "com.example.login", domain: .gui(501)),
+            .absent
+        )
+    }
+
+    func testLaunchctlPresenceRejectsWrongOrAmbiguousMissingServiceDiagnostics() {
+        let expectedLabel = "com.example.helper"
+        let expected = "Bad request.\nCould not find service \"\(expectedLabel)\" in domain for system\n"
+        let malformed: [ProcessResult] = [
+            ProcessResult(stdout: "unexpected", stderr: expected, exitCode: 113),
+            ProcessResult(stdout: "", stderr: expected + "extra\n", exitCode: 113),
+            ProcessResult(stdout: "", stderr: expected.replacingOccurrences(of: expectedLabel, with: "com.example.other"), exitCode: 113),
+            ProcessResult(stdout: "", stderr: expected.replacingOccurrences(of: "system", with: "user gui: 501"), exitCode: 113),
+            ProcessResult(stdout: "", stderr: expected, exitCode: 113, outcome: .timedOut),
+        ]
+        for result in malformed {
+            XCTAssertEqual(
+                Shell.launchctlPresence(result, serviceLabel: expectedLabel, domain: .system),
+                .indeterminate
+            )
+        }
+
+        XCTAssertEqual(
+            Shell.launchctlPresence(
+                ProcessResult(stdout: "service data", stderr: "", exitCode: 0),
+                serviceLabel: expectedLabel,
+                domain: .system
+            ),
+            .present
+        )
+    }
+
     func testRunnerSystemAdapterReleasesReservationForEveryPreSpawnFailure() {
         for stage in Shell.SetupStage.allCases where stage != .reaperReservation {
             let reservation = Shell.DeferredChildReaper.Reservation(id: UUID())
@@ -744,30 +787,52 @@ final class ShellRunnerTests: XCTestCase {
     func testGroupAdapterRejectsGrowthAndAcceptsOnlyStableCompleteSnapshot() {
         let leader: pid_t = 41
         let stable = Shell.GroupMembershipAdapter(
-            probe: { _ in .bytes(Int32(MemoryLayout<pid_t>.size)) },
-            read: { _, _ in .members([leader], bytes: Int32(MemoryLayout<pid_t>.size)) }
+            probe: { _ in .capacity(1) },
+            read: { _, _ in .members([leader], count: 1) }
         )
         XCTAssertEqual(Shell.stableGroupMembers(leader, adapter: stable), [leader])
 
         let capacityFilled = Shell.GroupMembershipAdapter(
-            probe: { _ in .bytes(Int32(MemoryLayout<pid_t>.size)) },
-            read: { _, capacity in .members([leader, 99], bytes: capacity) }
+            probe: { _ in .capacity(1) },
+            read: { _, capacity in .members([leader, 99], count: capacity) }
         )
         XCTAssertNil(Shell.stableGroupMembers(leader, adapter: capacityFilled))
 
-        final class GrowthScript: @unchecked Sendable {
-            var probes = 0
-            func probe() -> Shell.GroupMembershipAdapter.Read {
-                probes += 1
-                return .bytes(probes == 1 ? Int32(MemoryLayout<pid_t>.size) : Int32(2 * MemoryLayout<pid_t>.size))
+        final class GrowthScript {
+            let leader: pid_t
+            var reads = 0
+
+            init(leader: pid_t) {
+                self.leader = leader
+            }
+
+            func read() -> ProcessGroupSnapshot.Read {
+                reads += 1
+                return reads.isMultiple(of: 2)
+                    ? .members([leader, 99], count: 2)
+                    : .members([leader], count: 1)
             }
         }
-        let growth = GrowthScript()
+        let growth = GrowthScript(leader: leader)
         let race = Shell.GroupMembershipAdapter(
-            probe: { _ in growth.probe() },
-            read: { _, _ in .members([leader], bytes: Int32(MemoryLayout<pid_t>.size)) }
+            probe: { _ in .capacity(2) },
+            read: { _, _ in growth.read() }
         )
         XCTAssertNil(Shell.stableGroupMembers(leader, adapter: race))
+    }
+
+    func testGroupAdapterTreatsProbeAndReadValuesAsPIDCounts() {
+        let leader: pid_t = 41
+        var capacities: [Int32] = []
+        let adapter = Shell.GroupMembershipAdapter(
+            probe: { _ in .capacity(1_505) },
+            read: { _, capacity in
+                capacities.append(capacity)
+                return .members([leader], count: 1)
+            }
+        )
+        XCTAssertEqual(Shell.stableGroupMembers(leader, adapter: adapter), [leader])
+        XCTAssertEqual(capacities, [1_506, 1_506])
     }
 
     func testDurableReapOwnershipIsClaimedOnceAndReleasedOnce() {
@@ -813,5 +878,16 @@ final class ShellRunnerTests: XCTestCase {
         XCTAssertEqual(Shell.deferredWaitOutcome(2, adapter: reaped), .reaped)
         XCTAssertEqual(Shell.deferredWaitOutcome(3, adapter: interrupted), .interrupted)
         XCTAssertEqual(Shell.deferredWaitOutcome(4, adapter: fatal), .fatal)
+    }
+}
+
+/// One inert system-backed observation protects the real Darwin
+/// `proc_listpgrppids` count contract. It verifies no live state and changes
+/// no app, helper, launchd, or power setting.
+final class ShellLiveObservationTests: XCTestCase {
+    func testFastCodesignFailureIsReapedAndReturnedWithoutContainmentTimeout() {
+        let result = Shell.run(.codeSignatureVerification("/dev/null"))
+        XCTAssertEqual(result.outcome, .completed)
+        XCTAssertNotEqual(result.exitCode, 0)
     }
 }

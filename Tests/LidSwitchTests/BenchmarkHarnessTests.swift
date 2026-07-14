@@ -915,7 +915,8 @@ final class BenchmarkHarnessTests: XCTestCase {
         XCTAssertFalse(powerTests[activeTests.lowerBound...].contains("LiveStatePreservationToken.capture"))
         XCTAssertFalse(powerTests[activeTests.lowerBound...].contains("LiveControllerSessionGuard.capture"))
         XCTAssertTrue(build.contains("--print-bin-path"))
-        XCTAssertTrue(build.contains("--scratch-path \"$LIDSWITCH_SWIFT_SCRATCH_PATH\""))
+        XCTAssertTrue(build.contains("--scratch-path \"$LIDSWITCH_SWIFT_HELPER_SCRATCH_PATH\""))
+        XCTAssertTrue(build.contains("--scratch-path \"$LIDSWITCH_SWIFT_APP_SCRATCH_PATH\""))
 
         for protected in [
             "@REPO_ROOT@", "@REAL_HOME@/Library/Application Support/LidSwitch",
@@ -957,9 +958,9 @@ final class BenchmarkHarnessTests: XCTestCase {
             XCTAssertTrue(profile.contains("(deny file-read-data (literal \"\(executable)\"))"))
         }
 
-        XCTAssertTrue(ci.contains("./script/run_swift_build_safely.sh"))
-        XCTAssertTrue(ci.contains("./script/run_swift_tests_safely.sh"))
-        XCTAssertTrue(ci.contains("Swift build through the safe wrapper"))
+        XCTAssertFalse(ci.contains("./script/run_swift_build_safely.sh"))
+        XCTAssertFalse(ci.contains("./script/run_swift_tests_safely.sh"))
+        XCTAssertTrue(ci.contains("Immutable candidate release validation is a separate required future gate."))
         XCTAssertFalse(ci.contains("--scratch-path /tmp"))
         for script in [benchmark, session] {
             XCTAssertTrue(script.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))

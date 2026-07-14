@@ -39,8 +39,14 @@ validate_remote_tags() {
 receipt_is_exact() {
   local path="$1"
   local timestamp="$2"
+  local metadata
   [ ! -L "$path" ] && [ -f "$path" ] || return 1
-  [ "$(/usr/bin/stat -f '%u:%Lp:%l' "$path")" = "$(/usr/bin/id -u):600:1" ] || return 1
+  case "$(/usr/bin/uname -s)" in
+    Darwin) metadata="$(/usr/bin/stat -f '%u:%Lp:%l' "$path")" || return 1 ;;
+    Linux) metadata="$(/usr/bin/stat -c '%u:%a:%h' "$path")" || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ "$metadata" = "$(/usr/bin/id -u):600:1" ] || return 1
   /usr/bin/printf '{\n  "releaseTag": "%s",\n  "repository": "johnsilvavlogs/lidswitch",\n  "collisionFree": true,\n  "checkedAt": "%s"\n}\n' \
     "$LIDSWITCH_RELEASE_TAG" "$timestamp" > "$EXPECTED_RECEIPT"
   /usr/bin/cmp -s "$EXPECTED_RECEIPT" "$path"

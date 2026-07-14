@@ -1,8 +1,8 @@
 {"mode":420,"path":".github/workflows/ci.yml","schema":"lidswitch-source-manifest-v1","sha256":"4f78d22739942977c8eb6092d3f58a47a1bda6b13f9ff35cfce7cb597f6b5846","size":4208,"type":"file"}
 {"mode":420,"path":"Package.swift","schema":"lidswitch-source-manifest-v1","sha256":"39ae529b5a174dceb987f27e934682b9f111e370efe5385f0465bd3b993a2a9f","size":2000,"type":"file"}
 {"path":"Resources","schema":"lidswitch-source-manifest-v1","sha256":"43f8a80a9adcca8a323f1c6cf2fea469b5cf8df4067918d8c701969348b2220a","type":"tree"}
-{"path":"Sources","schema":"lidswitch-source-manifest-v1","sha256":"de80e9ce87e57ebeebdcd640ed134e61ccea3a3484e2a456e09a9e2e6a0d9b1d","type":"tree"}
-{"path":"Tests","schema":"lidswitch-source-manifest-v1","sha256":"7adc2e0be8cf69e6b27c46eb242c4341a1e2a72c0095635549c3bfc0e63006fc","type":"tree"}
+{"path":"Sources","schema":"lidswitch-source-manifest-v1","sha256":"dac643dffbeb910c6e763bd0271b03e980232f02e5a2418c6c1481ca22b3093c","type":"tree"}
+{"path":"Tests","schema":"lidswitch-source-manifest-v1","sha256":"0a6bff04667c94e12ebff59321fd6e42162d3b32a7f1ed22269448a8f48695fa","type":"tree"}
 {"mode":420,"path":"release/GeneratedReleaseHelperTrustAnchor.template.swift","schema":"lidswitch-source-manifest-v1","sha256":"0e9692960176f95b0f76b98e63ff17950e1051211d452414ea6b66c0e2d789e8","size":1140,"type":"file"}
 {"mode":420,"path":"release/LidSwitchLaunchDaemon.plist.template","schema":"lidswitch-source-manifest-v1","sha256":"a8072b31cbd7b9f7eda65f086b8433a5f1bd4d50dc5bbf987de09059d85d1ef0","size":1316,"type":"file"}
 {"mode":493,"path":"script/benchmark_baseline.sh","schema":"lidswitch-source-manifest-v1","sha256":"5a050bd12b5bcbf79e8f0f213730279440311612d027f8ba439a175f9773bc30","size":4086,"type":"file"}

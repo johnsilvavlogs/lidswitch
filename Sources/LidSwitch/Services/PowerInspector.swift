@@ -569,12 +569,12 @@ enum PowerInspector {
     }
 
     static func helperLoadedState() -> LaunchdPresence {
-        let target = "system/\(AppPaths.helperLabel)"
         let result = Shell.run(.launchctlPrint("system/\(AppPaths.helperLabel)"))
-        guard result.outcome == .completed else { return .indeterminate }
-        if result.exitCode == 0 { return .present }
-        let prefix = "Could not find service \"\(target)\""
-        return result.stdout.isEmpty && result.stderr.hasPrefix(prefix) ? .absent : .indeterminate
+        switch Shell.launchctlPresence(result, serviceLabel: AppPaths.helperLabel, domain: .system) {
+        case .present: return .present
+        case .absent: return .absent
+        case .indeterminate: return .indeterminate
+        }
     }
 
     static func helperInstalled() -> Bool {

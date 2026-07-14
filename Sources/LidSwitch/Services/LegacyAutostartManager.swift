@@ -24,14 +24,14 @@ enum LegacyAutostartManager {
     }
 
     static func loadedState() -> LoadedState {
-        let target = "gui/\(getuid())/\(AppPaths.legacyLoginLabel)"
+        let uid = getuid()
+        let target = "gui/\(uid)/\(AppPaths.legacyLoginLabel)"
         let result = Shell.run(.launchctlPrint(target))
-        guard result.outcome == .completed else { return .indeterminate }
-        if result.exitCode == 0 { return .present }
-        // launchctl's documented missing-service response is the sole absent
-        // result. Permission, parse, runner, and all other errors stay unsafe.
-        let prefix = "Could not find service \"\(target)\""
-        return result.stdout.isEmpty && result.stderr.hasPrefix(prefix) ? .absent : .indeterminate
+        switch Shell.launchctlPresence(result, serviceLabel: AppPaths.legacyLoginLabel, domain: .gui(uid)) {
+        case .present: return .present
+        case .absent: return .absent
+        case .indeterminate: return .indeterminate
+        }
     }
 
     static func isLoaded() -> Bool {

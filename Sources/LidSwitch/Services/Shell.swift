@@ -48,6 +48,26 @@ final class BoundedProcessOutput: @unchecked Sendable {
 /// membership and both output streams are quiescent: reaping it first would
 /// permit PID/PGID reuse before the final probe or signal.
 enum Shell {
+    enum LaunchctlDomain: Equatable, Sendable {
+        case system
+        case gui(uid_t)
+
+        fileprivate var missingServiceDescription: String {
+            switch self {
+            case .system:
+                return "system"
+            case let .gui(uid):
+                return "user gui: \(uid)"
+            }
+        }
+    }
+
+    enum LaunchctlPresence: Equatable, Sendable {
+        case present
+        case absent
+        case indeterminate
+    }
+
     enum SetupStage: CaseIterable, Equatable, Sendable {
         case reaperReservation, pipe, descriptorNormalization, closeOnExec, fileActions, attributes, processGroup, argv, spawn
     }
@@ -131,6 +151,29 @@ enum Shell {
 
     static func launchctlPrintDisabled(_ domain: String) -> CommandSpec {
         CommandSpec(executable: "/bin/launchctl", arguments: ["print-disabled", domain], commandClass: .observation, timeout: 5)
+    }
+
+    /// `launchctl print` writes a precise two-line diagnostic for an absent
+    /// service on current macOS releases. Older supported releases omit the
+    /// leading `Bad request.` line. Accept only those exact shapes for the
+    /// expected label/domain; every other nonzero result remains unknown.
+    static func launchctlPresence(
+        _ result: ProcessResult,
+        serviceLabel: String,
+        domain: LaunchctlDomain
+    ) -> LaunchctlPresence {
+        guard result.outcome == .completed else { return .indeterminate }
+        if result.exitCode == 0 { return .present }
+        guard result.stdout.isEmpty else { return .indeterminate }
+
+        let missing = "Could not find service \"\(serviceLabel)\" in domain for \(domain.missingServiceDescription)"
+        let accepted = [
+            missing,
+            missing + "\n",
+            "Bad request.\n" + missing,
+            "Bad request.\n" + missing + "\n",
+        ]
+        return accepted.contains(result.stderr) ? .absent : .indeterminate
     }
 
     enum LaunchctlMutation: Sendable {
@@ -247,44 +290,10 @@ enum Shell {
         }
     }
 
-    /// Public-libproc adapter used by the live loop and deterministic fixture
-    /// tests. A read is accepted only when its pre/post byte counts agree and
-    /// the returned list did not fill the deliberately oversized buffer.
-    struct GroupMembershipAdapter: Sendable {
-        enum Read: Sendable, Equatable { case bytes(Int32), members([pid_t], bytes: Int32), failure }
-        let probe: @Sendable (pid_t) -> Read
-        let read: @Sendable (pid_t, Int32) -> Read
-
-        static let system = GroupMembershipAdapter(
-            probe: { group in
-                let bytes = proc_listpgrppids(group, nil, 0)
-                return bytes < 0 ? .failure : .bytes(bytes)
-            },
-            read: { group, capacityBytes in
-                let capacity = max(1, Int(capacityBytes) / MemoryLayout<pid_t>.size)
-                var members = [pid_t](repeating: 0, count: capacity)
-                let bytes = members.withUnsafeMutableBufferPointer {
-                    proc_listpgrppids(group, $0.baseAddress, capacityBytes)
-                }
-                guard bytes >= 0 else { return .failure }
-                return .members(Array(members.prefix(min(members.count, Int(bytes) / MemoryLayout<pid_t>.size))), bytes: bytes)
-            }
-        )
-    }
+    typealias GroupMembershipAdapter = ProcessGroupSnapshot.Adapter
 
     static func stableGroupMembers(_ group: pid_t, adapter: GroupMembershipAdapter) -> [pid_t]? {
-        let pidBytes = Int32(MemoryLayout<pid_t>.size)
-        for _ in 0..<3 {
-            guard case let .bytes(before) = adapter.probe(group), before >= 0 else { return nil }
-            // One spare PID makes a capacity-filled read unambiguously unsafe.
-            let capacity = before &+ pidBytes
-            guard case let .members(members, bytes) = adapter.read(group, capacity),
-                  bytes >= 0, bytes < capacity,
-                  case let .bytes(after) = adapter.probe(group), after == bytes
-            else { continue }
-            return members
-        }
-        return nil
+        ProcessGroupSnapshot.stableMembers(group, adapter: adapter)
     }
 
     enum CommandClass: Sendable, Equatable {

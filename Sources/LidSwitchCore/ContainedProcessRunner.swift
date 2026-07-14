@@ -959,20 +959,9 @@ public enum ContainedProcessRunner {
     /// that disappears while being inspected, or a PID whose SID is not the
     /// recorded SID is intentionally indeterminate rather than empty.
     private static func exactInventory(processGroup: pid_t, session: pid_t) -> ExactInventory {
-        let bytes = proc_listpgrppids(processGroup, nil, 0)
-        guard bytes >= 0 else { return .indeterminate }
-        if bytes == 0 { return .exact([]) }
-        let slotBytes = Int32(MemoryLayout<pid_t>.size)
-        guard bytes <= Int32.max - slotBytes else { return .indeterminate }
-        let capacity = bytes + slotBytes
-        var pids = [pid_t](repeating: 0, count: Int(capacity) / MemoryLayout<pid_t>.size)
-        let actual = pids.withUnsafeMutableBufferPointer { proc_listpgrppids(processGroup, $0.baseAddress, capacity) }
-        // A full enlarged buffer can be truncated; a size change after the
-        // read is equally ambiguous. Neither is evidence of extinction.
-        guard inventoryReadIsStable(initialBytes: bytes, capacity: capacity, actualBytes: actual,
-                                    afterBytes: proc_listpgrppids(processGroup, nil, 0)) else { return .indeterminate }
+        guard let pids = ProcessGroupSnapshot.stableMembers(processGroup) else { return .indeterminate }
         var result: [ContainedProcessIdentity] = []
-        for pid in pids.prefix(Int(actual) / MemoryLayout<pid_t>.size) where pid > 0 {
+        for pid in pids {
             guard getsid(pid) == session, getpgid(pid) == processGroup, let identity = processIdentity(pid) else {
                 return .indeterminate
             }
@@ -982,13 +971,6 @@ public enum ContainedProcessRunner {
             return .indeterminate
         }
         return .exact(result.sorted { $0.pid < $1.pid })
-    }
-
-    static func inventoryReadIsStable(initialBytes: Int32, capacity: Int32, actualBytes: Int32, afterBytes: Int32) -> Bool {
-        // The sizing read, bounded payload read, and final sizing read must
-        // agree exactly. A changed count is never silently treated as an
-        // empty group, even if it still fits the enlarged buffer.
-        initialBytes >= 0 && capacity > initialBytes && actualBytes == initialBytes && afterBytes == initialBytes
     }
 
     /// Resolve the supported `kern.procargs2` MIB by name, append the target
@@ -1076,15 +1058,6 @@ public enum ContainedProcessRunner {
         return Array(argv.dropFirst())
     }
 
-    private static func processGroupMembers(_ group: pid_t) -> [ContainedProcessIdentity] {
-        let bytes = proc_listpgrppids(group, nil, 0)
-        guard bytes > 0 else { return processIdentity(group).map { [$0] } ?? [] }
-        var pids = [pid_t](repeating: 0, count: Int(bytes) / MemoryLayout<pid_t>.size + 1)
-        let actual = pids.withUnsafeMutableBufferPointer { proc_listpgrppids(group, $0.baseAddress, bytes) }
-        guard actual >= 0 else { return [] }
-        return pids.prefix(Int(actual) / MemoryLayout<pid_t>.size).compactMap(processIdentity)
-    }
-
     private enum ReapResult { case reaped, ambiguous }
 
     private static func reapSynchronously(_ child: pid_t, status: inout Int32) -> ReapResult {
@@ -1123,28 +1096,14 @@ public enum ContainedProcessRunner {
 
     private enum GroupObservation { case live, gone, unknown }
 
-    /// `proc_listpgrppids` excludes the held zombie leader. A stable empty
-    /// descendant set is therefore the only successful group-quiescence
-    /// observation; unstable or failed reads are deliberately indeterminate.
+    /// `proc_listpgrppids` may include the held zombie leader. A stable list
+    /// containing no PID other than that exact leader is therefore the only
+    /// successful group-quiescence observation; unstable or failed reads are
+    /// deliberately indeterminate.
     private static func groupObservation(_ group: pid_t, leaderExited: Bool) -> GroupObservation {
-        let pidBytes = Int32(MemoryLayout<pid_t>.size)
-        for _ in 0..<3 {
-            let before = proc_listpgrppids(group, nil, 0)
-            guard before >= 0 else { return .unknown }
-            let capacity = before &+ pidBytes
-            let count = max(1, Int(capacity) / MemoryLayout<pid_t>.size)
-            var members = [pid_t](repeating: 0, count: count)
-            let bytes = members.withUnsafeMutableBufferPointer {
-                proc_listpgrppids(group, $0.baseAddress, capacity)
-            }
-            guard bytes >= 0, bytes < capacity,
-                  proc_listpgrppids(group, nil, 0) == bytes
-            else { continue }
-            let listed = members.prefix(Int(bytes) / MemoryLayout<pid_t>.size)
-            if listed.contains(where: { $0 != group }) { return .live }
-            return leaderExited ? .gone : .live
-        }
-        return .unknown
+        guard let members = ProcessGroupSnapshot.stableMembers(group) else { return .unknown }
+        if members.contains(where: { $0 != group }) { return .live }
+        return leaderExited ? .gone : .live
     }
 
 }

@@ -1187,7 +1187,7 @@ final class SessionSafetyTests: XCTestCase {
         }
 
         let missing = inventory(helper: .absent)
-        guard case .invalid = missing.state else { return XCTFail("missing helper must be invalid") }
+        XCTAssertEqual(missing.state, .invalid("The helper is not installed."))
         let indeterminate = inventory(helper: .indeterminate)
         guard case .indeterminate = indeterminate.state else { return XCTFail("unknown launchd state must remain indeterminate") }
     }
