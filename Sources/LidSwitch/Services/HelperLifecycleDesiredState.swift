@@ -6,20 +6,14 @@ enum HelperLifecycleDesiredState {
         supportDirectory: URL = AppPaths.userSupportDirectory,
         stateFile: URL = AppPaths.desiredStateFile
     ) throws {
-        do {
-            try DesiredStateStore.write(
-                preferences,
-                supportDirectory: supportDirectory,
-                stateFile: stateFile
-            )
-        } catch let error as DesiredStateStore.StoreError {
-            switch error {
-            case .unsafePath:
-                return
-            default:
-                throw error
-            }
-        }
+        // A malformed or substituted user-state path is not best-effort:
+        // swallowing it could let a later lifecycle action proceed without
+        // the intended fail-closed record.
+        try DesiredStateStore.write(
+            preferences,
+            supportDirectory: supportDirectory,
+            stateFile: stateFile
+        )
     }
 
     static func performAfterBestEffortWrite(

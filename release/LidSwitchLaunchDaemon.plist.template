@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.johnsilva.lidswitch.helper</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Application Support/LidSwitch/Current/LidSwitchHelper</string>
+    <string>--owner-uid</string>
+    <string>__LIDSWITCH_OWNER_UID__</string>
+    <string>--qualified-build</string>
+    <string>25F84</string>
+    <string>--support-directory</string>
+    <string>/Library/Application Support/LidSwitch</string>
+    <string>--applied-state</string>
+    <string>/Library/Application Support/LidSwitch/applied-state</string>
+    <string>--status-path</string>
+    <string>/Library/Application Support/LidSwitch/helper-status</string>
+    <string>--policy-path</string>
+    <string>/Library/Application Support/LidSwitch/Current/enrollment-policy</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>MachServices</key>
+  <dict>
+    <key>com.johnsilva.lidswitch.helper.control</key>
+    <true/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>

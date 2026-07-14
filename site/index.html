@@ -14,7 +14,7 @@
       property="og:description"
       content="A free manual DMG for technical Mac users who want long plugged-in jobs to keep running after the lid closes. Source is public on GitHub."
     />
-    <link rel="icon" type="image/png" href="/assets/lidswitch-mark.png" />
+    <link rel="icon" type="image/png" href="/assets/lidswitch-mark-144-fa9aa1a5f70f.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -26,7 +26,24 @@
 
     <header class="site-header">
       <a class="brand" href="/" aria-label="LidSwitch home">
-        <img class="brand-mark" src="/assets/lidswitch-mark.png" alt="" width="48" height="48" aria-hidden="true" />
+        <picture class="brand-mark">
+          <source
+            type="image/webp"
+            srcset="/assets/lidswitch-mark-144-24888dd9f963.webp 144w, /assets/lidswitch-mark-216-cc502ae318f3.webp 216w"
+            sizes="48px"
+          />
+          <img
+            src="/assets/lidswitch-mark-144-fa9aa1a5f70f.png"
+            srcset="/assets/lidswitch-mark-144-fa9aa1a5f70f.png 144w, /assets/lidswitch-mark-216-0dfd7ed43dba.png 216w"
+            sizes="48px"
+            alt=""
+            width="48"
+            height="48"
+            aria-hidden="true"
+            fetchpriority="high"
+            decoding="sync"
+          />
+        </picture>
         <span>LidSwitch</span>
       </a>
       <nav class="nav-links" aria-label="Primary navigation">
@@ -37,7 +54,7 @@
       </nav>
     </header>
 
-    <main id="main">
+    <main id="main" tabindex="-1">
       <section class="hero section-shell" aria-labelledby="hero-title">
         <div class="hero-copy">
           <p class="eyebrow">Plugged-in Mac jobs that need to finish</p>
@@ -131,22 +148,34 @@
         <h2 id="why-title">Close the lid without killing the work.</h2>
         <div class="case-grid">
           <article>
-            <img class="case-icon" src="/assets/lidswitch-build.png" alt="" width="64" height="64" aria-hidden="true" />
+            <picture class="case-icon">
+              <source type="image/webp" srcset="/assets/lidswitch-build-128-c15b207f7e81.webp 128w, /assets/lidswitch-build-192-27e61624aaae.webp 192w" sizes="64px" />
+              <img src="/assets/lidswitch-build-128-32d9a22b8bef.png" srcset="/assets/lidswitch-build-128-32d9a22b8bef.png 128w, /assets/lidswitch-build-192-16148c6dbb79.png 192w" sizes="64px" alt="" width="64" height="64" aria-hidden="true" loading="lazy" decoding="async" />
+            </picture>
             <h3>Long builds</h3>
             <p>Start the compile, plug in, shut the lid, and come back to results instead of a sleeping Mac.</p>
           </article>
           <article>
-            <img class="case-icon" src="/assets/lidswitch-download.png" alt="" width="64" height="64" aria-hidden="true" />
+            <picture class="case-icon">
+              <source type="image/webp" srcset="/assets/lidswitch-download-128-1a57405f8ece.webp 128w, /assets/lidswitch-download-192-8b15b3c6dfc5.webp 192w" sizes="64px" />
+              <img src="/assets/lidswitch-download-128-88721556621f.png" srcset="/assets/lidswitch-download-128-88721556621f.png 128w, /assets/lidswitch-download-192-50fe09a31826.png 192w" sizes="64px" alt="" width="64" height="64" aria-hidden="true" loading="lazy" decoding="async" />
+            </picture>
             <h3>Large downloads</h3>
             <p>Let big downloads finish without leaving the display open on your desk.</p>
           </article>
           <article>
-            <img class="case-icon" src="/assets/lidswitch-remote.png" alt="" width="64" height="64" aria-hidden="true" />
+            <picture class="case-icon">
+              <source type="image/webp" srcset="/assets/lidswitch-remote-128-fc12eb115458.webp 128w, /assets/lidswitch-remote-192-cb5f1dc71eec.webp 192w" sizes="64px" />
+              <img src="/assets/lidswitch-remote-128-e68486b746b9.png" srcset="/assets/lidswitch-remote-128-e68486b746b9.png 128w, /assets/lidswitch-remote-192-bd6b203d8092.png 192w" sizes="64px" alt="" width="64" height="64" aria-hidden="true" loading="lazy" decoding="async" />
+            </picture>
             <h3>Remote jobs</h3>
             <p>Keep SSH sessions, scripts, and remote tasks alive while the Mac is charging.</p>
           </article>
           <article>
-            <img class="case-icon" src="/assets/lidswitch-backup.png" alt="" width="64" height="64" aria-hidden="true" />
+            <picture class="case-icon">
+              <source type="image/webp" srcset="/assets/lidswitch-backup-128-80f92a0eb8f5.webp 128w, /assets/lidswitch-backup-192-366f2fef9ed3.webp 192w" sizes="64px" />
+              <img src="/assets/lidswitch-backup-128-c7f4569f8f2e.png" srcset="/assets/lidswitch-backup-128-c7f4569f8f2e.png 128w, /assets/lidswitch-backup-192-df8b916b0850.png 192w" sizes="64px" alt="" width="64" height="64" aria-hidden="true" loading="lazy" decoding="async" />
+            </picture>
             <h3>Backups</h3>
             <p>Give Time Machine and local backup scripts time to finish cleanly.</p>
           </article>
@@ -218,7 +247,10 @@
       </section>
 
       <section class="final-cta section-shell" aria-labelledby="final-title">
-        <img class="bolt-orb" src="/assets/lidswitch-mark.png" alt="" width="72" height="72" aria-hidden="true" />
+        <picture class="bolt-orb">
+          <source type="image/webp" srcset="/assets/lidswitch-mark-144-24888dd9f963.webp 144w, /assets/lidswitch-mark-216-cc502ae318f3.webp 216w" sizes="72px" />
+          <img src="/assets/lidswitch-mark-144-fa9aa1a5f70f.png" srcset="/assets/lidswitch-mark-144-fa9aa1a5f70f.png 144w, /assets/lidswitch-mark-216-0dfd7ed43dba.png 216w" sizes="72px" alt="" width="72" height="72" aria-hidden="true" loading="lazy" decoding="async" />
+        </picture>
         <div>
           <p class="eyebrow">Free manual DMG. Manual approval expected.</p>
           <h2 id="final-title">Use it when sleep would waste the run.</h2>

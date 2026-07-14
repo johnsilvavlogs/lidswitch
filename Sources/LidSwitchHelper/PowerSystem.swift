@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import IOKit
 import IOKit.ps
+import LidSwitchCore
 
 enum HelperPowerSource: Equatable {
     case ac
@@ -9,12 +10,36 @@ enum HelperPowerSource: Equatable {
     case unknown
 }
 
+/// Preserves the only runner failure that changes mutation authority.  Generic
+/// command failure may be reconciled from native truth; containment-pending
+/// may not be retried, restored, or treated as proof that pmset did nothing.
+enum HelperPowerMutationError: Error {
+    case containmentPending(ContainedProcessReceipt)
+    case commandFailed(Int32, String)
+}
+
 protocol HelperPowerSystem {
     func powerSource() -> HelperPowerSource
     func sleepDisabled() -> Bool?
     func acSleepMinutes() -> Int?
+    func batterySleepMinutes() -> Int?
     func setSleepDisabled(_ enabled: Bool) throws
     func setACSleepMinutes(_ minutes: Int) throws
+    func setBatterySleepMinutes(_ minutes: Int) throws
+}
+
+extension HelperPowerSystem {
+    // Current sessions do not touch battery sleep. Defaults preserve existing
+    // test/adapter conformers while legacy recovery explicitly requires a real
+    // value only when old battery evidence is present.
+    func batterySleepMinutes() -> Int? { nil }
+    func setBatterySleepMinutes(_ minutes: Int) throws {
+        throw NSError(
+            domain: "LidSwitchHelper.PowerSystem",
+            code: 78,
+            userInfo: [NSLocalizedDescriptionKey: "Battery sleep recovery is unavailable."]
+        )
+    }
 }
 
 struct SystemPowerSystem: HelperPowerSystem {
@@ -50,20 +75,41 @@ struct SystemPowerSystem: HelperPowerSystem {
         return Self.strictInt(settings["System Sleep Timer"])
     }
 
+    func batterySleepMinutes() -> Int? {
+        guard let settings = preferenceValue("Battery Power") as? [String: Any] else { return nil }
+        return Self.strictInt(settings["System Sleep Timer"])
+    }
+
     func setSleepDisabled(_ enabled: Bool) throws {
-        try requireSuccess(run("/usr/bin/pmset", ["-a", "disablesleep", enabled ? "1" : "0"]))
+        try requireSuccess(ContainedProcessRunner.run(.pmsetSleepDisabled(enabled)))
     }
 
     func setACSleepMinutes(_ minutes: Int) throws {
-        try requireSuccess(run("/usr/bin/pmset", ["-c", "sleep", String(minutes)]))
+        try requireValidMinutes(minutes)
+        try requireSuccess(ContainedProcessRunner.run(.pmsetACSleep(minutes)))
     }
 
-    private func requireSuccess(_ result: ProcessResult) throws {
-        guard result.exitCode == 0 else {
+    func setBatterySleepMinutes(_ minutes: Int) throws {
+        try requireValidMinutes(minutes)
+        try requireSuccess(ContainedProcessRunner.run(.pmsetBatterySleep(minutes)))
+    }
+
+    private func requireSuccess(_ result: ContainedProcessResult) throws {
+        if case .containmentPending = result.outcome,
+           let receipt = result.containmentReceipt {
+            throw HelperPowerMutationError.containmentPending(receipt)
+        }
+        guard result.outcome == .completed, result.exitCode == 0 else {
+            throw HelperPowerMutationError.commandFailed(result.exitCode, result.stderr)
+        }
+    }
+
+    private func requireValidMinutes(_ minutes: Int) throws {
+        guard (0...1_440).contains(minutes) else {
             throw NSError(
                 domain: "LidSwitchHelper.PowerSystem",
-                code: Int(result.exitCode),
-                userInfo: [NSLocalizedDescriptionKey: result.stderr]
+                code: 64,
+                userInfo: [NSLocalizedDescriptionKey: "Sleep minutes are outside the fixed safe range."]
             )
         }
     }
@@ -72,11 +118,11 @@ struct SystemPowerSystem: HelperPowerSystem {
         // Configured AC sleep is persisted here. SleepDisabled is deliberately
         // not read from preferences: it is live override state and must come
         // from IOPMrootDomain so external/powerd drift is observed immediately.
-        _ = CFPreferencesSynchronize(
+        guard CFPreferencesSynchronize(
             powerManagementDomain as CFString,
             kCFPreferencesAnyUser,
             kCFPreferencesCurrentHost
-        )
+        ) else { return nil }
         return CFPreferencesCopyValue(
             key as CFString,
             powerManagementDomain as CFString,
@@ -117,47 +163,4 @@ struct SystemPowerSystem: HelperPowerSystem {
         return Int(value)
     }
 
-    // Only mutations use pmset. TERM/KILL are issued on a short deadline, but
-    // ownership is never discarded while a mutation could still land later.
-    // After SIGKILL we therefore wait for authoritative child termination;
-    // active-session reads never enter this path and remain subprocess-free.
-    private func run(_ executable: String, _ arguments: [String], timeout: TimeInterval = 1) -> ProcessResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardOutput = stdout
-        process.standardError = stderr
-        do {
-            let terminated = DispatchSemaphore(value: 0)
-            process.terminationHandler = { _ in terminated.signal() }
-            try process.run()
-            if terminated.wait(timeout: .now() + timeout) == .timedOut {
-                process.terminate()
-                if terminated.wait(timeout: .now() + 0.1) == .timedOut {
-                    kill(process.processIdentifier, SIGKILL)
-                    if terminated.wait(timeout: .now() + 0.25) == .timedOut {
-                        // A return here could let a delayed privileged mutation
-                        // outlive applied-state ownership. Waiting is safer than
-                        // falsely publishing inactive/safe state.
-                        process.waitUntilExit()
-                    }
-                }
-            }
-        } catch {
-            return ProcessResult(exitCode: -1, stdout: "", stderr: error.localizedDescription)
-        }
-        return ProcessResult(
-            exitCode: process.terminationStatus,
-            stdout: String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-            stderr: String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        )
-    }
-}
-
-private struct ProcessResult {
-    let exitCode: Int32
-    let stdout: String
-    let stderr: String
 }

@@ -15,7 +15,10 @@ export default defineConfig({
     : {
         command: 'npm run site:serve',
         url: 'http://127.0.0.1:4173',
-        reuseExistingServer: !process.env.CI,
+        // Never trust an arbitrary listener already bound to this port. Local
+        // callers that intentionally own a server must opt in with
+        // SITE_BASE_URL, which also makes the tested origin explicit.
+        reuseExistingServer: false,
         timeout: 15_000
       },
   projects: [

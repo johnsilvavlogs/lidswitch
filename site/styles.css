@@ -104,6 +104,13 @@ img {
   filter: drop-shadow(0 14px 18px rgba(20, 201, 107, 0.23));
 }
 
+.brand-mark img,
+.bolt-orb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .nav-links {
   display: flex;
   align-items: center;
@@ -112,6 +119,10 @@ img {
 }
 
 .nav-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding-inline: 0.1rem;
   text-decoration: none;
   color: #20252b;
 }
@@ -491,12 +502,19 @@ h3 {
 }
 
 .case-icon {
+  display: block;
   width: 3.5rem;
   height: 3.5rem;
   margin-bottom: 1rem;
   margin-inline: auto;
   object-fit: contain;
   filter: drop-shadow(0 9px 15px rgba(20, 201, 107, 0.18));
+}
+
+.case-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .case-grid p,
@@ -604,8 +622,78 @@ h3 {
 }
 
 .site-footer a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   font-weight: 700;
   text-decoration: none;
+}
+
+.download-page {
+  display: grid;
+  min-height: 100vh;
+  grid-template-rows: auto 1fr auto;
+}
+
+.download-main {
+  display: grid;
+  place-items: center;
+  padding: clamp(2rem, 8vw, 6rem) 0;
+}
+
+.download-card {
+  width: min(100%, 680px);
+  padding: clamp(1.7rem, 5vw, 3.4rem);
+  border: 1px solid rgba(20, 201, 107, 0.25);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: var(--shadow);
+}
+
+.download-card h1 {
+  max-width: 12ch;
+  font-size: clamp(3.15rem, 8vw, 5.2rem);
+}
+
+.download-status {
+  margin: 1.5rem 0;
+  padding: 0.85rem 1rem;
+  border-left: 4px solid var(--green);
+  background: var(--cream-2);
+  color: #163222;
+  font-weight: 750;
+}
+
+.download-card p:not(.eyebrow):not(.download-status) {
+  max-width: 58ch;
+  color: var(--muted);
+}
+
+.download-fallback {
+  margin: 1.8rem 0 1.2rem;
+}
+
+.download-return {
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .button:hover {
+    transform: none;
+  }
 }
 
 @media (max-width: 980px) {

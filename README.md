@@ -2,15 +2,15 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.9` build `1` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, lease/status loss, corruption, or explicit setting drift still fails closed.
+Version `0.2.10` build `2` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, authenticated-session/status loss, corruption, or explicit setting drift still fails closed.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `4` and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `5` into the root-owned `Current` release directory and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
-- The app writes a same-boot, same-user, same-build lease with a maximum lifetime of 30 seconds and renews it every 8 seconds.
-- The compiled helper reopens and validates the newest lease, power source, boot, build, owner, file metadata, and native power-preference state.
+- The app begins one authenticated process-bound raw-XPC session. The helper chooses its same-boot monotonic deadline, capped at 30 seconds, and the app renews every 8 seconds.
+- The compiled helper validates the enrolled caller identity, exact live process tuple, session UUID, private recovery authority, power source, build, and native power-preference state.
 - The helper applies power changes only on state transitions. It has no `StartInterval` loop.
 - Unplugging, quitting, restarting, app death, lease expiry, invalid state, lost acknowledgement, or power-setting drift ends the session and restores LidSwitch-owned changes.
 - Reconnecting power never starts a new session.
@@ -25,41 +25,60 @@ The app currently qualifies macOS `26.5.2` build `25F84`. Other OS builds remain
 - GitHub: <https://github.com/johnsilvavlogs/lidswitch>
 - Releases: <https://github.com/johnsilvavlogs/lidswitch/releases/latest>
 - App target: `Sources/LidSwitch`
-- Shared lease model: `Sources/LidSwitchCore`
+- Shared wire/recovery model: `Sources/LidSwitchCore`
 - Native helper target: `Sources/LidSwitchHelper`
 
-## Build without launching
+## Build and test without launching
+
+Portable source, release-identity, and website checks are ordinary repository
+commands:
 
 ```bash
-./script/build_app_bundle.sh
-./script/validate_bundle.sh
+npm run release:identity:check
+npm run release:identity:test
+npm run scan:secrets:test
+npm run validate:site
 ```
 
-The app bundle is staged under the temporary directory unless `LIDSWITCH_APP_BUNDLE` is provided. Both commands preserve the running LidSwitch process set and never alter live power state.
-
-Launching is explicit:
-
-```bash
-./script/build_and_run.sh --run
-```
-
-## Tests
-
-```bash
-swift test --scratch-path /tmp/lidswitch-tests
-./script/validate_session_safety.sh
-```
+Swift compilation and XCTest use the descriptor-held launcher described in
+`docs/VALIDATION.md`. The two Swift wrapper pathnames reject direct execution;
+the retired legacy bundle builders also fail closed. A release build uses only
+the installed Apple Command Line Tools. Local XCTest uses the installed free
+Xcode runtime because Command Line Tools do not ship XCTest. Neither lane uses
+`xcodebuild`, an Apple account, a paid license, or a paid service, and neither
+launches the app or changes live power state.
 
 The session suite covers stable boot-session identity, current acknowledgement, monotonic heartbeat starvation, commit-boundary races, expiry, reboot mismatch, unplug/no-rearm, terminal-generation replay, app-death rollback, override drift, abnormal helper recovery, malformed and symlinked state, unknown power, restore failure, bounded diagnostics, stale zero baselines, and event-driven launchd configuration.
 
 ## Package without launching
 
 ```bash
-./script/build_dmg.sh
-./script/validate_dmg.sh
+# First: after the manager-owned held `release-candidate` build has sealed its
+# source manifest and toolchain, create its immutable envelope receipt. Then
+# package from that one retained release-output directory without rebuilding:
+RELEASE_OUTPUT=/private/tmp/lidswitch-swift.RETAINED/release-output
+PACKAGE_PARENT="$(/usr/bin/mktemp -d /private/tmp/lidswitch-package.XXXXXX)"
+/usr/bin/python3 -I -S -B script/capture_immutable_build_envelope.py \
+  --source-commit "$(/usr/bin/git rev-parse HEAD)" \
+  --source-manifest script/source_snapshot_manifest.jsonl \
+  --held-build-wrapper script/run_swift_build_safely.sh \
+  --swift /Library/Developer/CommandLineTools/usr/bin/swift \
+  --release-output "$RELEASE_OUTPUT" \
+  --output "$PACKAGE_PARENT/build-envelope.json"
+/usr/bin/python3 -I -S -B script/assemble_manual_adhoc_candidate.py \
+  --envelope-receipt "$PACKAGE_PARENT/build-envelope.json" \
+  --release-output "$RELEASE_OUTPUT" \
+  --output-root "$PACKAGE_PARENT/candidate"
 ```
 
-The DMG and checksum are written to `dist/`. Packaging validates version `0.2.9` build `1`, helper version `4`, arm64 binaries, strict ad-hoc signatures, expected Gatekeeper rejection, checksum integrity, and that no app process was started or stopped.
+This is a zero-cost local path: it uses only macOS `codesign` with identity
+`-`, `hdiutil`, `ditto`, and `shasum`. It does not use Xcode, an Apple account,
+Developer ID, Team ID, notarization, a paid CI provider, or any network service.
+The assembler copies the two already-built bytes once into a fresh private
+candidate root, signs them ad hoc, creates one compressed DMG, extracts it,
+and publishes/validates the immutable app and package manifests. It prints the
+candidate manifest and DMG paths on success. The retired `build_dmg.sh` and
+`validate_dmg.sh` scripts continue to fail closed and are not release commands.
 
 This project does not currently have a Developer ID identity. The DMG is not notarized; first launch requires the documented manual **Open Anyway** approval. Do not describe it as App Store distributed or notarized.
 
@@ -67,7 +86,7 @@ This project does not currently have a Developer ID identity. The DMG is not not
 
 Automatic CI and the `full-release` gate never launch LidSwitch or enable `SleepDisabled`. A live canary is a separate, explicit profile after all simulations pass.
 
-The canary requires the app to be installed and a session to be started through the UI. It observes the active state, kills the app to simulate a crash, waits for lease-expiry restoration, and proves there is no automatic rearm:
+The canary requires the app to be installed and a session to be started through the UI. It observes the active state, kills the app to simulate a crash, waits for peer-invalidation restoration, and proves there is no automatic rearm:
 
 ```bash
 LIDSWITCH_CONTROLLED_CANARY=1 ./script/validate_live_state.sh
@@ -80,16 +99,21 @@ See `docs/VALIDATION.md` and `docs/OPERATIONS.md` before running it.
 ```text
 /Applications/LidSwitch.app
 /Library/LaunchDaemons/com.johnsilva.lidswitch.helper.plist
-/Library/Application Support/LidSwitch/LidSwitchHelper
-/Library/Application Support/LidSwitch/helper-version
+/Library/Application Support/LidSwitch/Current/LidSwitchHelper
+/Library/Application Support/LidSwitch/Current/helper-version
+/Library/Application Support/LidSwitch/Current/enrollment-policy
 /Library/Application Support/LidSwitch/applied-state
 /Library/Application Support/LidSwitch/helper-status
 /Library/Application Support/LidSwitch/terminal-generations
+/Library/Application Support/LidSwitch/recovery-reservations
+/Library/Application Support/LidSwitch/recovery-proof
+/Library/Application Support/LidSwitch/root-state.lock
+/Library/Application Support/LidSwitch/administrator-transaction-{uuid}.receipt
 ~/Library/Application Support/LidSwitch/activation-lease
 ~/Library/Application Support/LidSwitch/session-history.json
 ```
 
-The old `~/Library/LaunchAgents/com.johnsilva.LidSwitch.login.plist` and root `lidswitch-helper` shell script are legacy residue and must be disabled, unloaded, and removed before activation.
+The root authority files are private `0600`; the ordinary-user app reads only their metadata and the public bounded helper-status projection. The user activation-lease file is migration/diagnostic residue and cannot authorize the helper. The old `~/Library/LaunchAgents/com.johnsilva.LidSwitch.login.plist` and root `lidswitch-helper` shell script are legacy residue and must be disabled, unloaded, and removed before activation.
 
 ## Privacy
 

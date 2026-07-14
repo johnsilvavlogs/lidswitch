@@ -43,4 +43,20 @@ The following old components must remain disabled/unloaded until removed:
 /Library/Application Support/LidSwitch/lidswitch-helper
 ```
 
-Version `0.2.9` removes them during preparation. Do not re-enable them.
+Version `0.2.10` removes them during preparation. Do not re-enable them.
+
+Preparation first creates/verifies only the fixed root lock. It does not treat
+that as migration authorization. The administrator transaction must boot out
+both historical/current writers and prove them absent before the helper may
+classify or change legacy state. A source-only or daemon-startup observation
+that reports `legacy-writers-not-quiesced` must not be worked around by editing
+authority files or running `pmset` manually.
+
+A successful no-UUID migration reports `migrated-idle`, `session=none`, and a
+`legacy-migration` reason (or `legacy-migration-superseded` when a positive
+timer owned by another actor was preserved). It does not mean the machine was
+pristine. If recovery reports required/exit `75`, leave
+`original-ac-sleep`, `original-battery-sleep`, `legacy-recovery-journal`, and
+their `.lidswitch-delete` quarantines intact for an exact retry. Never set a
+timer to `0` to make migration pass and never clear `SleepDisabled` based only
+on an old helper, plist, or status file.
