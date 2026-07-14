@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import LidSwitch
@@ -148,6 +149,30 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         ))
         XCTAssertFalse(runnerInvoked)
         XCTAssertThrowsError(try SecureHelperInstaller.perform(.install, using: DenyingAdapter()))
+    }
+
+    func testImmutableDirectoryOpenFlagsAreKernelCompatibleAndRejectSymlinkAncestors() throws {
+        let flags = SecureHelperInstaller.immutableDirectoryOpenFlags
+        XCTAssertNotEqual(flags & O_NOFOLLOW_ANY, 0)
+        XCTAssertEqual(flags & O_NOFOLLOW, 0)
+        XCTAssertNotEqual(flags & O_CLOEXEC, 0)
+
+        let fixture = try TestSandbox.makeDirectory(label: "installer-open-flags")
+        let realParent = fixture.url.appendingPathComponent("real", isDirectory: true)
+        let child = realParent.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+
+        let direct = open(child.path, flags)
+        XCTAssertGreaterThanOrEqual(direct, 0, "the production flag set must be accepted by the running Darwin kernel")
+        if direct >= 0 { XCTAssertEqual(close(direct), 0) }
+
+        let alias = fixture.url.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: realParent)
+        errno = 0
+        let throughSymlinkAncestor = open(alias.appendingPathComponent("child").path, flags)
+        XCTAssertEqual(throughSymlinkAncestor, -1)
+        XCTAssertEqual(errno, ELOOP, "O_NOFOLLOW_ANY must continue rejecting an ancestor symlink")
+        if throughSymlinkAncestor >= 0 { _ = close(throughSymlinkAncestor) }
     }
 
 }

@@ -10,6 +10,12 @@ import LidSwitchCore
 enum SecureHelperInstaller {
     private static let maximumHelperBytes = 16 * 1_024 * 1_024
 
+    // Darwin rejects O_NOFOLLOW and O_NOFOLLOW_ANY when they are combined.
+    // O_NOFOLLOW_ANY is the stronger contract: it rejects a symlink in any
+    // pathname component, including the leaf, so adding O_NOFOLLOW is both
+    // redundant and an EINVAL failure on the live installer path.
+    static let immutableDirectoryOpenFlags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC
+
     struct FrozenEnrollment {
         let transfer: FrozenHelperTransfer
         let policy: EnrollmentPolicy
@@ -302,7 +308,7 @@ enum SecureHelperInstaller {
     }
 
     private static func openDirectory(_ path: String, expectedUID: uid_t, expectedGID: gid_t) throws -> Int32 {
-        let descriptor = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NOFOLLOW_ANY)
+        let descriptor = open(path, immutableDirectoryOpenFlags)
         guard descriptor >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
         var value = stat()
         guard fstat(descriptor, &value) == 0 else { throw HelperControlError.rejected("app-fstat-failed") }
@@ -322,7 +328,7 @@ enum SecureHelperInstaller {
         let leaf = url.lastPathComponent
         guard !leaf.isEmpty, leaf != ".", leaf != ".." else { throw HelperControlError.rejected("unsafe-bundle-leaf") }
         let parentPath = url.deletingLastPathComponent().path
-        let parent = open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NOFOLLOW_ANY)
+        let parent = open(parentPath, immutableDirectoryOpenFlags)
         guard parent >= 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
         var before = stat()
         guard fstatat(parent, leaf, &before, AT_SYMLINK_NOFOLLOW) == 0 else { throw HelperControlError.rejected("bundle-leaf-lstat-failed") }
