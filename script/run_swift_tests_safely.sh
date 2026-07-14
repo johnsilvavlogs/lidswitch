@@ -8,17 +8,31 @@ set -euo pipefail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
-usage() { echo "usage: $0 [--filter LidSwitchTests.TestCase/testMethod]" >&2; exit 64; }
+usage() { echo "usage: $0 [--filter LidSwitchTests.TestCase/testMethod] [--benchmark-output /private/tmp/<root>/<file> --benchmark-app-bundle /private/tmp/<root>/<app>.app --benchmark-samples 5...100]" >&2; exit 64; }
 selector=""
+benchmark_output=""; benchmark_app=""; benchmark_samples=""
+benchmark_output_set=false; benchmark_app_set=false; benchmark_samples_set=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --filter) [[ $# -ge 2 && -z "$selector" ]] || usage; selector="$2"; shift 2 ;;
     --filter=*) [[ -z "$selector" ]] || usage; selector="${1#--filter=}"; shift ;;
+    --benchmark-output) [[ $# -ge 2 && "$benchmark_output_set" == false ]] || usage; benchmark_output="$2"; benchmark_output_set=true; shift 2 ;;
+    --benchmark-app-bundle) [[ $# -ge 2 && "$benchmark_app_set" == false ]] || usage; benchmark_app="$2"; benchmark_app_set=true; shift 2 ;;
+    --benchmark-samples) [[ $# -ge 2 && "$benchmark_samples_set" == false ]] || usage; benchmark_samples="$2"; benchmark_samples_set=true; shift 2 ;;
     --scratch-path|--scratch-path=*) echo "--scratch-path is owned by the safe wrapper" >&2; exit 64 ;;
     *) usage ;;
   esac
 done
 [[ -z "$selector" || "$selector" =~ ^LidSwitchTests\.[A-Za-z_][A-Za-z0-9_]*/test[A-Za-z_][A-Za-z0-9_]*$ ]] || usage
+if [[ "$benchmark_output_set" == true || "$benchmark_app_set" == true || "$benchmark_samples_set" == true ]]; then
+  [[ "$benchmark_output_set" == true && "$benchmark_app_set" == true && "$benchmark_samples_set" == true ]] || { echo "partial benchmark request is forbidden" >&2; exit 64; }
+  [[ "$selector" == "LidSwitchTests.BenchmarkHarnessTests/testEnvironmentBenchmarkCommandWritesOnlyWhenExplicitlyRequested" ]] || { echo "benchmark request requires the exact benchmark test" >&2; exit 64; }
+  [[ "$benchmark_samples" =~ ^[0-9]+$ && "$benchmark_samples" -ge 5 && "$benchmark_samples" -le 100 ]] || usage
+  LIDSWITCH_BENCHMARK_OUTPUT="$benchmark_output"
+  LIDSWITCH_BENCHMARK_APP_BUNDLE="$benchmark_app"
+  LIDSWITCH_BENCHMARK_WARM_SAMPLES="$benchmark_samples"
+  export LIDSWITCH_BENCHMARK_OUTPUT LIDSWITCH_BENCHMARK_APP_BUNDLE LIDSWITCH_BENCHMARK_WARM_SAMPLES
+fi
 
 ROOT_DIR="${LIDSWITCH_HELD_REPO_ROOT:-}"
 [[ "$ROOT_DIR" == /* ]] || exit 64

@@ -37,6 +37,5 @@ CANONICAL_PARENT="$(cd "$PARENT" && /bin/pwd -P)" || { echo "output parent is un
 CANONICAL_APP_PARENT="$(cd "$APP_PARENT" && /bin/pwd -P)" || { echo "app bundle parent is unavailable" >&2; exit 64; }
 [[ "$CANONICAL_APP_PARENT" == "$APP_PARENT" && "$APP_PARENT" == "/private/tmp/$APP_ROOT_NAME" && -d "$APP_PARENT" && ! -L "$APP_PARENT" && "$(/usr/bin/stat -f '%u:%g:%p' "$APP_PARENT")" == "$(/usr/bin/id -u):$(/usr/bin/id -g):40700" ]] || { echo "app bundle parent must be an existing current-user/current-group exact-mode 0700 direct child" >&2; exit 64; }
 [[ -d "$APP_BUNDLE" && ! -L "$APP_BUNDLE" ]] || { echo "app bundle must be a non-symlink .app directory" >&2; exit 64; }
-LIDSWITCH_BENCHMARK_OUTPUT="$OUTPUT" LIDSWITCH_BENCHMARK_WARM_SAMPLES="$SAMPLES" LIDSWITCH_BENCHMARK_APP_BUNDLE="$APP_BUNDLE" \
-  "$ROOT_DIR/script/run_swift_tests_safely.sh" --filter BenchmarkHarnessTests/testEnvironmentBenchmarkCommandWritesOnlyWhenExplicitlyRequested
-echo "Benchmark JSONL: $OUTPUT"
+echo "manager-held benchmark required; use the descriptor-held test command in docs/VALIDATION.md" >&2
+exit 64

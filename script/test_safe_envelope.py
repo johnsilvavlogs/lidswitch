@@ -82,12 +82,12 @@ DEPENDENCY_FREEZE = {
 }
 STATIC_DATA_FREEZE = {
     "script/live_state_envelope.sh": ("a7f18b5d7f3afbf64c713dba94769353ef4cebdb5a8ec00108bb19b91b0cb568", 57547),
-    "script/swift_sandbox_common.sh": ("39dd1551b46411dcf5473935c9cb7ab2e14759c17ed927e1698dbc228005befd", 67564),
+    "script/swift_sandbox_common.sh": ("f93e57098e318d072169f1535f0b554fccb26fce36e30de9a597e58855e7e9cf", 67919),
     "script/swift_test_sandbox.sb.in": ("8b013f263b8df5bac4da437c2fa8a5e7c7f5e64f4ae33650904a1cf1d0e95e5e", 10764),
-    "script/run_swift_tests_safely.sh": ("e9b009d68f0afd0cd8d62463eb78b24681f30e93cae438232e38fbef63cdb72f", 5950),
+    "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
-    "script/benchmark_baseline.sh": ("5a050bd12b5bcbf79e8f0f213730279440311612d027f8ba439a175f9773bc30", 4086),
-    "script/source_snapshot_manifest.jsonl": ("e5df8a12e9d179e428bb8cb3fa0c9fd71db62943c507e9f11ee470d4e588c217", 3578),
+    "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
+    "script/source_snapshot_manifest.jsonl": ("91f358a6961b6e77ccb3630d1083a230d955eaef158501abbf3a591cf9c72a3b", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1328,6 +1328,7 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
 
         common = verified_static_text("script/swift_sandbox_common.sh")
         baseline = verified_static_text("script/benchmark_baseline.sh")
+        test_wrapper = verified_static_text("script/run_swift_tests_safely.sh")
         validation = verified_static_text("docs/VALIDATION.md")
         for source, samples in ((common, '"$samples" -le 100'), (baseline, '"$SAMPLES" -le 100')):
             self.assertIn(samples, source)
@@ -1338,6 +1339,14 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
             self.assertIn("0:0:41777", source)
         self.assertIn("$parent_name", common)
         self.assertIn("$PARENT_NAME", baseline)
+        self.assertNotIn("run_swift_tests_safely.sh", baseline)
+        self.assertIn("manager-held benchmark required", baseline)
+        for marker in ("--benchmark-output", "--benchmark-app-bundle", "--benchmark-samples"):
+            self.assertIn(marker, test_wrapper)
+        self.assertIn("partial benchmark request is forbidden", test_wrapper)
+        self.assertIn("benchmark request requires the exact benchmark test", test_wrapper)
+        self.assertIn('LIDSWITCH_BENCHMARK_OUTPUT="$LIDSWITCH_SWIFT_BENCHMARK_OUTPUT"', common)
+        self.assertIn('LIDSWITCH_BENCHMARK_APP_BUNDLE="$LIDSWITCH_SWIFT_BENCHMARK_APP"', common)
         self.assertIn("1...96 bytes", validation)
         self.assertIn("5` through\n`100`", validation)
 

@@ -807,7 +807,7 @@ swift_sandbox_assert_xctest_bundle() {
 
 swift_sandbox_run_xctest() {
   local capture_name="$1" selector="${2:-}" bundle selected_path
-  local -a command
+  local -a command environment
   [[ "$capture_name" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || return 64
   [[ -z "$selector" || "$selector" =~ ^LidSwitchTests\.[A-Za-z_][A-Za-z0-9_]*/test[A-Za-z_][A-Za-z0-9_]*$ ]] || return 64
   LIDSWITCH_SWIFT_ACTIVE_TOOLCHAIN=test
@@ -817,7 +817,7 @@ swift_sandbox_run_xctest() {
   command=(/usr/bin/arch -arm64 "$LIDSWITCH_SWIFT_XCODE_TOOL_xctest")
   [[ -z "$selector" ]] || command+=(-XCTest "$selector")
   command+=("$bundle")
-  swift_sandbox_supervise "$capture_name" test \
+  environment=(
       PATH="$selected_path" LC_ALL=C \
       HOME="$HOME" CFFIXED_USER_HOME="$CFFIXED_USER_HOME" TMPDIR="$TMPDIR" \
       XDG_CACHE_HOME="$XDG_CACHE_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" \
@@ -827,7 +827,16 @@ swift_sandbox_run_xctest() {
       DYLD_FRAMEWORK_PATH="$LIDSWITCH_SWIFT_XCODE_PLATFORM_FRAMEWORKS:$LIDSWITCH_SWIFT_XCODE_PLATFORM_PRIVATE_FRAMEWORKS" \
       DYLD_LIBRARY_PATH="$LIDSWITCH_SWIFT_XCODE_PLATFORM_USR_LIB" SWIFT_TESTING_ENABLED=0 \
       LIDSWITCH_TEST_FIXTURE_ROOT="$LIDSWITCH_TEST_FIXTURE_ROOT" \
-      LIDSWITCH_SWIFT_EXEC_ID="$LIDSWITCH_SWIFT_EXEC_ID" -- "${command[@]}"
+      LIDSWITCH_SWIFT_EXEC_ID="$LIDSWITCH_SWIFT_EXEC_ID"
+  )
+  if [[ "$LIDSWITCH_SWIFT_BENCHMARK_ENABLED" == "1" ]]; then
+    environment+=(
+      LIDSWITCH_BENCHMARK_OUTPUT="$LIDSWITCH_SWIFT_BENCHMARK_OUTPUT"
+      LIDSWITCH_BENCHMARK_WARM_SAMPLES="$LIDSWITCH_BENCHMARK_WARM_SAMPLES"
+      LIDSWITCH_BENCHMARK_APP_BUNDLE="$LIDSWITCH_SWIFT_BENCHMARK_APP"
+    )
+  fi
+  swift_sandbox_supervise "$capture_name" test "${environment[@]}" -- "${command[@]}"
 }
 
 swift_sandbox_supervisor_action() {

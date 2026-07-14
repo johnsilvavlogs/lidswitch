@@ -62,7 +62,7 @@ try: sys.argv=[p]+sys.argv[3:]; exec(code,{"__name__":"__main__","__file__":p,"_
 except BaseException:
  if isinstance(sys.exc_info()[1],SystemExit) and sys.exc_info()[1].code==74: raise
  raise SystemExit(74)
-' script/test_safe_envelope.py 2352c41af217ebe6f50d1bfdd6932addebbea1240245734d46355acdc0325748
+' script/test_safe_envelope.py 3087545a0264e4537edeaa6c1b240059c902a665d80af1ae5729bcaf3d34dc32
 ```
 
 Do not substitute bare `python3`, `/usr/bin/env python`, an Anaconda/interpreter
@@ -210,12 +210,21 @@ umask 077
 RESULT_ROOT="$(/usr/bin/mktemp -d /private/tmp/lidswitch-benchmark-results.XXXXXX)"
 ARTIFACT_ROOT="$(/usr/bin/mktemp -d /private/tmp/lidswitch-benchmark-artifact.XXXXXX)"
 /usr/bin/ditto "$PWD/dist/LidSwitch.app" "$ARTIFACT_ROOT/Candidate.app"
-./script/benchmark_baseline.sh \
-  --output "$RESULT_ROOT/results.jsonl" \
-  --app-bundle "$ARTIFACT_ROOT/Candidate.app" \
-  --samples 5
+# The release manager descriptor-loads the accepted held entry and contract,
+# selects the test wrapper, and passes exactly these wrapper arguments:
+test \
+  --filter LidSwitchTests.BenchmarkHarnessTests/testEnvironmentBenchmarkCommandWritesOnlyWhenExplicitlyRequested \
+  --benchmark-output "$RESULT_ROOT/results.jsonl" \
+  --benchmark-app-bundle "$ARTIFACT_ROOT/Candidate.app" \
+  --benchmark-samples 5
 shasum -a 256 "$RESULT_ROOT/results.jsonl"
 ```
+
+`script/benchmark_baseline.sh` remains only a compatibility argument validator
+and exits `64` after validation. It never calls the protected test wrapper by
+pathname. The benchmark becomes executable only through the same externally
+digest-bound `held_bash_entry.py` plus contract used for every accepted Swift
+test run; the manager records those machine-bound hashes with the result.
 
 `--output` and `--app-bundle` are required. Both must use literal `/private/tmp`
 (never `/tmp`): output is one new filename in an already-created current-user

@@ -970,7 +970,15 @@ final class BenchmarkHarnessTests: XCTestCase {
         XCTAssertTrue(benchmark.contains("/usr/bin/basename"))
         XCTAssertTrue(common.contains("/bin/mkdir"))
         XCTAssertFalse(benchmark.contains("mkdir -p"))
-        XCTAssertTrue(benchmark.contains("run_swift_tests_safely.sh"))
+        XCTAssertFalse(benchmark.contains("run_swift_tests_safely.sh"))
+        XCTAssertTrue(benchmark.contains("manager-held benchmark required"))
+        for flag in ["--benchmark-output", "--benchmark-app-bundle", "--benchmark-samples"] {
+            XCTAssertTrue(wrapper.contains(flag))
+        }
+        XCTAssertTrue(wrapper.contains("partial benchmark request is forbidden"))
+        XCTAssertTrue(wrapper.contains("benchmark request requires the exact benchmark test"))
+        XCTAssertTrue(common.contains("LIDSWITCH_BENCHMARK_OUTPUT=\"$LIDSWITCH_SWIFT_BENCHMARK_OUTPUT\""))
+        XCTAssertTrue(common.contains("LIDSWITCH_BENCHMARK_APP_BUNDLE=\"$LIDSWITCH_SWIFT_BENCHMARK_APP\""))
         XCTAssertTrue(session.contains("run_swift_tests_safely.sh"))
     }
 
