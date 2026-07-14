@@ -1,10 +1,12 @@
 #!/usr/bin/python3
-"""Measure LidSwitch launch-to-process, launch-to-idle, RSS, and idle CPU.
+"""Measure LidSwitch launch-to-process, menu readiness, idle, RSS, and CPU.
 
 The harness uses only system tools, never starts a protected session, and
 refuses to run unless ``SleepDisabled`` is zero before and after every sample.
 It terminates only the exact app process it launched and publishes one
-canonical create-once JSON record.
+canonical create-once JSON record.  Readiness is the unique, enabled
+``AXMenuExtra`` published by the launched process; idle additionally requires
+a sustained low-CPU window after that user-visible publication.
 """
 from __future__ import annotations
 
@@ -19,6 +21,33 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+SCHEMA_VERSION = "lidswitch-native-startup-benchmark-v2"
+POLL_INTERVAL_SECONDS = 0.1
+IDLE_WINDOW_SECONDS = 1.0
+IDLE_CPU_THRESHOLD_PERCENT = 2.0
+MINIMUM_IDLE_SAMPLES = 5
+STARTUP_DEADLINE_SECONDS = 15.0
+MAXIMUM_STATE_FILE_BYTES = 1_048_576
+AX_READINESS_SCRIPT = r'''function run(argv) {
+  if (argv.length !== 1 || !/^[1-9][0-9]*$/.test(argv[0])) return "invalid";
+  const pid = Number(argv[0]);
+  const systemEvents = Application("System Events");
+  const processes = systemEvents.processes.whose({unixId: pid})();
+  if (processes.length !== 1) return "not-ready";
+  let matches = 0;
+  processes[0].menuBars().forEach(bar => bar.menuBarItems().forEach(item => {
+    try {
+      const name = String(item.name());
+      if (item.role() === "AXMenuBarItem" && item.subrole() === "AXMenuExtra" &&
+          item.enabled() && (name === "LidSwitch" || name.indexOf("LidSwitch,") === 0)) {
+        matches += 1;
+      }
+    } catch (_) {}
+  }));
+  return matches === 1 ? "ready" : "not-ready";
+}'''
 
 
 class BenchmarkError(RuntimeError):
@@ -118,6 +147,72 @@ def power_observation() -> tuple[int, str]:
     return int(matches[0]), sources[0]
 
 
+def state_file_observation(path: Path) -> dict[str, object]:
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return {"path": str(path), "state": "absent"}
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_mode & 0o022
+            or before.st_size <= 0
+            or before.st_size > MAXIMUM_STATE_FILE_BYTES
+        ):
+            deny("host-state-file-unsafe")
+        payload = bytearray()
+        while len(payload) < before.st_size:
+            try:
+                chunk = os.read(fd, min(131072, before.st_size - len(payload)))
+            except InterruptedError:
+                continue
+            if not chunk:
+                deny("host-state-file-short-read")
+            payload.extend(chunk)
+        try:
+            extra = os.read(fd, 1)
+        except InterruptedError:
+            deny("host-state-file-terminal-read-interrupted")
+        after = os.fstat(fd)
+        identity = lambda value: (
+            value.st_dev, value.st_ino, value.st_uid, value.st_gid,
+            value.st_mode, value.st_nlink, value.st_size,
+        )
+        if extra or identity(before) != identity(after):
+            deny("host-state-file-changed-during-read")
+        return {
+            "path": str(path),
+            "state": "present",
+            "device": before.st_dev,
+            "inode": before.st_ino,
+            "uid": before.st_uid,
+            "gid": before.st_gid,
+            "mode": stat.S_IMODE(before.st_mode),
+            "size": before.st_size,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+    finally:
+        os.close(fd)
+
+
+def safe_host_state() -> dict[str, object]:
+    user_support = Path.home() / "Library" / "Application Support" / "LidSwitch"
+    lease = state_file_observation(user_support / "activation-lease")
+    desired = state_file_observation(user_support / "desired-state")
+    applied = state_file_observation(Path("/Library/Application Support/LidSwitch/applied-state"))
+    power = power_observation()
+    if power != (0, "AC Power") or lease["state"] != "absent" or applied["state"] != "absent":
+        deny("unsafe-host-state")
+    return {
+        "power": {"sleep_disabled": power[0], "source": power[1]},
+        "activation_lease": lease,
+        "desired_state": desired,
+        "applied_state": applied,
+    }
+
+
 def exact_pids(executable: Path) -> list[int]:
     output = run(["/bin/ps", "-axo", "pid=,command="])
     pids: list[int] = []
@@ -147,6 +242,30 @@ def process_sample(pid: int) -> tuple[int, float]:
     return rss, cpu
 
 
+def status_item_ready(pid: int) -> bool:
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", AX_READINESS_SCRIPT, str(pid)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3.0,
+            check=False,
+            close_fds=True,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LC_ALL": "C",
+                "HOME": str(Path.home()),
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BenchmarkError("status-item-observation-failed") from error
+    if completed.returncode != 0 or completed.stdout not in {"ready\n", "not-ready\n"}:
+        deny("status-item-observation-failed")
+    return completed.stdout == "ready\n"
+
+
 def stop_child(child: subprocess.Popen) -> None:
     """A live child cannot have its PID reused until this parent reaps it."""
     if child.poll() is not None:
@@ -163,9 +282,63 @@ def stop_child(child: subprocess.Popen) -> None:
         deny("app-process-did-not-stop")
 
 
+def observe_ready_idle(
+    child: subprocess.Popen,
+    pid: int,
+    deadline_ns: int,
+    *,
+    readiness_observer=status_item_ready,
+    sample_observer=process_sample,
+    clock=time.monotonic_ns,
+    sleeper=time.sleep,
+) -> tuple[int, int, int, float]:
+    """Return truthful readiness and sustained-idle observations.
+
+    Low CPU before the menu extra exists is deliberately ignored.  Once the
+    exact process publishes its enabled status item, any CPU sample above the
+    threshold restarts the full idle window.  The reported idle CPU is the
+    average across that accepted window rather than one convenient final row.
+    """
+
+    ready_seen: int | None = None
+    idle_started: int | None = None
+    idle_samples: list[float] = []
+    peak_rss = 0
+    while clock() < deadline_ns:
+        if child.poll() is not None:
+            deny("app-process-exited-during-startup")
+        rss, cpu = sample_observer(pid)
+        peak_rss = max(peak_rss, rss)
+        observed_at = clock()
+        if ready_seen is None:
+            if readiness_observer(pid):
+                ready_seen = clock()
+                idle_started = None
+                idle_samples = []
+            sleeper(POLL_INTERVAL_SECONDS)
+            continue
+        if cpu <= IDLE_CPU_THRESHOLD_PERCENT:
+            if idle_started is None:
+                idle_started = observed_at
+                idle_samples = []
+            idle_samples.append(cpu)
+            if (
+                observed_at - idle_started >= int(IDLE_WINDOW_SECONDS * 1_000_000_000)
+                and len(idle_samples) >= MINIMUM_IDLE_SAMPLES
+            ):
+                return ready_seen, observed_at, peak_rss, sum(idle_samples) / len(idle_samples)
+        else:
+            idle_started = None
+            idle_samples = []
+        sleeper(POLL_INTERVAL_SECONDS)
+    if ready_seen is None:
+        deny("app-status-item-did-not-become-ready")
+    deny("app-did-not-reach-bounded-idle")
+
+
 def measure_once(app: Path, executable: Path) -> dict[str, float | int]:
-    before_power = power_observation()
-    if before_power != (0, "AC Power") or exact_pids(executable):
+    before_state = safe_host_state()
+    if exact_pids(executable):
         deny("unsafe-preexisting-runtime-state")
     started = time.monotonic_ns()
     environment = {
@@ -186,42 +359,26 @@ def measure_once(app: Path, executable: Path) -> dict[str, float | int]:
         )
     except OSError as error:
         raise BenchmarkError("app-process-did-not-start") from error
-    deadline = time.monotonic() + 10.0
+    deadline_ns = time.monotonic_ns() + int(STARTUP_DEADLINE_SECONDS * 1_000_000_000)
     pid = child.pid
-    while time.monotonic() < deadline:
-        if child.poll() is not None:
-            deny("app-process-exited-during-startup")
-        if pid in exact_pids(executable):
-            break
-        time.sleep(0.02)
-    else:
-        deny("app-process-did-not-start")
-    process_seen = time.monotonic_ns()
-    peak_rss = 0
-    idle_cpu = 100.0
-    stable_idle = 0
-    idle_seen = process_seen
     try:
-        while time.monotonic() < deadline:
-            rss, cpu = process_sample(pid)
-            peak_rss = max(peak_rss, rss)
-            idle_cpu = cpu
-            if cpu <= 2.0:
-                stable_idle += 1
-                if stable_idle >= 3:
-                    idle_seen = time.monotonic_ns()
-                    break
-            else:
-                stable_idle = 0
-            time.sleep(0.05)
-        if stable_idle < 3:
-            deny("app-did-not-reach-bounded-idle")
+        while time.monotonic_ns() < deadline_ns:
+            if child.poll() is not None:
+                deny("app-process-exited-during-startup")
+            if pid in exact_pids(executable):
+                break
+            time.sleep(0.02)
+        else:
+            deny("app-process-did-not-start")
+        process_seen = time.monotonic_ns()
+        ready_seen, idle_seen, peak_rss, idle_cpu = observe_ready_idle(child, pid, deadline_ns)
     finally:
         stop_child(child)
-    if power_observation() != before_power:
-        deny("app-launch-changed-power-state")
+    if safe_host_state() != before_state:
+        deny("app-launch-changed-host-state")
     return {
         "launch_to_process_ms": (process_seen - started) / 1_000_000.0,
+        "launch_to_ready_ms": (ready_seen - started) / 1_000_000.0,
         "launch_to_idle_ms": (idle_seen - started) / 1_000_000.0,
         "peak_rss_bytes": peak_rss,
         "idle_cpu_percent": idle_cpu,
@@ -281,12 +438,18 @@ def main(argv: list[str] | None = None) -> int:
             or stat.S_IMODE(parent_info.st_mode) != 0o700
         ):
             deny("output-parent-not-private")
+        host_state_before = safe_host_state()
         measured_started = time.monotonic()
-        samples = [measure_once(app, executable) for _ in range(args.samples)]
+        cold_sample = measure_once(app, executable)
+        discarded_warmup_sample = measure_once(app, executable)
+        warm_samples = [measure_once(app, executable) for _ in range(args.samples)]
         observation_window = time.monotonic() - measured_started
+        host_state_after = safe_host_state()
+        if host_state_after != host_state_before:
+            deny("benchmark-changed-host-state")
         app_tree_bytes, app_tree_sha256 = tree_measure(app)
         record = {
-            "schema_version": "lidswitch-native-startup-benchmark-v1",
+            "schema_version": SCHEMA_VERSION,
             "side": args.label,
             "app": {
                 "path": str(app),
@@ -308,8 +471,21 @@ def main(argv: list[str] | None = None) -> int:
                     + " (" + run(["/usr/bin/sw_vers", "-buildVersion"]).strip() + ")",
                 "power_state": "AC",
             },
+            "methodology": {
+                "cold_samples": 1,
+                "discarded_warmup_samples": 1,
+                "warm_samples": args.samples,
+                "readiness_observer": "unique-enabled-axmenuextra-for-exact-pid",
+                "idle_cpu_threshold_percent": IDLE_CPU_THRESHOLD_PERCENT,
+                "idle_window_seconds": IDLE_WINDOW_SECONDS,
+                "minimum_idle_samples": MINIMUM_IDLE_SAMPLES,
+                "poll_interval_seconds": POLL_INTERVAL_SECONDS,
+            },
+            "host_state": {"before": host_state_before, "after": host_state_after},
             "observation_window_seconds": observation_window,
-            "samples": samples,
+            "cold_sample": cold_sample,
+            "discarded_warmup_sample": discarded_warmup_sample,
+            "warm_samples": warm_samples,
         }
         payload = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         fd = os.open(str(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)

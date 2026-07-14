@@ -15,13 +15,14 @@ import os
 import pathlib
 import re
 import stat
+import statistics
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import release_metrics_evidence as release_metrics
 
-NATIVE_SCHEMA = "lidswitch-native-startup-benchmark-v1"
-REPORT_SCHEMA = "lidswitch-native-startup-metrics-adaptation-v1"
+NATIVE_SCHEMA = "lidswitch-native-startup-benchmark-v2"
+REPORT_SCHEMA = "lidswitch-native-startup-metrics-adaptation-v2"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 RESOURCE_METRICS = (
@@ -30,7 +31,7 @@ RESOURCE_METRICS = (
     ("app_binary_bytes", "bytes", "filesystem-stat", "executable_bytes"),
     ("app_tree_bytes", "bytes", "filesystem-stat", "tree_bytes"),
 )
-LATENCIES = ("launch_to_process_ms", "launch_to_idle_ms")
+LATENCIES = ("launch_to_process_ms", "launch_to_ready_ms", "launch_to_idle_ms")
 
 
 class AdapterError(ValueError):
@@ -99,7 +100,10 @@ def load_canonical(path):
 
 
 def validate(record, side):
-    required = {"schema_version", "side", "app", "identity", "environment", "observation_window_seconds", "samples"}
+    required = {
+        "schema_version", "side", "app", "identity", "environment", "methodology", "host_state",
+        "observation_window_seconds", "cold_sample", "discarded_warmup_sample", "warm_samples",
+    }
     if set(record) != required or record.get("schema_version") != NATIVE_SCHEMA or record.get("side") != side:
         raise AdapterError("invalid native benchmark shape")
     app = record["app"]
@@ -128,23 +132,80 @@ def validate(record, side):
     _string(environment["operating_system"], "operating system", 256)
     if environment["power_state"] != "AC":
         raise AdapterError("native benchmark is not on AC power")
+    methodology = record["methodology"]
+    if not isinstance(methodology, dict):
+        raise AdapterError("invalid native benchmark methodology")
+    expected_methodology = {
+        "cold_samples": 1,
+        "discarded_warmup_samples": 1,
+        "warm_samples": len(record["warm_samples"]) if isinstance(record["warm_samples"], list) else None,
+        "readiness_observer": "unique-enabled-axmenuextra-for-exact-pid",
+        "idle_cpu_threshold_percent": 2.0,
+        "idle_window_seconds": 1.0,
+        "minimum_idle_samples": 5,
+        "poll_interval_seconds": 0.1,
+    }
+    integer_methodology = ("cold_samples", "discarded_warmup_samples", "warm_samples", "minimum_idle_samples")
+    float_methodology = ("idle_cpu_threshold_percent", "idle_window_seconds", "poll_interval_seconds")
+    if (
+        methodology != expected_methodology
+        or any(type(methodology.get(key)) is not int for key in integer_methodology)
+        or any(type(methodology.get(key)) is not float for key in float_methodology)
+    ):
+        raise AdapterError("invalid native benchmark methodology")
+    host_state = record["host_state"]
+    if not isinstance(host_state, dict) or set(host_state) != {"before", "after"} or host_state["before"] != host_state["after"]:
+        raise AdapterError("native benchmark host state changed")
+    observed_state = host_state["before"]
+    if not isinstance(observed_state, dict) or set(observed_state) != {"power", "activation_lease", "desired_state", "applied_state"}:
+        raise AdapterError("invalid native benchmark host state")
+    if observed_state["power"] != {"sleep_disabled": 0, "source": "AC Power"}:
+        raise AdapterError("native benchmark host power state is unsafe")
+    for key in ("activation_lease", "applied_state"):
+        value = observed_state[key]
+        if not isinstance(value, dict) or set(value) != {"path", "state"} or value.get("state") != "absent" or not isinstance(value.get("path"), str):
+            raise AdapterError("native benchmark active-state record is unsafe")
+    desired_state = observed_state["desired_state"]
+    if not isinstance(desired_state, dict) or desired_state.get("state") not in {"absent", "present"} or not isinstance(desired_state.get("path"), str):
+        raise AdapterError("invalid native benchmark desired state")
+    if desired_state["state"] == "absent":
+        if set(desired_state) != {"path", "state"}:
+            raise AdapterError("invalid absent desired state")
+    else:
+        expected_desired = {"path", "state", "device", "inode", "uid", "gid", "mode", "size", "sha256"}
+        if set(desired_state) != expected_desired or not HEX.fullmatch(str(desired_state.get("sha256", ""))):
+            raise AdapterError("invalid present desired state")
     window = _number(record["observation_window_seconds"], "observation window")
     if window <= 0:
         raise AdapterError("invalid observation window")
-    samples = record["samples"]
+    samples = record["warm_samples"]
     if not isinstance(samples, list) or not 5 <= len(samples) <= 20:
         raise AdapterError("native benchmark requires five to twenty samples")
-    checked_samples = []
-    for sample in samples:
+    def checked_sample(sample, label):
         if set(sample) != set(LATENCIES) | {"peak_rss_bytes", "idle_cpu_percent"}:
-            raise AdapterError("invalid native sample schema")
-        checked_samples.append({
+            raise AdapterError("invalid " + label + " schema")
+        checked = {
             "launch_to_process_ms": _number(sample["launch_to_process_ms"], "launch_to_process_ms"),
+            "launch_to_ready_ms": _number(sample["launch_to_ready_ms"], "launch_to_ready_ms"),
             "launch_to_idle_ms": _number(sample["launch_to_idle_ms"], "launch_to_idle_ms"),
             "peak_rss_bytes": _positive_integer(sample["peak_rss_bytes"], "peak_rss_bytes"),
             "idle_cpu_percent": _number(sample["idle_cpu_percent"], "idle_cpu_percent"),
-        })
-    return {"app": app, "identity": identity, "environment": environment, "observation_window_seconds": window, "samples": checked_samples}
+        }
+        if not checked["launch_to_process_ms"] <= checked["launch_to_ready_ms"] <= checked["launch_to_idle_ms"]:
+            raise AdapterError("native sample lifecycle order is invalid")
+        if checked["launch_to_idle_ms"] - checked["launch_to_ready_ms"] < methodology["idle_window_seconds"] * 1000:
+            raise AdapterError("native sample idle window is too short")
+        if checked["idle_cpu_percent"] > methodology["idle_cpu_threshold_percent"]:
+            raise AdapterError("native sample idle CPU exceeds the accepted window")
+        return checked
+    cold = checked_sample(record["cold_sample"], "cold sample")
+    warmup = checked_sample(record["discarded_warmup_sample"], "discarded warmup sample")
+    checked_samples = [checked_sample(sample, "warm sample") for sample in samples]
+    return {
+        "app": app, "identity": identity, "environment": environment,
+        "methodology": methodology, "host_state": host_state, "observation_window_seconds": window,
+        "cold_sample": cold, "discarded_warmup_sample": warmup, "warm_samples": checked_samples,
+    }
 
 
 def _percent(before, after):
@@ -156,6 +217,14 @@ def _percentile(values, quantile):
     position = (len(ordered) - 1) * quantile
     lower, upper = math.floor(position), math.ceil(position)
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+
+def _stats(values):
+    return {
+        "median": _percentile(values, .5),
+        "p95": _percentile(values, .95),
+        "population_standard_deviation": statistics.pstdev(float(value) for value in values),
+    }
 
 
 def _private_output_path(value):
@@ -194,7 +263,7 @@ def _external(checked, side):
     identity = checked["identity"]
     environment = checked["environment"]
     app = checked["app"]
-    samples = checked["samples"]
+    samples = checked["warm_samples"]
     metrics = []
     for name, unit, method, source in RESOURCE_METRICS:
         values = [sample[source] for sample in samples] if source in {"peak_rss_bytes", "idle_cpu_percent"} else [float(app[source])]
@@ -208,15 +277,37 @@ def adapt(baseline, candidate, baseline_sha256, candidate_sha256):
     comparable = ("harness_sha256", "machine")
     if any(baseline["identity"][key] != candidate["identity"][key] for key in comparable) or baseline["environment"] != candidate["environment"]:
         raise AdapterError("baseline/candidate harness or environment mismatch")
-    if len(baseline["samples"]) != len(candidate["samples"]):
+    if baseline["host_state"] != candidate["host_state"]:
+        raise AdapterError("baseline/candidate host states differ")
+    if baseline["methodology"] != candidate["methodology"]:
+        raise AdapterError("baseline/candidate methodologies differ")
+    if len(baseline["warm_samples"]) != len(candidate["warm_samples"]):
         raise AdapterError("baseline/candidate sample counts differ")
     baseline_external, candidate_external = _external(baseline, "baseline"), _external(candidate, "candidate")
     latency_deltas = []
     for name in LATENCIES:
-        before = [sample[name] for sample in baseline["samples"]]
-        after = [sample[name] for sample in candidate["samples"]]
-        baseline_median, candidate_median = _percentile(before, .5), _percentile(after, .5)
-        latency_deltas.append({"metric": name, "unit": "milliseconds", "percentile": "R-7 linear interpolation", "baseline_samples": before, "candidate_samples": after, "baseline_median": baseline_median, "candidate_median": candidate_median, "median_percent_delta": _percent(baseline_median, candidate_median)})
+        before = [sample[name] for sample in baseline["warm_samples"]]
+        after = [sample[name] for sample in candidate["warm_samples"]]
+        baseline_stats, candidate_stats = _stats(before), _stats(after)
+        baseline_cold, candidate_cold = baseline["cold_sample"][name], candidate["cold_sample"][name]
+        latency_deltas.append({
+            "metric": name,
+            "unit": "milliseconds",
+            "percentile": "R-7 linear interpolation",
+            "cold": {
+                "baseline": baseline_cold,
+                "candidate": candidate_cold,
+                "percent_delta": _percent(baseline_cold, candidate_cold),
+            },
+            "warm": {
+                "baseline_samples": before,
+                "candidate_samples": after,
+                "baseline": baseline_stats,
+                "candidate": candidate_stats,
+                "median_percent_delta": _percent(baseline_stats["median"], candidate_stats["median"]),
+                "p95_percent_delta": _percent(baseline_stats["p95"], candidate_stats["p95"]),
+            },
+        })
     return {"schema_version": REPORT_SCHEMA, "baseline": {"native_sha256": baseline_sha256, "external_metrics": baseline_external}, "candidate": {"native_sha256": candidate_sha256, "external_metrics": candidate_external}, "ux_latency_deltas": latency_deltas}
 
 
