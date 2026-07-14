@@ -135,6 +135,29 @@ enum UserStateFileCapability: Sendable {
         let count: Int
         let names: [String]
     }
+    private enum RetainedRecordTarget: Equatable {
+        case desiredState
+        case activationLease
+        case unknown
+
+        init(finalName: String) {
+            switch finalName {
+            case "desired-state": self = .desiredState
+            case "activation-lease": self = .activationLease
+            default: self = .unknown
+            }
+        }
+    }
+    private struct RetainedIdentityFields {
+        let device: UInt64
+        let inode: UInt64
+        let quarantineID: UUID?
+    }
+    private struct LegacyArchiveFields {
+        let device: UInt64
+        let inode: UInt64
+        let digest: String
+    }
 
     struct FileIdentity: Equatable {
         let device: dev_t
@@ -562,7 +585,8 @@ enum UserStateFileCapability: Sendable {
         do {
             try chain.reassert()
             let inventory = try assertBoundedQuarantineResidue(in: chain.supportFD, reserving: 1)
-            guard inventory.count == 0 else { throw Failure.retainedResidue("legacy recovery has retained evidence") }
+            let recordInventory = residueInventory(inventory, for: finalName)
+            guard recordInventory.count == 0 else { throw Failure.retainedResidue("legacy recovery has retained evidence") }
             guard let expected = try namedIdentityIfPresent(finalName, in: chain.supportFD) else {
                 throw Failure.operationFailed("missing legacy final \(finalName)", ENOENT)
             }
@@ -633,10 +657,11 @@ enum UserStateFileCapability: Sendable {
         }
         try chain.reassert()
         let residue = try assertBoundedQuarantineResidue(in: chain.supportFD, reserving: 0)
+        let recordResidue = residueInventory(residue, for: finalName)
         let recognizedArchiveName: String?
         if let recognizedArchive {
             recognizedArchiveName = try validatedRecognizedArchive(
-                finalName: finalName, inventory: residue, in: chain.supportFD,
+                finalName: finalName, inventory: recordResidue, in: chain.supportFD,
                 archive: recognizedArchive, operations: operations
             )
         } else {
@@ -649,7 +674,7 @@ enum UserStateFileCapability: Sendable {
                 try chain.closeAll(operations: operations)
                 return .missingWithRecognizedArchive(archive)
             }
-            if residue.count > 0 {
+            if recordResidue.count > 0 {
                 try chain.reassert()
                 try chain.closeAll(operations: operations)
                 return .retainedResidue(supportDirectory.path)
@@ -658,9 +683,11 @@ enum UserStateFileCapability: Sendable {
             try chain.closeAll(operations: operations)
             return .missing
         }
-        if residue.count > 0,
+        if recordResidue.count > 0,
            recognizedArchiveName == nil,
-           !isSinglePriorMigrationResidue(inventory: residue, finalName: finalName) {
+           !isSinglePriorMigrationResidue(
+               inventory: recordResidue, finalName: finalName, in: chain.supportFD
+           ) {
             try chain.reassert()
             try chain.closeAll(operations: operations)
             return .retainedResidue(supportDirectory.path)
@@ -742,14 +769,17 @@ enum UserStateFileCapability: Sendable {
         guard inventory.count > 0 else { return nil }
         guard inventory.count == 1, let name = inventory.names.first,
               name.hasPrefix(archive.prefix),
-              let identity = try quarantineIdentityIfPresent(name, in: directoryFD)
+              let identity = try quarantineIdentityIfPresent(name, in: directoryFD),
+              let fields = legacyArchiveFields(name)
         else { return nil }
-        let expectedPrefix = "\(archive.prefix)\(finalName)--\(identity.device)-\(identity.inode)-"
-        guard name.hasPrefix(expectedPrefix) else { throw Failure.retainedResidue("legacy archive targets another leaf") }
-        let digest = String(name.dropFirst(expectedPrefix.count))
-        guard digest.count == 64, digest.utf8.allSatisfy({ byte in
-            (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
-        }) else { throw Failure.retainedResidue("malformed legacy archive digest") }
+        let expectedPrefix = "\(archive.prefix)\(finalName)--"
+        guard name.hasPrefix(expectedPrefix), fields.inode == UInt64(identity.inode) else {
+            throw Failure.retainedResidue("legacy archive targets another leaf or inode")
+        }
+        // Like prior-migration tombstones, the archive is durable across an
+        // APFS device-number change. Its stable inode, descriptor metadata,
+        // exact bytes, digest, and parser-accepted payload remain bound below.
+        let digest = fields.digest
 
         let descriptor = openat(directoryFD, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         BenchmarkProbe.record("file_open")
@@ -1102,11 +1132,13 @@ enum UserStateFileCapability: Sendable {
             }
             if name.hasPrefix(".lidswitch-legacy-lease-") {
                 guard let identity = try quarantineIdentityIfPresent(name, in: directoryFD),
-                      hasStructuredLegacyArchiveIdentity(name, identity: identity)
+                      let fields = legacyArchiveFields(name),
+                      fields.inode == UInt64(identity.inode)
                 else { throw Failure.retainedResidue("ambiguous legacy archive residue") }
             } else if name.hasPrefix(".lidswitch-") {
                 guard let identity = try quarantineIdentityIfPresent(name, in: directoryFD),
-                      hasStructuredRetainedIdentity(name, identity: identity)
+                      let fields = retainedIdentityFields(name),
+                      fields.inode == UInt64(identity.inode)
                 else { throw Failure.retainedResidue("ambiguous quarantine residue") }
             } else if try namedIdentityIfPresent(name, in: directoryFD) == nil {
                 throw Failure.retainedResidue("missing raw temporary residue")
@@ -1132,10 +1164,85 @@ enum UserStateFileCapability: Sendable {
     /// and must not make the newly verified canonical journal unreadable.
     private static func isSinglePriorMigrationResidue(
         inventory: ResidueInventory,
-        finalName: String
+        finalName: String,
+        in directoryFD: Int32
     ) -> Bool {
-        inventory.count == 1
-            && inventory.names.first?.hasPrefix(".lidswitch-prior-\(finalName)--") == true
+        guard inventory.count == 1, let name = inventory.names.first,
+              name.hasPrefix(".lidswitch-prior-\(finalName)--"),
+              let fields = retainedIdentityFields(name), fields.quarantineID != nil,
+              let identity = try? quarantineIdentityIfPresent(name, in: directoryFD)
+        else { return false }
+        // APFS device numbers can be renumbered across reboot. The retained
+        // prior leaf is non-authoritative evidence beside a separately
+        // verified canonical journal, so bind its stable inode and safe
+        // metadata while allowing only the encoded device component to drift.
+        return fields.inode == UInt64(identity.inode)
+    }
+
+    /// The support directory stores two independent records. Inventory and
+    /// validate every retained entry globally so malformed names/metadata and
+    /// the shared capacity bound still fail closed. Exclude only residue that
+    /// is confidently attributable to the other known record; unknown names
+    /// remain blocking rather than being silently scoped away.
+    private static func residueInventory(
+        _ inventory: ResidueInventory,
+        for finalName: String
+    ) -> ResidueInventory {
+        let target = RetainedRecordTarget(finalName: finalName)
+        let names = inventory.names.filter {
+            let observed = retainedRecordTarget($0)
+            return observed == target || observed == .unknown || target == .unknown
+        }
+        return ResidueInventory(count: names.count, names: names)
+    }
+
+    private static func retainedRecordTarget(_ name: String) -> RetainedRecordTarget {
+        if rawTemporaryName(name, prefix: ".desired-state.") { return .desiredState }
+        if rawTemporaryName(name, prefix: ".activation-lease.") { return .activationLease }
+
+        guard let fields = retainedIdentityFields(name) else {
+            return legacyArchiveFields(name) != nil
+                && name.hasPrefix(".lidswitch-legacy-lease-activation-lease--")
+                ? .activationLease : .unknown
+        }
+        if fields.quarantineID == nil {
+            if name.hasPrefix(".lidswitch-revoke-desired-state--") { return .desiredState }
+            if name.hasPrefix(".lidswitch-revoke-activation-lease--") { return .activationLease }
+            return .unknown
+        }
+
+        for family in [".lidswitch-prior-", ".lidswitch-rejected-", ".lidswitch-abandoned-"] {
+            if name.hasPrefix("\(family)desired-state--") { return .desiredState }
+            if name.hasPrefix("\(family)activation-lease--") { return .activationLease }
+        }
+
+        for family in [".lidswitch-rejected-", ".lidswitch-abandoned-"] {
+            if quarantinedTemporaryName(name, family: family, prefix: ".desired-state.") {
+                return .desiredState
+            }
+            if quarantinedTemporaryName(name, family: family, prefix: ".activation-lease.") {
+                return .activationLease
+            }
+        }
+        return .unknown
+    }
+
+    private static func rawTemporaryName(_ name: String, prefix: String) -> Bool {
+        guard name.hasPrefix(prefix) else { return false }
+        return UUID(uuidString: String(name.dropFirst(prefix.count))) != nil
+    }
+
+    private static func quarantinedTemporaryName(
+        _ name: String,
+        family: String,
+        prefix: String
+    ) -> Bool {
+        let start = family + prefix
+        guard name.hasPrefix(start) else { return false }
+        let remainder = name.dropFirst(start.count)
+        guard let marker = remainder.range(of: "--")
+        else { return false }
+        return UUID(uuidString: String(remainder[..<marker.lowerBound])) != nil
     }
 
     private static func hasReservedUserStatePrefix(_ name: String) -> Bool {
@@ -1144,20 +1251,40 @@ enum UserStateFileCapability: Sendable {
             || name.hasPrefix(".activation-lease.")
     }
 
-    private static func hasStructuredRetainedIdentity(_ name: String, identity: FileIdentity) -> Bool {
-        let marker = "--\(identity.device)-\(identity.inode)"
-        guard let range = name.range(of: marker, options: .backwards) else { return false }
-        let suffix = name[range.upperBound...]
-        return suffix.isEmpty || (suffix.first == "-" && UUID(uuidString: String(suffix.dropFirst())) != nil)
+    private static func retainedIdentityFields(_ name: String) -> RetainedIdentityFields? {
+        guard let marker = name.range(of: "--"),
+              name.range(of: "--", range: marker.upperBound..<name.endIndex) == nil
+        else { return nil }
+        let parts = name[marker.upperBound...].split(
+            separator: "-", maxSplits: 2, omittingEmptySubsequences: false
+        )
+        guard parts.count == 2 || parts.count == 3,
+              let device = UInt64(parts[0]), String(device) == String(parts[0]), device > 0,
+              let inode = UInt64(parts[1]), String(inode) == String(parts[1]), inode > 0
+        else { return nil }
+        if parts.count == 2 {
+            return RetainedIdentityFields(device: device, inode: inode, quarantineID: nil)
+        }
+        guard let quarantineID = UUID(uuidString: String(parts[2])) else { return nil }
+        return RetainedIdentityFields(device: device, inode: inode, quarantineID: quarantineID)
     }
 
-    private static func hasStructuredLegacyArchiveIdentity(_ name: String, identity: FileIdentity) -> Bool {
-        let marker = "--\(identity.device)-\(identity.inode)-"
-        guard let range = name.range(of: marker, options: .backwards) else { return false }
-        let digest = name[range.upperBound...]
-        return digest.count == 64 && digest.utf8.allSatisfy { byte in
+    private static func legacyArchiveFields(_ name: String) -> LegacyArchiveFields? {
+        guard let marker = name.range(of: "--"),
+              name.range(of: "--", range: marker.upperBound..<name.endIndex) == nil
+        else { return nil }
+        let parts = name[marker.upperBound...].split(
+            separator: "-", maxSplits: 2, omittingEmptySubsequences: false
+        )
+        guard parts.count == 3,
+              let device = UInt64(parts[0]), String(device) == String(parts[0]), device > 0,
+              let inode = UInt64(parts[1]), String(inode) == String(parts[1]), inode > 0
+        else { return nil }
+        let digest = String(parts[2])
+        guard digest.count == 64, digest.utf8.allSatisfy({ byte in
             (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
-        }
+        }) else { return nil }
+        return LegacyArchiveFields(device: device, inode: inode, digest: digest)
     }
 
     private static func childName(_ child: URL, in parent: URL) throws -> String {

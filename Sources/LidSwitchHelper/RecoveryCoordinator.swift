@@ -56,15 +56,9 @@ final class RecoveryCoordinator {
     func recover(
         intent: RecoveryIntent,
         allowReconnect: Bool,
-        terminalReason: String? = nil
+        terminalReason: String? = nil,
+        hydrateStatusProjection: Bool = true
     ) -> RecoveryAssessment {
-        // Restart hydration precedes every recovery mutation. It merely wakes
-        // the status-only worker; it has no setter, lease, or session path.
-        StatusProjectionDispatcher.hydrate(
-            configuration: configuration,
-            storeFactory: storeFactory,
-            writer: statusProjectionWriter
-        )
         guard let store = storeFactory(configuration.supportDirectory) else {
             return projectRequired("unsafe-root-state-directory")
         }
@@ -79,10 +73,31 @@ final class RecoveryCoordinator {
                     permitRecoveryRequiredRetry: intent != .startup && !allowReconnect,
                     execution: intent == .startup && allowReconnect
                         ? .daemonStartup
-                        : .administratorOneShot
+                    : .administratorOneShot
                 )
             }
-        }) else { return projectRequired("root-state-lock-unavailable") }
+        }) else {
+            // Hydration is projection-only, but starting it before recovery
+            // lets our own asynchronous status worker win the same root lock
+            // and turn a safe helper restart into a transient startup stop.
+            // Wake it only after this recovery attempt has released or failed
+            // to acquire the lock; it cannot grant session or power authority.
+            if hydrateStatusProjection {
+                StatusProjectionDispatcher.hydrate(
+                    configuration: configuration,
+                    storeFactory: storeFactory,
+                    writer: statusProjectionWriter
+                )
+            }
+            return projectRequired("root-state-lock-unavailable")
+        }
+        if hydrateStatusProjection {
+            StatusProjectionDispatcher.hydrate(
+                configuration: configuration,
+                storeFactory: storeFactory,
+                writer: statusProjectionWriter
+            )
+        }
         Self.scheduleContainmentCleanup(configuration: configuration)
         return outcome
     }

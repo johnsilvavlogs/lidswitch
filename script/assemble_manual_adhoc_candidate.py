@@ -280,6 +280,76 @@ def open_fd(path: Path, directory: bool = False) -> int:
     return os.open(str(path), os.O_RDONLY | os.O_CLOEXEC | (os.O_DIRECTORY if directory else 0))
 
 
+def private_subdirectory(parent: Path, name: str) -> Path:
+    path = parent / name
+    path.mkdir(mode=0o700)
+    os.chmod(path, 0o700)
+    info = os.lstat(path)
+    if (path.is_symlink()
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_gid != os.getgid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+            or info.st_nlink < 2):
+        deny("private-subdirectory-identity-invalid: " + name)
+    return path
+
+
+def require_bundle_at_root(root: Path, app_name: str) -> Path:
+    if app_name != "LidSwitch.app":
+        deny("dmg-layout-app-name-invalid")
+    try:
+        os.lstat(root / "Contents")
+    except FileNotFoundError:
+        pass
+    else:
+        deny("dmg-layout-bare-contents")
+    target = root / app_name
+    try:
+        info = os.lstat(target)
+    except FileNotFoundError:
+        deny("dmg-layout-app-missing")
+    if target.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        deny("dmg-layout-app-invalid")
+    return target
+
+
+def verified_bundle_copy(root: Path, app_name: str, expected_tree: str,
+                         expected_identifier: str, expected_cdhash: str,
+                         label: str) -> Path:
+    app = require_bundle_at_root(root, app_name)
+    root_fd = open_fd(root, True)
+    try:
+        _, observed_tree = core.capture_tree(root_fd, app_name)
+    finally:
+        os.close(root_fd)
+    if observed_tree != expected_tree:
+        deny(label + "-tree-mismatch")
+    if signature_identity(app, expected_identifier)["cdhash"] != expected_cdhash:
+        deny(label + "-signature-mismatch")
+    return app
+
+
+def stage_dmg_source(output: Path, app: Path, app_tree: str,
+                     expected_identifier: str, expected_cdhash: str) -> Path:
+    source = private_subdirectory(output, "dmg-source")
+    staged_app = source / "LidSwitch.app"
+    run([TOOLS["ditto"], str(app), str(staged_app)])
+    verified_bundle_copy(source, "LidSwitch.app", app_tree,
+                         expected_identifier, expected_cdhash, "dmg-staging")
+    return source
+
+
+def create_dmg(dmg_source: Path, dmg: Path, app_tree: str,
+               expected_identifier: str, expected_cdhash: str) -> None:
+    verified_bundle_copy(dmg_source, "LidSwitch.app", app_tree,
+                         expected_identifier, expected_cdhash, "dmg-staging")
+    run([TOOLS["hdiutil"], "create", "-volname", "LidSwitch", "-srcfolder",
+         str(dmg_source), "-format", "UDZO", "-ov", str(dmg)])
+    verified_bundle_copy(dmg_source, "LidSwitch.app", app_tree,
+                         expected_identifier, expected_cdhash, "dmg-staging-post-create")
+
+
 def make_app_bundle(root: Path, app_binary: Path, helper_binary: Path, icon: Path, identity: dict[str, object], identity_bytes: bytes) -> tuple[Path, Path]:
     app = root / "LidSwitch.app"
     macos = app / "Contents" / "MacOS"
@@ -318,7 +388,8 @@ def attach_extract(dmg: Path, extraction: Path, app_name: str) -> None:
     except (ValueError, StopIteration, TypeError, KeyError) as error:
         raise AssemblyError("dmg-attach-output-invalid") from error
     try:
-        run([TOOLS["ditto"], str(mount / app_name), str(extraction / app_name)])
+        mounted_app = require_bundle_at_root(mount, app_name)
+        run([TOOLS["ditto"], str(mounted_app), str(extraction / app_name)])
     finally:
         run([TOOLS["hdiutil"], "detach", str(mount)])
 
@@ -395,8 +466,9 @@ def assemble(args: argparse.Namespace) -> dict[str, object]:
         validate_candidate.run(argparse.Namespace(candidate_root_fd=fds[0], envelope_receipt_fd=fds[1], envelope_receipt_sha256=envelope_sha, manifest="candidate-manifest.json"))
     finally:
         for fd in fds: os.close(fd)
+    dmg_source = stage_dmg_source(output, app, app_tree, expected_app_identifier, app_cdhash)
     dmg = candidate / "LidSwitch.dmg"
-    run([TOOLS["hdiutil"], "create", "-volname", "LidSwitch", "-srcfolder", str(app), "-format", "UDZO", "-ov", str(dmg)])
+    create_dmg(dmg_source, dmg, app_tree, expected_app_identifier, app_cdhash)
     dmg_sha = sha256_path(dmg)
     checksum = candidate / "LidSwitch.dmg.sha256"; write_private(checksum, (dmg_sha + "  LidSwitch.dmg\n").encode("ascii"))
     attach_extract(dmg, extraction, "LidSwitch.app")

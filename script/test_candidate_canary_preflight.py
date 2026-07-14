@@ -17,7 +17,13 @@ def canonical(value):
     return json.dumps(value, separators=(",", ":"), sort_keys=False).encode("utf-8") + b"\n"
 
 
-STATUS_KEYS = ("state", "reason", "session", "updated", "boot_id", "updated_monotonic", "projection_generation", "projection_token", "projection_authority")
+STATUS_KEYS = ("state", "reason", "session", "updated", "boot_id", "projection_authority", "projection_generation", "projection_token", "updated_monotonic")
+IOREG_OPEN_OUTPUT = (
+    "+-o IOPMrootDomain  <class IOPMrootDomain, id 0x100000285>\n"
+    "  | {\n"
+    '  |   "AppleClamshellState" = No\n'
+    "  | }\n"
+)
 
 
 def status(state, reason, session):
@@ -55,7 +61,7 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
         }
         self.binding.write_bytes(canonical(self.binding_value))
         self.version.write_text("5\n", encoding="utf-8")
-        self.status.write_text(status("terminal", "safe-idle", "none"), encoding="utf-8")
+        self.status.write_text(status("inactive", "legacy-migration", "none"), encoding="utf-8")
         self.commands = []
         self.original_validate = preflight.validate_manifest
         preflight.validate_manifest = lambda value: value
@@ -78,6 +84,14 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
             ("/usr/bin/pmset", "-g", "custom"): (0, "AC Power:\n sleep 0\nBattery Power:\n sleep 10\n"),
         }
         return values[argv]
+
+    def runner_with_ioreg(self, output, code=0):
+        def injected(argv):
+            if argv == preflight.IOREG_CLAMSHELL_COMMAND:
+                self.commands.append(argv)
+                return code, output
+            return self.runner(argv)
+        return injected
 
     def args(self):
         class Args:
@@ -158,7 +172,11 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
     def test_preflight_then_exact_session_final_receipts_use_only_injected_observations(self):
         value = preflight._observe_before(self.args(), self.runner)
         preflight._write_new(str(self.receipt), value)
-        self.assertEqual(value["human_observation"], {"lid_open": "human-asserted-open", "programmatic_proof": "unavailable"})
+        self.assertEqual(value["schema_version"], "lidswitch-candidate-canary-receipt-v2")
+        self.assertEqual(value["lid_observation"], {
+            "method": "human-assertion", "state": "open", "property": "lid",
+            "value": "open", "raw_sha256": "unavailable",
+        })
         self.assertEqual(value["before"]["sleep_disabled"], 0)
         self.status.write_text(status("active", "steady", "12345678-1234-1234-1234-123456789abc"), encoding="utf-8")
         active_runner = lambda argv: (0, " SleepDisabled 1\n") if argv == ("/usr/bin/pmset", "-g", "live") else self.runner(argv)
@@ -172,14 +190,74 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
         self.assertTrue(all(command[0] in {"/usr/bin/shasum", "/usr/bin/codesign", "/usr/sbin/sysctl", "/usr/bin/pgrep", "/usr/bin/pmset"} for command in self.commands))
         self.assertNotIn(("/usr/bin/pmset", "-a", "disablesleep", "0"), self.commands)
 
-    def test_preflight_requires_human_lid_assertion_and_binding_hash(self):
+    def test_preflight_rejects_unknown_lid_mode_and_binding_hash(self):
         bad = self.args(); bad.lid_open_observed = "yes"
-        with self.assertRaisesRegex(preflight.PreflightError, "lid-open-human-assertion-required"):
+        with self.assertRaisesRegex(preflight.PreflightError, "lid-open-observation-mode-invalid"):
             preflight._observe_before(bad, self.runner)
         self.binding_value["candidate_manifest_sha256"] = "f" * 64
         self.binding.write_bytes(canonical(self.binding_value))
         with self.assertRaisesRegex(preflight.PreflightError, "candidate-binding-mismatch"):
             preflight._binding(str(self.manifest), str(self.binding))
+
+    def test_preflight_accepts_programmatic_open_lid_and_binds_exact_observation(self):
+        args = self.args(); args.lid_open_observed = preflight.LID_OPEN_IOREG
+        value = preflight._observe_before(args, self.runner_with_ioreg(IOREG_OPEN_OUTPUT))
+        self.assertEqual(value["lid_observation"], {
+            "method": "ioreg-AppleClamshellState",
+            "state": "open",
+            "property": "AppleClamshellState",
+            "value": "No",
+            "raw_sha256": hashlib.sha256(IOREG_OPEN_OUTPUT.encode("utf-8")).hexdigest(),
+        })
+        self.assertIn(preflight.IOREG_CLAMSHELL_COMMAND, self.commands)
+        preflight._write_new(str(self.receipt), value)
+        loaded, _ = preflight._load_receipt(str(self.receipt), "preflight")
+        self.assertEqual(loaded["lid_observation"], value["lid_observation"])
+        forged = json.loads(json.dumps(value))
+        forged["lid_observation"]["value"] = "Yes"
+        forged_path = self.root / "forged-lid-observation.json"
+        preflight._write_new(str(forged_path), forged)
+        with self.assertRaisesRegex(preflight.PreflightError, "receipt-schema-invalid"):
+            preflight._load_receipt(str(forged_path), "preflight")
+
+    def test_programmatic_lid_parser_rejects_closed_malformed_and_ambiguous_evidence(self):
+        cases = (
+            ("closed", IOREG_OPEN_OUTPUT.replace(" = No", " = Yes"), "lid-closed"),
+            ("missing", "+-o IOPMrootDomain\n  | {\n  | }\n", "lid-state-observation-invalid"),
+            ("malformed", "AppleClamshellState = No\n", "lid-state-observation-invalid"),
+            ("ambiguous", IOREG_OPEN_OUTPUT + '  |   "AppleClamshellState" = Yes\n', "lid-state-observation-invalid"),
+        )
+        for label, output, error in cases:
+            with self.subTest(label=label):
+                args = self.args(); args.lid_open_observed = preflight.LID_OPEN_IOREG
+                with self.assertRaisesRegex(preflight.PreflightError, error):
+                    preflight._observe_before(args, self.runner_with_ioreg(output))
+
+    def test_preflight_accepts_only_exact_production_inactive_no_session_reasons(self):
+        for reason in ("legacy-migration", "legacy-migration-superseded"):
+            with self.subTest(accepted=reason):
+                self.status.write_text(status("inactive", reason, "none"), encoding="utf-8")
+                observed = preflight._observe_before(self.args(), self.runner)
+                self.assertEqual(observed["before"]["status_state"], "inactive")
+                self.assertEqual(observed["before"]["status_reason"], reason)
+        rejected = (
+            ("idle", "safe-idle", "none"),
+            ("inactive", "unknown", "none"),
+            ("inactive", "legacy-migration", "12345678-1234-1234-1234-123456789abc"),
+            ("terminal", "peer-process-invalid", "none"),
+        )
+        for state_name, reason, session in rejected:
+            with self.subTest(rejected=(state_name, reason, session)):
+                self.status.write_text(status(state_name, reason, session), encoding="utf-8")
+                with self.assertRaisesRegex(preflight.PreflightError, "active-lease-present"):
+                    preflight._observe_before(self.args(), self.runner)
+
+        self.status.write_text(status("inactive", "legacy-migration", "none"), encoding="utf-8")
+        forged = preflight._observe_before(self.args(), self.runner)
+        forged["before"]["status_reason"] = "unknown"
+        preflight._write_new(str(self.receipt), forged)
+        with self.assertRaisesRegex(preflight.PreflightError, "receipt-schema-invalid"):
+            preflight._load_receipt(str(self.receipt), "preflight")
 
     def test_preflight_rejects_stale_applied_state_and_has_no_mutating_command_source(self):
         pathlib.Path(self.args().applied_state).write_text("stale\n", encoding="utf-8")

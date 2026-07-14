@@ -4443,6 +4443,22 @@ final class SessionSafetyTests: XCTestCase {
         let uninstallRecovery = try XCTUnwrap(uninstall.range(of: "recovery_payload="))
         let uninstallDeletion = try XCTUnwrap(uninstall.range(of: "/bin/rm -f \"$plist\"", options: .backwards))
         XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallDeletion.lowerBound)
+        XCTAssertEqual(
+            AppPaths.legacyV4RootHelperVersionPath,
+            "/Library/Application Support/LidSwitch/helper-version"
+        )
+        let legacyArtifacts = [
+            AppPaths.legacyV4RootHelperPath,
+            AppPaths.legacyRootHelperPath,
+            AppPaths.legacyV4RootHelperVersionPath
+        ].map { "'\($0)'" }.joined(separator: " ")
+        let installLegacyCleanup = "/bin/rm -f \(legacyArtifacts)"
+        let uninstallLegacyCleanup = "/bin/rm -f \"$plist\" \(legacyArtifacts)"
+        let installLegacyMarkerDeletion = try XCTUnwrap(install.range(of: installLegacyCleanup))
+        let uninstallLegacyMarkerDeletion = try XCTUnwrap(uninstall.range(of: uninstallLegacyCleanup))
+        XCTAssertLessThan(bootstrap.lowerBound, installLegacyMarkerDeletion.lowerBound)
+        XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallLegacyMarkerDeletion.lowerBound)
+        XCTAssertFalse(restore.contains(AppPaths.legacyV4RootHelperVersionPath))
         XCTAssertTrue(uninstall.contains("recovery-proof" ) == false, "private proof is helper-owned, never shell-deleted")
         XCTAssertFalse(restore.contains("/bin/rm -rf \"$current\" \"$previous\""))
     }

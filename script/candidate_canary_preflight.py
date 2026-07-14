@@ -28,12 +28,19 @@ if ROOT not in sys.path:
 from immutable_candidate_core import CandidateError, canonical, parse, validate_manifest
 
 BINDING_SCHEMA = "lidswitch-candidate-canary-v1"
-RECEIPT_SCHEMA = "lidswitch-candidate-canary-receipt-v1"
+RECEIPT_SCHEMA = "lidswitch-candidate-canary-receipt-v2"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 CDHASH = re.compile(r"[0-9a-f]{40}\Z")
 SESSION = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
-SAFE_IDLE_STATES = {"idle", "terminal"}
+SAFE_INACTIVE_REASONS = frozenset(("legacy-migration", "legacy-migration-superseded"))
 PEER_DEATH_REASON = "peer-process-invalid"
+LID_OPEN_HUMAN = "human-confirmed"
+LID_OPEN_IOREG = "programmatic-ioreg"
+IOREG_CLAMSHELL_COMMAND = ("/usr/sbin/ioreg", "-r", "-k", "AppleClamshellState", "-d", "4")
+IOREG_CLAMSHELL_ROW = re.compile(
+    r'^[ \t]*\|[ \t]+"AppleClamshellState"[ \t]+=[ \t]+(Yes|No)[ \t]*$',
+    flags=re.MULTILINE,
+)
 
 
 class PreflightError(Exception):
@@ -160,7 +167,7 @@ def _status(path: str):
         if not re.fullmatch(r"[a-z_]{1,64}", key) or key in rows or not value or "\x00" in value:
             fail("public-status-invalid")
         rows[key] = value
-    required = ("state", "reason", "session", "updated", "boot_id", "updated_monotonic", "projection_generation", "projection_token", "projection_authority")
+    required = ("state", "reason", "session", "updated", "boot_id", "projection_authority", "projection_generation", "projection_token", "updated_monotonic")
     if tuple(rows) != required:
         fail("public-status-invalid")
     return rows, hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -189,6 +196,61 @@ def _custom_sleep(custom: str):
     if tuple(result) != ("AC Power", "Battery Power"):
         fail("pmset-custom-invalid")
     return result
+
+
+def _lid_open_observation(mode: str, runner=None):
+    if mode == LID_OPEN_HUMAN:
+        return {
+            "method": "human-assertion",
+            "state": "open",
+            "property": "lid",
+            "value": "open",
+            "raw_sha256": "unavailable",
+        }
+    if mode != LID_OPEN_IOREG:
+        fail("lid-open-observation-mode-invalid")
+    raw = _command(IOREG_CLAMSHELL_COMMAND, runner)
+    states = IOREG_CLAMSHELL_ROW.findall(raw)
+    if len(states) != 1:
+        fail("lid-state-observation-invalid")
+    if states[0] != "No":
+        fail("lid-closed")
+    return {
+        "method": "ioreg-AppleClamshellState",
+        "state": "open",
+        "property": "AppleClamshellState",
+        "value": "No",
+        "raw_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+    }
+
+
+def _validate_lid_observation(observation):
+    _keys(observation, ("method", "state", "property", "value", "raw_sha256"))
+    if observation == {
+        "method": "human-assertion",
+        "state": "open",
+        "property": "lid",
+        "value": "open",
+        "raw_sha256": "unavailable",
+    }:
+        return observation
+    if (
+        observation.get("method") != "ioreg-AppleClamshellState"
+        or observation.get("state") != "open"
+        or observation.get("property") != "AppleClamshellState"
+        or observation.get("value") != "No"
+    ):
+        fail("receipt-schema-invalid")
+    _hex(observation.get("raw_sha256"))
+    return observation
+
+
+def _safe_no_session_status(state, reason, session):
+    return (
+        state == "inactive"
+        and reason in SAFE_INACTIVE_REASONS
+        and session == "none"
+    )
 
 
 def _binding(manifest_path: str, binding_path: str):
@@ -280,8 +342,7 @@ def make_binding(args, runner=None):
 
 def _observe_before(args, runner=None):
     manifest, binding, binding_sha = _binding(args.candidate_manifest, args.canary_binding)
-    if args.lid_open_observed != "human-confirmed":
-        fail("lid-open-human-assertion-required")
+    lid_observation = _lid_open_observation(args.lid_open_observed, runner)
     _verify_installed(binding, args.app_bundle, args.helper, runner)
     if _command(("/usr/sbin/sysctl", "-n", "kern.osversion"), runner).strip() != binding["qualified_system_build"]:
         fail("system-build-mismatch")
@@ -296,7 +357,7 @@ def _observe_before(args, runner=None):
         fail("power-not-safe-idle")
     sleeps = _custom_sleep(custom)
     status, status_sha = _status(args.status_file)
-    if os.path.lexists(args.applied_state) or status["state"] not in SAFE_IDLE_STATES or status["session"] != "none":
+    if os.path.lexists(args.applied_state) or not _safe_no_session_status(status["state"], status["reason"], status["session"]):
         fail("active-lease-present")
     return {
         "schema_version": RECEIPT_SCHEMA,
@@ -305,8 +366,8 @@ def _observe_before(args, runner=None):
         "created_unix": int(time.time()),
         "candidate": {"candidate_id": manifest["candidate_id"], "manifest_sha256": hashlib.sha256(_read_regular(args.candidate_manifest)).hexdigest(), "binding_sha256": binding_sha},
         "installed": {"app_sha256": binding["app"]["executable_sha256"], "app_cdhash": binding["app"]["executable_cdhash"], "helper_sha256": binding["helper"]["sha256"], "helper_cdhash": binding["helper"]["cdhash"]},
-        "human_observation": {"lid_open": "human-asserted-open", "programmatic_proof": "unavailable"},
-        "before": {"power_source": "AC", "sleep_disabled": 0, "applied_state_present": False, "ac_sleep_minutes": sleeps["AC Power"], "battery_sleep_minutes": sleeps["Battery Power"], "pmset_batt_sha256": hashlib.sha256(batt.encode()).hexdigest(), "pmset_live_sha256": hashlib.sha256(live.encode()).hexdigest(), "pmset_custom_sha256": hashlib.sha256(custom.encode()).hexdigest(), "status_state": status["state"], "status_session": status["session"], "status_sha256": status_sha},
+        "lid_observation": lid_observation,
+        "before": {"power_source": "AC", "sleep_disabled": 0, "applied_state_present": False, "ac_sleep_minutes": sleeps["AC Power"], "battery_sleep_minutes": sleeps["Battery Power"], "pmset_batt_sha256": hashlib.sha256(batt.encode()).hexdigest(), "pmset_live_sha256": hashlib.sha256(live.encode()).hexdigest(), "pmset_custom_sha256": hashlib.sha256(custom.encode()).hexdigest(), "status_state": status["state"], "status_reason": status["reason"], "status_session": status["session"], "status_sha256": status_sha},
     }
 
 
@@ -315,7 +376,7 @@ def _load_receipt(path, phase):
     if receipt.get("schema_version") != RECEIPT_SCHEMA or receipt.get("phase") != phase:
         fail("receipt-phase-invalid")
     if phase == "preflight":
-        _keys(receipt, ("schema_version", "phase", "receipt_id", "created_unix", "candidate", "installed", "human_observation", "before"))
+        _keys(receipt, ("schema_version", "phase", "receipt_id", "created_unix", "candidate", "installed", "lid_observation", "before"))
         _text(receipt["receipt_id"], 64)
         if isinstance(receipt["created_unix"], bool) or not isinstance(receipt["created_unix"], int) or receipt["created_unix"] < 0:
             fail("receipt-schema-invalid")
@@ -323,10 +384,9 @@ def _load_receipt(path, phase):
         _hex(candidate["candidate_id"]); _hex(candidate["manifest_sha256"]); _hex(candidate["binding_sha256"])
         installed = _keys(receipt["installed"], ("app_sha256", "app_cdhash", "helper_sha256", "helper_cdhash"))
         _hex(installed["app_sha256"]); _cdhash(installed["app_cdhash"]); _hex(installed["helper_sha256"]); _cdhash(installed["helper_cdhash"])
-        if receipt["human_observation"] != {"lid_open": "human-asserted-open", "programmatic_proof": "unavailable"}:
-            fail("receipt-schema-invalid")
-        before = _keys(receipt["before"], ("power_source", "sleep_disabled", "applied_state_present", "ac_sleep_minutes", "battery_sleep_minutes", "pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_state", "status_session", "status_sha256"))
-        if before["power_source"] != "AC" or before["sleep_disabled"] != 0 or before["applied_state_present"] is not False or before["status_session"] != "none" or before["status_state"] not in SAFE_IDLE_STATES:
+        _validate_lid_observation(receipt["lid_observation"])
+        before = _keys(receipt["before"], ("power_source", "sleep_disabled", "applied_state_present", "ac_sleep_minutes", "battery_sleep_minutes", "pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_state", "status_reason", "status_session", "status_sha256"))
+        if before["power_source"] != "AC" or before["sleep_disabled"] != 0 or before["applied_state_present"] is not False or not _safe_no_session_status(before["status_state"], before["status_reason"], before["status_session"]):
             fail("receipt-schema-invalid")
         for name in ("pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_sha256"):
             _hex(before[name])

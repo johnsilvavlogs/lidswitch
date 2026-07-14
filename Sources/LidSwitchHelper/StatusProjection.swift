@@ -64,9 +64,13 @@ struct StatusProjectionTask: Equatable {
     var statusPayload: String {
         ["state=\(state)", "reason=\(reason)", "session=\(sessionID?.uuidString.lowercased() ?? "none")",
          "updated=\(issuedEpoch)", "boot_id=\(bootID)",
-         "updated_monotonic=\(String(format: "%.3f", Double(issuedMonotonicMillis) / 1_000))",
-         "projection_generation=\(generation)", "projection_token=\(token.uuidString.lowercased())",
-         "projection_authority=\(authoritySnapshot)", ""].joined(separator: "\n")
+         // Recovery accepts current projections through the same canonical
+         // historical parser used across helper restarts. Keep every evidence
+         // key in lexical order so the helper never rejects its own status as
+         // unsafe authority-root history after a spontaneous restart.
+         "projection_authority=\(authoritySnapshot)", "projection_generation=\(generation)",
+         "projection_token=\(token.uuidString.lowercased())",
+         "updated_monotonic=\(String(format: "%.3f", Double(issuedMonotonicMillis) / 1_000))", ""].joined(separator: "\n")
     }
 
     func retrying(now: UInt64) -> StatusProjectionTask? {
@@ -148,12 +152,21 @@ enum StatusProjectionDispatcher {
     typealias StoreFactory = (String) -> RecoveryAuthorityStore?
     typealias Writer = (StatusProjectionTask, HelperServiceConfiguration) -> HelperStatusStore.WriteOutcome
 
+    /// Fixture-only serial-queue barrier. Production never waits for public
+    /// status projection; tests use this to separate diagnostic scheduling
+    /// from authority timing assertions without sleeping or widening locks.
+    static func waitForIdleForTesting(timeout: TimeInterval = 2) -> Bool {
+        let completed = DispatchSemaphore(value: 0)
+        queue.async { completed.signal() }
+        return completed.wait(timeout: .now() + timeout) == .success
+    }
+
     static func enqueue(state: String, reason: String, sessionID: UUID?, store: RecoveryAuthorityStore,
                         transaction: VerifiedRootStateDirectory.Transaction, configuration: HelperServiceConfiguration,
                         storeFactory: @escaping StoreFactory = { RecoveryAuthorityStore(supportDirectory: $0) },
                         writer: @escaping Writer = { task, configuration in
                             HelperStatusStore.writeOutcome(task: task, path: configuration.statusPath)
-                        }) -> Bool {
+        }) -> Bool {
         guard store.enqueueStatusProjection(state: state, reason: reason, sessionID: sessionID, transaction) != nil else { return false }
         return transaction.afterUnlock { queue.async { drain(configuration: configuration, storeFactory: storeFactory, writer: writer) } }
     }

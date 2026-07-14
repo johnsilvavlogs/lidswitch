@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import plistlib
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -133,6 +134,80 @@ class ManualAdhocCandidateContractTests(unittest.TestCase):
              mock.patch.object(manual, "sha256_path", side_effect=AssertionError("directory hashing is forbidden")):
             self.assertEqual(manual.sign_outer_app(app, "com.johnsilva.LidSwitch"), "d" * 40)
         inspect.assert_called_once_with(app, "com.johnsilva.LidSwitch")
+
+    def test_dmg_staging_passes_parent_source_and_requires_bundle_at_mount_root(self):
+        with tempfile.TemporaryDirectory(dir=str(pathlib.Path.home())) as raw:
+            root = pathlib.Path(raw)
+            candidate = root / "candidate"
+            app = candidate / "LidSwitch.app"
+            binary = app / "Contents" / "MacOS" / "LidSwitch"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"app-bytes")
+            os.chmod(binary, 0o755)
+            output = root / "output"
+            output.mkdir(mode=0o700)
+            candidate_fd = manual.open_fd(candidate, True)
+            try:
+                _, app_tree = manual.core.capture_tree(candidate_fd, "LidSwitch.app")
+            finally:
+                os.close(candidate_fd)
+            commands = []
+
+            def fake_run(argv, **_kwargs):
+                commands.append(argv)
+                if argv[0] == manual.TOOLS["ditto"]:
+                    shutil.copytree(argv[1], argv[2], copy_function=shutil.copy2)
+                return ""
+
+            signature = {"identifier": "com.johnsilva.LidSwitch", "cdhash": "d" * 40}
+            with mock.patch.object(manual, "run", side_effect=fake_run), \
+                 mock.patch.object(manual, "signature_identity", return_value=signature):
+                dmg_source = manual.stage_dmg_source(
+                    output, app, app_tree, signature["identifier"], signature["cdhash"])
+                dmg = root / "LidSwitch.dmg"
+                staged_binary = dmg_source / "LidSwitch.app" / "Contents" / "MacOS" / "LidSwitch"
+                staged_binary.write_bytes(b"substituted")
+                with self.assertRaisesRegex(manual.AssemblyError, "dmg-staging-tree-mismatch"):
+                    manual.create_dmg(
+                        dmg_source, dmg, app_tree, signature["identifier"], signature["cdhash"])
+                self.assertFalse(any(command[0] == manual.TOOLS["hdiutil"] for command in commands))
+                staged_binary.write_bytes(b"app-bytes")
+                os.chmod(staged_binary, 0o755)
+                manual.create_dmg(
+                    dmg_source, dmg, app_tree, signature["identifier"], signature["cdhash"])
+
+            staged_app = dmg_source / "LidSwitch.app"
+            self.assertTrue(staged_app.is_dir())
+            self.assertFalse((dmg_source / "Contents").exists())
+            self.assertEqual(commands[0], [manual.TOOLS["ditto"], str(app), str(staged_app)])
+            self.assertEqual(commands[1], [
+                manual.TOOLS["hdiutil"], "create", "-volname", "LidSwitch",
+                "-srcfolder", str(dmg_source), "-format", "UDZO", "-ov", str(dmg),
+            ])
+
+            mounted = root / "mounted"
+            shutil.copytree(dmg_source, mounted)
+            self.assertEqual(manual.require_bundle_at_root(mounted, "LidSwitch.app"),
+                             mounted / "LidSwitch.app")
+            shutil.rmtree(mounted / "LidSwitch.app")
+            (mounted / "Contents").mkdir()
+            with self.assertRaisesRegex(manual.AssemblyError, "dmg-layout-bare-contents"):
+                manual.require_bundle_at_root(mounted, "LidSwitch.app")
+            attached = plistlib.dumps({"system-entities": [{"mount-point": str(mounted)}]}).decode("utf-8")
+            attach_commands = []
+
+            def fake_attach(argv, **_kwargs):
+                attach_commands.append(argv)
+                return attached if argv[1] == "attach" else ""
+
+            extraction = root / "extraction"
+            extraction.mkdir()
+            with mock.patch.object(manual, "run", side_effect=fake_attach):
+                with self.assertRaisesRegex(manual.AssemblyError, "dmg-layout-bare-contents"):
+                    manual.attach_extract(dmg, extraction, "LidSwitch.app")
+            self.assertFalse(any(command[0] == manual.TOOLS["ditto"] for command in attach_commands))
+            self.assertEqual(attach_commands[-1],
+                             [manual.TOOLS["hdiutil"], "detach", str(mounted)])
 
     def test_assembler_requires_and_declares_the_bundle_icon(self):
         text = (ROOT / "assemble_manual_adhoc_candidate.py").read_text(encoding="utf-8")

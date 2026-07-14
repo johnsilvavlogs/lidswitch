@@ -134,6 +134,12 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         }
         XCTAssertEqual(authority.handle(connection: 1, peer: peer,
                                         operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID: session).state, 1)
+        // A real helper restart ends the old process and therefore its
+        // asynchronous projection worker. Drain that worker before creating
+        // the in-process restart stand-in so the fixture preserves the same
+        // process-lifetime boundary instead of manufacturing root-lock
+        // contention between two helper generations.
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
 
         // Hydration accepts only the already-spent fence. It binds the same
         // durable authority while native state is intact, then a second drift
@@ -150,16 +156,147 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             timerStarter: { _ in NSObject() },
             recoveryCoordinatorFactory: { fixture.coordinator }
         )
-        XCTAssertEqual(restarted.prepareBeforeListening(), .ready)
+        let preparation = restarted.prepareBeforeListening()
+        XCTAssertEqual(
+            preparation,
+            .ready,
+            "assessment=\(String(describing: restarted.lastPreparationAssessmentForTesting)) stage=\(restarted.lastPreparationStageForTesting)"
+        )
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
         XCTAssertEqual(restarted.handle(connection: 2, peer: peer,
                                         operation: UInt32(LS_OPERATION_RECONNECT.rawValue), sessionID: session).result, 0)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
         fixture.power.setCalls.removeAll()
         fixture.power.disabled = false
-        restarted.reconcileForTesting()
-        XCTAssertEqual(fixture.power.setCalls, ["ac=10"])
-        XCTAssertEqual(restarted.handle(connection: 2, peer: peer,
-                                        operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID: session).state, 2)
+        for _ in 0..<3 {
+            restarted.reconcileForTesting()
+            if !fixture.power.setCalls.isEmpty { break }
+            guard let retryAt = restarted.rollbackNextAttemptForTesting else { break }
+            clock.set(Int(retryAt.rounded(.up)))
+        }
+        let terminal = restarted.handle(connection: 2, peer: peer,
+                                        operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID: session)
+        let diagnostic = "reason=\(terminal.reason) state=\(terminal.state) attempts=\(restarted.rollbackAttemptCountForTesting) next=\(String(describing: restarted.rollbackNextAttemptForTesting)) assessment=\(String(describing: restarted.lastRollbackAssessmentForTesting)) terminal=\(String(describing: fixture.store.privateLedger(RecoveryAuthorityStore.terminalBasename))) containment=\(fixture.store.containmentReceiptRecord()) proof=\(fixture.store.proofRecord()) applied=\(fixture.store.appliedRecord())"
+        XCTAssertEqual(fixture.power.setCalls, ["ac=10"], diagnostic)
+        XCTAssertEqual(terminal.state, 2, diagnostic)
         XCTAssertEqual(fixture.store.recoveryBudgetRecord(), .absent)
+    }
+
+    func testTransientPreTransactionLockContentionRevalidatesWithoutSpendingMutationRetry() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let clock = IntegerBox()
+        clock.set(100)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            monotonicNow: { TimeInterval(clock.value) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        let session = UUID()
+        XCTAssertEqual(authority.handle(connection: 1, peer: peer,
+                                        operation: UInt32(LS_OPERATION_BEGIN.rawValue), sessionID: session).result, 0)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        fixture.power.setCalls.removeAll()
+        try fixture.activateStore(lockTimeout: 0)
+
+        let lockPath = fixture.sandbox.url.appendingPathComponent(RootStateLock.authorizationBasename).path
+        var heldLock = open(lockPath, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(heldLock, 0)
+        defer {
+            if heldLock >= 0 {
+                _ = flock(heldLock, LOCK_UN)
+                close(heldLock)
+            }
+        }
+        XCTAssertEqual(flock(heldLock, LOCK_EX | LOCK_NB), 0)
+
+        authority.reconcileForTesting()
+        XCTAssertEqual(authority.rollbackAttemptCountForTesting, 1)
+        XCTAssertEqual(authority.tickStoreAttemptCountForTesting, 1)
+        XCTAssertEqual(authority.rollbackNextAttemptForTesting, 102)
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        XCTAssertEqual(flock(heldLock, LOCK_UN), 0)
+        close(heldLock)
+        heldLock = -1
+        clock.set(102)
+        authority.reconcileForTesting()
+
+        XCTAssertEqual(authority.rollbackAttemptCountForTesting, 0)
+        XCTAssertEqual(authority.tickStoreAttemptCountForTesting, 2)
+        XCTAssertEqual(fixture.power.setCalls, [])
+        XCTAssertEqual(fixture.store.recoveryBudgetRecord(), .absent)
+        let snapshot = authority.handle(connection: 1, peer: peer,
+                                        operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID: session)
+        XCTAssertEqual(snapshot.result, 0)
+        XCTAssertEqual(snapshot.state, 1)
+        XCTAssertTrue(snapshot.sleepDisabled)
+        XCTAssertEqual(snapshot.acSleepMinutes, 0)
+    }
+
+    func testMutationUncertaintyAbsorbsAnEarlierPreTransactionRetry() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let clock = IntegerBox()
+        clock.set(100)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            monotonicNow: { TimeInterval(clock.value) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        let session = UUID()
+        XCTAssertEqual(authority.handle(connection: 1, peer: peer,
+                                        operation: UInt32(LS_OPERATION_BEGIN.rawValue), sessionID: session).result, 0)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        fixture.power.setCalls.removeAll()
+        try fixture.activateStore(lockTimeout: 0)
+
+        let lockPath = fixture.sandbox.url.appendingPathComponent(RootStateLock.authorizationBasename).path
+        let heldLock = open(lockPath, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(heldLock, 0)
+        defer { close(heldLock) }
+        XCTAssertEqual(flock(heldLock, LOCK_EX | LOCK_NB), 0)
+        authority.reconcileForTesting()
+        XCTAssertEqual(authority.rollbackAttemptCountForTesting, 1)
+        XCTAssertEqual(flock(heldLock, LOCK_UN), 0)
+
+        // A due snapshot may re-enter while only a no-mutation retry is latched.
+        // It discovers unsafe native state; its first restore
+        // setter then fails before a postcondition can prove whether mutation
+        // happened. That stronger classification must permanently absorb the
+        // earlier pre-transaction lock miss.
+        clock.set(102)
+        fixture.power.source = .battery
+        fixture.power.throwBeforeSleepMutation = true
+        XCTAssertEqual(authority.handle(connection: 1, peer: peer,
+                                        operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID: session).result, 75)
+        XCTAssertEqual(authority.rollbackAttemptCountForTesting, 2)
+        XCTAssertEqual(authority.rollbackNextAttemptForTesting, 106)
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0"])
+
+        clock.set(106)
+        XCTAssertEqual(authority.handle(connection: 1, peer: peer,
+                                        operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID: session).result, 75)
+        XCTAssertEqual(authority.rollbackAttemptCountForTesting, 3)
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0"],
+                       "a snapshot must never re-enter an unproved setter")
+        authority.reconcileForTesting()
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0"],
+                       "a tick must preserve the same no-second-setter fence")
     }
 
     func testProjectionGenerationWatermarkSurvivesTaskRemoval() throws {
@@ -1487,6 +1624,7 @@ private final class RecoveryFixturePower: HelperPowerSystem {
     var onNextBatteryRead: (() -> Void)?
     var skipNextACRead = false
     var skipNextBatteryRead = false
+    var throwBeforeSleepMutation = false
     var throwAfterSleepMutation = false
 
     func powerSource() -> HelperPowerSource { source }
@@ -1513,6 +1651,10 @@ private final class RecoveryFixturePower: HelperPowerSystem {
     }
     func setSleepDisabled(_ enabled: Bool) throws {
         setCalls.append("sleep=\(enabled ? 1 : 0)")
+        if throwBeforeSleepMutation {
+            throwBeforeSleepMutation = false
+            throw NSError(domain: "RecoveryFixturePower", code: 2)
+        }
         disabled = enabled
         if throwAfterSleepMutation {
             throwAfterSleepMutation = false
@@ -1725,6 +1867,22 @@ private final class Fixture {
             stageGate: stageGate,
             recoveryGate: recoveryGate
         )
+    }
+
+    func waitForStatusProjectionDrain(timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            if StatusProjectionDispatcher.waitForIdleForTesting(timeout: remaining),
+               store.statusProjectionTaskRecord() == .absent,
+               store.withTransaction({ _ in true }) == true,
+               StatusProjectionDispatcher.waitForIdleForTesting(timeout: max(0, deadline.timeIntervalSinceNow)),
+               store.statusProjectionTaskRecord() == .absent {
+                return true
+            }
+            usleep(1_000)
+        } while Date() < deadline
+        return false
     }
 
     func dispose() { try? FileManager.default.removeItem(at: sandbox.url) }

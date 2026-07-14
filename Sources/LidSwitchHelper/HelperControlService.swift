@@ -85,9 +85,9 @@ final class HelperSessionAuthority: @unchecked Sendable {
     // Longer than the app's eight-second renewal cadence plus scheduling
     // slack, but always clipped to the original thirty-second lease.
     private static let reconnectGrace: TimeInterval = 12
-    /// Rollback accounting is bounded; after its initial failed restore every
-    /// tick is observation-only. The retained schedule is diagnostic only and
-    /// never authorizes a second setter without a fresh administrator intent.
+    /// Rollback accounting is bounded. A failure proven to precede the durable
+    /// terminal/setter boundary may revalidate and retry; once a setter result
+    /// is uncertain, every later tick and request is observation-only.
     private static let rollbackAttemptLimit = 6
     private static let rollbackMaximumBackoff: TimeInterval = 60
     private struct Peer: Equatable, Sendable {
@@ -148,12 +148,22 @@ final class HelperSessionAuthority: @unchecked Sendable {
     private var consecutiveUnknownPowerReads = 0
     private var lastTerminalSession: UUID?
     private var lastTerminalReason = "idle"
+    private enum RollbackRetryKind {
+        case noPowerMutationAttempted
+        case mutationUncertain
+    }
     private struct RollbackRetry {
+        let kind: RollbackRetryKind
         let reason: String
         let attempts: Int
         let nextAttempt: TimeInterval
     }
     private var rollbackRetry: RollbackRetry?
+#if DEBUG
+    private var lastRollbackAssessment: RecoveryAssessment?
+    private var lastPreparationAssessment: RecoveryAssessment?
+    private var lastPreparationStage = "not-started"
+#endif
     private var tickStoreAttempts = 0
     private enum NativePowerObservation { case intact, confirmedDrift, indeterminate }
     private enum StartupBinding {
@@ -204,13 +214,35 @@ final class HelperSessionAuthority: @unchecked Sendable {
     }
 
     func prepareBeforeListening() -> HelperDaemonPreparation {
-        guard CompatibilityPolicy.isQualified(systemBuild: configuration.qualifiedBuild) else { return .transientFailure }
+        guard CompatibilityPolicy.isQualified(systemBuild: configuration.qualifiedBuild) else {
+#if DEBUG
+            lastPreparationStage = "compatibility-rejected"
+#endif
+            return .transientFailure
+        }
+        // Startup may require a second transaction to bind a reconnectable
+        // authority. Wake the projection-only worker after the complete
+        // preparation boundary so it cannot take the shared root lock between
+        // recovery and that binding transaction.
+        defer {
+            StatusProjectionDispatcher.hydrate(
+                configuration: configuration,
+                storeFactory: recoveryStoreFactory,
+                writer: statusProjectionWriter
+            )
+        }
         let coordinator = recoveryCoordinatorFactory()
-        switch coordinator.recover(
+        let preparationAssessment = coordinator.recover(
             intent: .startup,
             allowReconnect: true,
-            terminalReason: "helper-restart"
-        ) {
+            terminalReason: "helper-restart",
+            hydrateStatusProjection: false
+        )
+#if DEBUG
+        lastPreparationAssessment = preparationAssessment
+        lastPreparationStage = "assessment"
+#endif
+        switch preparationAssessment {
         case .pristineIdle:
             return startTimerOnly() ? .ready : .transientFailure
         case .migratedIdle:
@@ -223,8 +255,13 @@ final class HelperSessionAuthority: @unchecked Sendable {
             // owned power plus terminal/reservation non-membership. Listener
             // startup re-reads both ledgers, then proves the exact live peer
             // tuple and unexpired same-boot owner before exposing RECONNECT.
-            guard let store = recoveryStoreFactory(configuration.supportDirectory),
-                  let binding = store.withTransaction({ transaction -> StartupBinding in
+            guard let store = recoveryStoreFactory(configuration.supportDirectory) else {
+#if DEBUG
+                lastPreparationStage = "binding-store-unavailable"
+#endif
+                return .transientFailure
+            }
+            guard let binding = store.withTransaction({ transaction -> StartupBinding in
                       let spentBudget = store.recoveryBudgetRecord() == .valid(
                         RecoveryBudgetState(sessionID: state.sessionID, phase: .spent)
                       )
@@ -261,7 +298,12 @@ final class HelperSessionAuthority: @unchecked Sendable {
                       case let .recoveryRequired(reason):
                           return .recoveryRequired(reason)
                       }
-                  }) else { return .transientFailure }
+                  }) else {
+#if DEBUG
+                lastPreparationStage = "binding-lock-unavailable"
+#endif
+                return .transientFailure
+            }
             switch binding {
             case let .bind(peer, deadline, spentBudget):
                 activeSession = state.sessionID; activePeer = peer; activeConnection = nil; expiry = deadline
@@ -684,14 +726,22 @@ final class HelperSessionAuthority: @unchecked Sendable {
         }
         tickStoreAttempts += 1
         guard let store = recoveryStoreFactory(configuration.supportDirectory) else {
-            registerRollbackFailure(reason: rollbackRetry?.reason ?? "authority-unavailable", publishStatus: false)
+            registerRollbackFailure(
+                reason: rollbackRetry?.reason ?? "authority-unavailable",
+                kind: .noPowerMutationAttempted,
+                publishStatus: false
+            )
             return
         }
         guard store.withTransaction({ transaction in
             self.tickLocked(session: session, store: store, transaction: transaction)
             return true
         }) == true else {
-            registerRollbackFailure(reason: rollbackRetry?.reason ?? "authority-unavailable", publishStatus: false)
+            registerRollbackFailure(
+                reason: rollbackRetry?.reason ?? "authority-unavailable",
+                kind: .noPowerMutationAttempted,
+                publishStatus: false
+            )
             return
         }
     }
@@ -701,12 +751,25 @@ final class HelperSessionAuthority: @unchecked Sendable {
         store: RecoveryAuthorityStore,
         transaction: VerifiedRootStateDirectory.Transaction
     ) {
+        let revalidatingNoMutationRetry: Bool
         if let retry = rollbackRetry {
-            // Preserve bounded retry accounting/status cadence without
-            // re-entering RecoveryCoordinator: its terminal path could issue
-            // a second pmset command after an unproved first command.
-            registerRollbackFailure(reason: retry.reason, publishStatus: false)
-            return
+            switch retry.kind {
+            case .noPowerMutationAttempted:
+                // The exact terminal ledger proves no power mutation was
+                // attempted before this retry. Retain that capability until the
+                // authority and native state are both revalidated: a prior
+                // pre-terminal failure may have published recovery-required
+                // proof that only RecoveryCoordinator may consume on retry.
+                revalidatingNoMutationRetry = true
+            case .mutationUncertain:
+                // Preserve bounded retry accounting/status cadence without
+                // re-entering RecoveryCoordinator: its terminal path could
+                // issue a second pmset command after an unproved first command.
+                registerRollbackFailure(reason: retry.reason, kind: retry.kind, publishStatus: false)
+                return
+            }
+        } else {
+            revalidatingNoMutationRetry = false
         }
         guard let activePeer else {
             _ = restoreActive(reason: "peer-process-invalid", store: store, transaction: transaction)
@@ -742,7 +805,8 @@ final class HelperSessionAuthority: @unchecked Sendable {
         // exact owned power. It never spends the recovery budget or rearms.
         if activeConnection == nil {
             switch nativePowerObservation() {
-            case .intact: break
+            case .intact:
+                if revalidatingNoMutationRetry { clearNoMutationRetryAfterExactRevalidation() }
             case .confirmedDrift:
                 _ = restoreActive(reason: "reconnect-power-drift", store: store, transaction: transaction)
                 return
@@ -753,22 +817,34 @@ final class HelperSessionAuthority: @unchecked Sendable {
         }
         switch nativePowerObservation() {
         case .intact:
+            if revalidatingNoMutationRetry { clearNoMutationRetryAfterExactRevalidation() }
             return
         case .confirmedDrift:
             // This is the one connected production tick that may spend the
             // owned one-time repair budget. The helper re-reads all native
             // values and exact private authority inside
             // `verifyOrRecoverOwnedState`; every other drift is terminal.
-            guard !verifyOrRecoverOwnedState(
+            if verifyOrRecoverOwnedState(
                 sessionID: session,
                 peer: activePeer,
                 store: store,
                 transaction: transaction
-            ) else { return }
+            ) {
+                if revalidatingNoMutationRetry { clearNoMutationRetryAfterExactRevalidation() }
+                return
+            }
             _ = restoreActive(reason: "drift", store: store, transaction: transaction)
         case .indeterminate:
             return
         }
+    }
+
+    private func clearNoMutationRetryAfterExactRevalidation() {
+        guard let retry = rollbackRetry,
+              case .noPowerMutationAttempted = retry.kind
+        else { return }
+        rollbackRetry = nil
+        recoveryRequired = false
     }
 
     private func ownedStateIsIntact() -> Bool {
@@ -954,6 +1030,16 @@ final class HelperSessionAuthority: @unchecked Sendable {
             guard priorRetry.attempts < Self.rollbackAttemptLimit, monotonicNow() >= priorRetry.nextAttempt else {
                 return snapshot(result: 75, reason: "rollback-pending", requested: session)
             }
+            if case .mutationUncertain = priorRetry.kind {
+                // Snapshot and RESTORE share this path. Neither may bypass the
+                // no-second-setter fence after an indeterminate mutation.
+                registerRollbackFailure(
+                    reason: priorRetry.reason,
+                    kind: .mutationUncertain,
+                    publishStatus: false
+                )
+                return snapshot(result: 75, reason: "rollback-unverified", requested: session)
+            }
         }
         let outcome = recoveryCoordinatorFactory().recoverWithinTransaction(
             store: store,
@@ -963,8 +1049,22 @@ final class HelperSessionAuthority: @unchecked Sendable {
             terminalReason: reason,
             permitRecoveryRequiredRetry: priorRetry != nil
         )
+#if DEBUG
+        lastRollbackAssessment = outcome
+#endif
         guard case let .terminalIdle(terminalSession, terminalReason) = outcome, terminalSession == session else {
-            registerRollbackFailure(reason: reason, publishStatus: true)
+            // RecoveryCoordinator records this exact session in the private
+            // terminal ledger before its first power setter. A valid ledger
+            // that still excludes the session therefore proves retry safety;
+            // an unreadable ledger or current terminal receipt cannot.
+            let retryKind: RollbackRetryKind
+            if let terminalEntries = store.privateLedger(RecoveryAuthorityStore.terminalBasename),
+               !terminalEntries.contains(session) {
+                retryKind = .noPowerMutationAttempted
+            } else {
+                retryKind = .mutationUncertain
+            }
+            registerRollbackFailure(reason: reason, kind: retryKind, publishStatus: true)
             return snapshot(result: 75, reason: "rollback-unverified", requested: session)
         }
         activeSession = nil; activeConnection = nil; activePeer = nil; reconnectDeadline = nil; expiry = 0
@@ -975,10 +1075,18 @@ final class HelperSessionAuthority: @unchecked Sendable {
 
     private func registerAuthorityUnavailableIfActive() {
         guard activeSession != nil else { return }
-        registerRollbackFailure(reason: rollbackRetry?.reason ?? "authority-unavailable", publishStatus: false)
+        registerRollbackFailure(
+            reason: rollbackRetry?.reason ?? "authority-unavailable",
+            kind: .noPowerMutationAttempted,
+            publishStatus: false
+        )
     }
 
-    private func registerRollbackFailure(reason: String, publishStatus: Bool) {
+    private func registerRollbackFailure(
+        reason: String,
+        kind: RollbackRetryKind,
+        publishStatus: Bool
+    ) {
         recoveryRequired = true
         if let retry = rollbackRetry,
            retry.attempts >= Self.rollbackAttemptLimit || monotonicNow() < retry.nextAttempt {
@@ -986,7 +1094,23 @@ final class HelperSessionAuthority: @unchecked Sendable {
         }
         let attempt = min((rollbackRetry?.attempts ?? 0) + 1, Self.rollbackAttemptLimit)
         let delay = min(TimeInterval(1 << attempt), Self.rollbackMaximumBackoff)
-        rollbackRetry = .init(reason: reason, attempts: attempt, nextAttempt: monotonicNow() + delay)
+        let effectiveKind: RollbackRetryKind
+        switch (rollbackRetry?.kind, kind) {
+        case (.some(.mutationUncertain), _), (_, .mutationUncertain):
+            // Once any setter result is unproved, no earlier transient lock
+            // classification may make the retry safe to re-enter. Mutation
+            // uncertainty is an absorbing no-second-setter fence.
+            effectiveKind = .mutationUncertain
+        case (.some(.noPowerMutationAttempted), .noPowerMutationAttempted),
+             (.none, .noPowerMutationAttempted):
+            effectiveKind = .noPowerMutationAttempted
+        }
+        rollbackRetry = .init(
+            kind: effectiveKind,
+            reason: reason,
+            attempts: attempt,
+            nextAttempt: monotonicNow() + delay
+        )
         if publishStatus, let session = activeSession {
             projectStatus(state: "recovery-required", reason: "\(reason)-rollback-unverified", sessionID: session)
         }
@@ -1126,6 +1250,14 @@ final class HelperSessionAuthority: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return rollbackRetry?.nextAttempt
     }
+#if DEBUG
+    var lastRollbackAssessmentForTesting: RecoveryAssessment? {
+        lock.lock(); defer { lock.unlock() }
+        return lastRollbackAssessment
+    }
+    var lastPreparationAssessmentForTesting: RecoveryAssessment? { lastPreparationAssessment }
+    var lastPreparationStageForTesting: String { lastPreparationStage }
+#endif
 }
 
 struct AuthorityReply {

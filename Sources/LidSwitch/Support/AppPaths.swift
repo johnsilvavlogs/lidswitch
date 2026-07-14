@@ -44,6 +44,7 @@ enum AppPaths {
     static let rootHelperPath = ReleaseIdentity.rootHelperPath
     static let legacyV4RootHelperPath = "/Library/Application Support/LidSwitch/LidSwitchHelper"
     static let legacyRootHelperPath = "/Library/Application Support/LidSwitch/lidswitch-helper"
+    static let legacyV4RootHelperVersionPath = "/Library/Application Support/LidSwitch/helper-version"
     static let rootHelperVersionPath = "/Library/Application Support/LidSwitch/Current/helper-version"
     static let rootEnrollmentPolicyPath = ReleaseIdentity.rootEnrollmentPolicyPath
     static let rootOriginalACSleepPath = "/Library/Application Support/LidSwitch/original-ac-sleep"

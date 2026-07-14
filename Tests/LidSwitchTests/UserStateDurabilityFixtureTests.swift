@@ -78,6 +78,170 @@ final class UserStateDurabilityFixtureTests: XCTestCase {
         ))
     }
 
+    func testDesiredStateMigrationResidueDoesNotBlockExactLeaseRecovery() throws {
+        let root = try TestSandbox.makeDirectory(label: "cross-record-migration-residue").url
+        let desiredState = root.appendingPathComponent("desired-state")
+        let activationLease = root.appendingPathComponent("activation-lease")
+        let policy = try fixturePolicy(root)
+        let preferences = PowerPreferences(keepAwakeEnabled: false, allowBatteryKeepAwake: false)
+
+        try writeFixture(preferences.storagePayload, to: desiredState, mode: 0o644)
+        try DesiredStateStore.write(
+            preferences,
+            supportDirectory: root,
+            stateFile: desiredState,
+            ancestryPolicy: policy
+        )
+        let priorNames = try FileManager.default.contentsOfDirectory(atPath: root.path)
+            .filter { $0.hasPrefix(".lidswitch-prior-desired-state--") }
+        XCTAssertEqual(priorNames.count, 1)
+        let priorName = try XCTUnwrap(priorNames.first)
+        let prior = root.appendingPathComponent(priorName)
+        var priorStatus = stat()
+        XCTAssertEqual(lstat(prior.path, &priorStatus), 0)
+        let currentIdentity = "\(priorStatus.st_dev)-\(priorStatus.st_ino)"
+        let currentPrefix = ".lidswitch-prior-desired-state--\(currentIdentity)"
+        XCTAssertTrue(priorName.hasPrefix(currentPrefix))
+        let rebootedName = ".lidswitch-prior-desired-state--\(priorStatus.st_dev + 1)-\(priorStatus.st_ino)"
+            + String(priorName.dropFirst(currentPrefix.count))
+        XCTAssertEqual(rename(prior.path, root.appendingPathComponent(rebootedName).path), 0)
+        XCTAssertEqual(
+            DesiredStateStore.readPreferences(from: desiredState, capabilityPolicy: policy),
+            .value(preferences)
+        )
+        guard case .missing = ActivationLeaseStore.read(
+            from: activationLease,
+            capabilityPolicy: policy
+        ) else {
+            return XCTFail("reboot-stale evidence for the other record must not become lease residue")
+        }
+
+        let lease = fixtureLease()
+        try writeFixture(lease.storagePayload, to: activationLease, mode: 0o600)
+        try ActivationLeaseStore.reconcileRecognizedLegacyLease(
+            file: activationLease,
+            ancestryPolicy: policy
+        )
+        guard case .missingWithRecognizedLegacyArchive = ActivationLeaseStore.read(
+            from: activationLease,
+            capabilityPolicy: policy
+        ) else {
+            return XCTFail("valid residue for another canonical record must not block exact lease recovery")
+        }
+        XCTAssertEqual(
+            DesiredStateStore.readPreferences(from: desiredState, capabilityPolicy: policy),
+            .value(preferences)
+        )
+    }
+
+    func testSameRecordTemporaryResidueAndUnknownTargetRemainFailClosed() throws {
+        let sameRecordRoot = try TestSandbox.makeDirectory(label: "same-record-temp-residue").url
+        let sameRecordLease = sameRecordRoot.appendingPathComponent("activation-lease")
+        let sameRecordPolicy = try fixturePolicy(sameRecordRoot)
+        let lease = fixtureLease()
+        try writeFixture(lease.storagePayload, to: sameRecordLease, mode: 0o600)
+        let originalLease = try Data(contentsOf: sameRecordLease)
+
+        let rejectedSeed = sameRecordRoot.appendingPathComponent("rejected-seed")
+        try writeFixture("rejected", to: rejectedSeed, mode: 0o600)
+        var rejectedStatus = stat()
+        XCTAssertEqual(lstat(rejectedSeed.path, &rejectedStatus), 0)
+        let rejectedName = ".lidswitch-rejected-.activation-lease.\(UUID().uuidString.lowercased())"
+            + "--\(rejectedStatus.st_dev)-\(rejectedStatus.st_ino)-\(UUID().uuidString.lowercased())"
+        XCTAssertEqual(rename(rejectedSeed.path, sameRecordRoot.appendingPathComponent(rejectedName).path), 0)
+        XCTAssertEqual(
+            ActivationLeaseStore.read(from: sameRecordLease, capabilityPolicy: sameRecordPolicy),
+            .retainedResidue(sameRecordRoot.path)
+        )
+        XCTAssertThrowsError(try ActivationLeaseStore.reconcileRecognizedLegacyLease(
+            file: sameRecordLease, ancestryPolicy: sameRecordPolicy
+        ))
+        XCTAssertEqual(try Data(contentsOf: sameRecordLease), originalLease)
+
+        let unknownRoot = try TestSandbox.makeDirectory(label: "unknown-record-residue").url
+        let desiredState = unknownRoot.appendingPathComponent("desired-state")
+        let activationLease = unknownRoot.appendingPathComponent("activation-lease")
+        let unknownPolicy = try fixturePolicy(unknownRoot)
+        try DesiredStateStore.write(
+            .disabled,
+            supportDirectory: unknownRoot,
+            stateFile: desiredState,
+            ancestryPolicy: unknownPolicy
+        )
+        let unknownSeed = unknownRoot.appendingPathComponent("unknown-seed")
+        try writeFixture("unknown", to: unknownSeed, mode: 0o600)
+        var unknownStatus = stat()
+        XCTAssertEqual(lstat(unknownSeed.path, &unknownStatus), 0)
+        let unknownName = ".lidswitch-prior-unclassified--\(unknownStatus.st_dev)-\(unknownStatus.st_ino)"
+            + "-\(UUID().uuidString.lowercased())"
+        XCTAssertEqual(rename(unknownSeed.path, unknownRoot.appendingPathComponent(unknownName).path), 0)
+        XCTAssertEqual(
+            DesiredStateStore.readPreferences(from: desiredState, capabilityPolicy: unknownPolicy),
+            .retainedResidue(unknownRoot.path)
+        )
+        XCTAssertEqual(
+            ActivationLeaseStore.read(from: activationLease, capabilityPolicy: unknownPolicy),
+            .retainedResidue(unknownRoot.path)
+        )
+
+        let malformedRoot = try TestSandbox.makeDirectory(label: "extra-marker-residue").url
+        let malformedLease = malformedRoot.appendingPathComponent("activation-lease")
+        let malformedPolicy = try fixturePolicy(malformedRoot)
+        let malformedSeed = malformedRoot.appendingPathComponent("malformed-seed")
+        try writeFixture(lease.storagePayload, to: malformedSeed, mode: 0o600)
+        var malformedStatus = stat()
+        XCTAssertEqual(lstat(malformedSeed.path, &malformedStatus), 0)
+        let malformedName = legacyArchiveLeaf(identity: malformedStatus, payload: lease.storagePayload)
+            .replacingOccurrences(
+                of: ".lidswitch-legacy-lease-activation-lease--",
+                with: ".lidswitch-legacy-lease-activation-lease--garbage--"
+            )
+        XCTAssertEqual(rename(malformedSeed.path, malformedRoot.appendingPathComponent(malformedName).path), 0)
+        guard case .retainedResidue = ActivationLeaseStore.read(
+            from: malformedLease, capabilityPolicy: malformedPolicy
+        ) else { return XCTFail("extra identity markers must remain fail-closed") }
+        XCTAssertThrowsError(try ActivationLeaseStore.reconcileRecognizedLegacyLease(
+            file: malformedLease, ancestryPolicy: malformedPolicy
+        ))
+
+        let mismatchRoot = try TestSandbox.makeDirectory(label: "cross-record-inode-mismatch").url
+        let mismatchLease = mismatchRoot.appendingPathComponent("activation-lease")
+        let mismatchPolicy = try fixturePolicy(mismatchRoot)
+        try writeFixture(lease.storagePayload, to: mismatchLease, mode: 0o600)
+        let originalMismatchLease = try Data(contentsOf: mismatchLease)
+        let mismatchSeed = mismatchRoot.appendingPathComponent("mismatch-seed")
+        try writeFixture("mismatch", to: mismatchSeed, mode: 0o600)
+        var mismatchStatus = stat()
+        XCTAssertEqual(lstat(mismatchSeed.path, &mismatchStatus), 0)
+        let mismatchName = ".lidswitch-prior-desired-state--\(mismatchStatus.st_dev + 1)"
+            + "-\(mismatchStatus.st_ino + 1)-\(UUID().uuidString.lowercased())"
+        XCTAssertEqual(rename(mismatchSeed.path, mismatchRoot.appendingPathComponent(mismatchName).path), 0)
+        guard case .retainedResidue = ActivationLeaseStore.read(
+            from: mismatchLease, capabilityPolicy: mismatchPolicy
+        ) else { return XCTFail("cross-record residue must retain stable-inode binding") }
+        XCTAssertThrowsError(try ActivationLeaseStore.reconcileRecognizedLegacyLease(
+            file: mismatchLease, ancestryPolicy: mismatchPolicy
+        ))
+        XCTAssertEqual(try Data(contentsOf: mismatchLease), originalMismatchLease)
+
+        let shapeRoot = try TestSandbox.makeDirectory(label: "cross-record-shape-mismatch").url
+        let shapeLease = shapeRoot.appendingPathComponent("activation-lease")
+        let shapePolicy = try fixturePolicy(shapeRoot)
+        try writeFixture(lease.storagePayload, to: shapeLease, mode: 0o600)
+        let shapeSeed = shapeRoot.appendingPathComponent("shape-seed")
+        try writeFixture("shape", to: shapeSeed, mode: 0o600)
+        var shapeStatus = stat()
+        XCTAssertEqual(lstat(shapeSeed.path, &shapeStatus), 0)
+        let shapeName = ".lidswitch-prior-desired-state--\(shapeStatus.st_dev)-\(shapeStatus.st_ino)"
+        XCTAssertEqual(rename(shapeSeed.path, shapeRoot.appendingPathComponent(shapeName).path), 0)
+        guard case .retainedResidue = ActivationLeaseStore.read(
+            from: shapeLease, capabilityPolicy: shapePolicy
+        ) else { return XCTFail("non-producer suffix shapes must remain unknown and fail-closed") }
+        XCTAssertThrowsError(try ActivationLeaseStore.reconcileRecognizedLegacyLease(
+            file: shapeLease, ancestryPolicy: shapePolicy
+        ))
+    }
+
     func testRecognizedLegacyLeaseArchivesExactBytesAndProjectsMissingActiveLease() throws {
         let root = try TestSandbox.makeDirectory(label: "legacy-lease-archive").url
         let file = root.appendingPathComponent("activation-lease")
@@ -90,6 +254,18 @@ final class UserStateDurabilityFixtureTests: XCTestCase {
             from: file, capabilityPolicy: policy
         ) else { return XCTFail("exact archived legacy lease must project canonical absence") }
         XCTAssertTrue(archive.hasPrefix(".lidswitch-legacy-lease-activation-lease--"))
+        let archiveURL = root.appendingPathComponent(archive)
+        var archiveStatus = stat()
+        XCTAssertEqual(lstat(archiveURL.path, &archiveStatus), 0)
+        let archiveIdentity = "\(archiveStatus.st_dev)-\(archiveStatus.st_ino)-"
+        let archivePrefix = ".lidswitch-legacy-lease-activation-lease--\(archiveIdentity)"
+        XCTAssertTrue(archive.hasPrefix(archivePrefix))
+        let rebootedArchive = ".lidswitch-legacy-lease-activation-lease--\(archiveStatus.st_dev + 1)-\(archiveStatus.st_ino)-"
+            + String(archive.dropFirst(archivePrefix.count))
+        XCTAssertEqual(rename(archiveURL.path, root.appendingPathComponent(rebootedArchive).path), 0)
+        guard case .missingWithRecognizedLegacyArchive = ActivationLeaseStore.read(
+            from: file, capabilityPolicy: policy
+        ) else { return XCTFail("verified legacy archive must survive APFS device renumbering") }
         XCTAssertTrue(try UserStateFileCapability.canonicalFinalIsAbsent(
             finalFile: file, supportDirectory: root, ancestryPolicy: policy
         ))

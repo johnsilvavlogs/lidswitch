@@ -808,12 +808,12 @@ enum SecureHelperInstaller {
             /bin/launchctl enable system/\(AppPaths.helperLabel)
             /bin/launchctl bootstrap system "$plist"
             /bin/launchctl print system/\(AppPaths.helperLabel) >/dev/null
-            /bin/rm -f \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath))
+            /bin/rm -f \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
             """
         case .uninstall:
             return """
             failure_reason=uninstall-removal-failed
-            /bin/rm -f "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath))
+            /bin/rm -f "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
             /bin/rm -rf "$current" "$previous"
             /bin/sync
             """
