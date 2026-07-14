@@ -2,7 +2,14 @@ import Darwin
 import Foundation
 import LidSwitchCore
 
-enum ProcessOutcome: Equatable, Sendable { case completed, timedOut, containmentFailed, spawnFailed, rejected }
+enum ProcessOutcome: Equatable, Sendable {
+    case completed, timedOut, containmentFailed, spawnFailed, postSpawnSetupFailed, rejected
+
+    /// These outcomes are emitted only before `posix_spawn` returns a child.
+    /// Callers may therefore report an exact not-started result when durable
+    /// transaction evidence is also absent.
+    var provesNoChildStarted: Bool { self == .spawnFailed || self == .rejected }
+}
 enum ProcessReconciliation: Equatable, Sendable { case notRequired, passed, failed, indeterminate }
 
 struct ProcessResult {
@@ -576,7 +583,7 @@ enum Shell {
                 guard ownership.terminalOperationSucceeded, ownership.completedSynchronously else {
                     return ProcessResult(stdout: output.text(), stderr: reason + "\ncontainmentFailed: \(ownership.evidence)", exitCode: 125, outcome: .containmentFailed)
                 }
-                return ProcessResult(stdout: output.text(), stderr: reason, exitCode: 127, outcome: .spawnFailed)
+                return ProcessResult(stdout: output.text(), stderr: reason, exitCode: 127, outcome: .postSpawnSetupFailed)
             }
             system.pause(10_000)
         }

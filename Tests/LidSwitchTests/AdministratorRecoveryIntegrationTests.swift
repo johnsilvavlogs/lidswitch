@@ -292,6 +292,35 @@ final class AdministratorRecoveryIntegrationTests: XCTestCase {
         ) else {
             return XCTFail("only completed failure plus exact absence proves not-started")
         }
+        XCTAssertEqual(
+            AdministratorTransactionRunner.classify(
+                observation: .absent,
+                processOutcome: .spawnFailed,
+                processExitCode: 127,
+                transactionID: transaction,
+                operation: operation
+            ),
+            .notStarted(operation: operation, reason: "administrator-launch-failed")
+        )
+        XCTAssertEqual(
+            AdministratorTransactionRunner.classify(
+                observation: .absent,
+                processOutcome: .rejected,
+                processExitCode: 127,
+                transactionID: transaction,
+                operation: operation
+            ),
+            .notStarted(operation: operation, reason: "administrator-launch-rejected")
+        )
+        guard case .completionIndeterminate = AdministratorTransactionRunner.classify(
+            observation: .absent,
+            processOutcome: .postSpawnSetupFailed,
+            processExitCode: 127,
+            transactionID: transaction,
+            operation: operation
+        ) else {
+            return XCTFail("a post-spawn setup failure can race privileged dispatch")
+        }
         let busyReceipt = AdministratorTransactionReceipt(
             transactionID: transaction,
             operation: operation,

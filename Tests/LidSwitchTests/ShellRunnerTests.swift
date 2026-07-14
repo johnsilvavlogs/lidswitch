@@ -345,6 +345,26 @@ final class ShellRunnerTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("childReapOwnershipTransferredAfterpending"))
     }
 
+    func testSynchronousPostSpawnSetupFailureCannotMasqueradeAsNotStarted() {
+        let reservation = Shell.DeferredChildReaper.Reservation(id: UUID())
+        var releases = 0
+        let adapter = Shell.RunnerSystemAdapter(
+            reserve: { reservation }, bind: { _, _ in false },
+            release: { _ in releases += 1; return true },
+            transfer: { _, _ in XCTFail("synchronous reap must release"); return false },
+            prepareSpawn: { _ in .success(.init(child: 700, stdout: 60, stderr: 61)) },
+            close: { _ in }, makeNonblocking: { _ in true },
+            observe: { _, _ in .exited }, group: { _, _ in .goneESRCH },
+            signal: { _, _, state in state }, poll: { _, _, _ in 0 }, errno: { 0 },
+            drain: { _, _ in .eof }, reapAttempt: { _, _ in .reaped },
+            pause: { _ in }, now: { 1 }
+        )
+        let result = Shell.run(.fixture(executable: "/bin/cat", arguments: ["/fixture"]), system: adapter)
+        XCTAssertEqual(result.outcome, .postSpawnSetupFailed)
+        XCTAssertFalse(result.outcome.provesNoChildStarted)
+        XCTAssertEqual(releases, 1)
+    }
+
     func testRunnerSystemAdapterBindFailureContainsChildWithoutTrapOrFalseRelease() {
         final class Clock: @unchecked Sendable {
             var values: [UInt64] = [0, 1, 600_000_000, 4_000_000_000]

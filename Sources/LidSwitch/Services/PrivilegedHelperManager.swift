@@ -7,6 +7,11 @@ import LidSwitchCore
 /// by the verified helper one-shot; this layer never carries a shell recovery
 /// implementation.
 enum PrivilegedHelperManager {
+    /// Leaves ample room below Darwin's one-megabyte argv/environment ceiling.
+    /// The transaction wrapper is expected to be tens of kilobytes; a future
+    /// binary-in-argv regression is rejected before `osascript` is spawned.
+    static let maximumAdministratorAppleScriptBytes = 256 * 1_024
+
     static func install() throws -> AdministratorOperationResult {
         guard CompatibilityPolicy.isQualified(systemBuild: SystemBuild.current() ?? "") else {
             throw NSError(
@@ -51,6 +56,10 @@ enum PrivilegedHelperManager {
 
     static func administratorAppleScript(command: String, prompt: String) -> String {
         "do shell script \(appleScriptQuote(command)) with administrator privileges with prompt \(appleScriptQuote(prompt))"
+    }
+
+    static func administratorAppleScriptFitsSafeArgumentBudget(_ source: String) -> Bool {
+        source.lengthOfBytes(using: .utf8) <= maximumAdministratorAppleScriptBytes
     }
 
     static func administratorCommand(_ script: String) -> String {

@@ -21,19 +21,34 @@ enum SecureHelperInstaller {
         let policy: EnrollmentPolicy
     }
 
-    /// Exact bytes retained from the descriptor-bound staged verification.  The
-    /// administrator script receives this sealed payload, not a user pathname.
+    /// Receipt for the descriptor-bound private stage. The administrator
+    /// script carries only this bounded capability metadata; root reopens the
+    /// path with `O_NOFOLLOW_ANY` and requires the exact inode, metadata,
+    /// length, and digest before the staged bytes can become executable.
     struct FrozenHelperTransfer: Equatable {
-        let payload: Data
+        let sourcePath: String
+        let sourceDevice: UInt64
+        let sourceInode: UInt64
+        let sourceOwnerUID: UInt32
+        let sourceOwnerGID: UInt32
+        let sourceMode: UInt32
+        let sourceLinks: UInt64
         let sha256: Data
         let size: UInt64
         let identifier: String
         let cdhash: Data
 
-        var base64: String { payload.base64EncodedString() }
         var isSelfConsistent: Bool {
-            payload.count == Int(size)
-                && Data(SHA256.hash(data: payload)) == sha256
+            sourcePath.hasPrefix("/")
+                && !sourcePath.utf8.contains(0)
+                && sourcePath.utf8.count < Int(PATH_MAX)
+                && URL(fileURLWithPath: sourcePath).lastPathComponent == "LidSwitchHelper"
+                && sourceDevice > 0 && sourceInode > 0
+                && sourceMode & UInt32(S_IFMT) == UInt32(S_IFREG)
+                && sourceMode & 0o7777 == 0o700
+                && sourceLinks == 1
+                && sha256.count == SHA256.Digest.byteCount
+                && size > 0 && size <= UInt64(maximumHelperBytes)
                 && cdhash.count == 20 && !identifier.isEmpty
         }
     }
@@ -94,8 +109,7 @@ enum SecureHelperInstaller {
 
     static func diagnosticScript(for operation: AdministratorOperation) -> String {
         let zero20 = Data(repeating: 0, count: 20)
-        let helperPayload = Data([0])
-        let helperSHA256 = Data(SHA256.hash(data: helperPayload))
+        let helperSHA256 = Data(SHA256.hash(data: Data([0])))
         let policy = EnrollmentPolicy(
             ownerUID: UInt32(getuid()),
             profile: .manualExact,
@@ -104,15 +118,18 @@ enum SecureHelperInstaller {
             helperIdentifier: AppPaths.helperLabel,
             helperCDHash: zero20,
             helperSHA256: helperSHA256,
-            helperSize: UInt64(helperPayload.count),
+            helperSize: 1,
             qualifiedBuild: ReleaseIdentity.qualifiedSystemBuild,
             teamIdentifier: nil
         )
         let transactionID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
         return transactionScript(
             enrollment: .init(
-                transfer: .init(payload: helperPayload, sha256: helperSHA256,
-                                size: UInt64(helperPayload.count),
+                transfer: .init(sourcePath: "/private/tmp/lidswitch-diagnostic/LidSwitchHelper",
+                                sourceDevice: 1, sourceInode: 1,
+                                sourceOwnerUID: UInt32(getuid()), sourceOwnerGID: UInt32(getgid()),
+                                sourceMode: UInt32(S_IFREG | 0o700), sourceLinks: 1,
+                                sha256: helperSHA256, size: 1,
                                 identifier: AppPaths.helperLabel, cdhash: zero20),
                 policy: policy
             ),
@@ -278,10 +295,18 @@ enum SecureHelperInstaller {
             throw HelperControlError.rejected("app-descriptor-close-or-race")
         }
         let transfer = FrozenHelperTransfer(
-            payload: helperBytes, sha256: helperDigest, size: UInt64(helperBytes.count),
+            sourcePath: stagedURL.path,
+            sourceDevice: UInt64(truncatingIfNeeded: staged.initial.device),
+            sourceInode: UInt64(truncatingIfNeeded: staged.initial.inode),
+            sourceOwnerUID: UInt32(staged.initial.owner),
+            sourceOwnerGID: UInt32(staged.initial.group),
+            sourceMode: UInt32(staged.initial.mode),
+            sourceLinks: UInt64(staged.initial.links),
+            sha256: helperDigest, size: UInt64(helperBytes.count),
             identifier: stagedIdentity.identifier, cdhash: stagedIdentity.cdhash
         )
         guard transfer.isSelfConsistent,
+              transfer.sourceOwnerUID == policy.ownerUID,
               transfer.sha256 == policy.helperSHA256,
               transfer.size == policy.helperSize,
               transfer.identifier == policy.helperIdentifier,
@@ -535,12 +560,12 @@ enum SecureHelperInstaller {
         let policySHA256 = Data(SHA256.hash(data: Data(enrollment.policy.storagePayload.utf8))).hexEncoded
         let plistBase64 = Data(PrivilegedHelperManager.diagnosticLaunchDaemonPlist().utf8).base64EncodedString()
         precondition(enrollment.transfer.isSelfConsistent
+            && enrollment.transfer.sourceOwnerUID == enrollment.policy.ownerUID
             && enrollment.transfer.sha256 == enrollment.policy.helperSHA256
             && enrollment.transfer.size == enrollment.policy.helperSize
             && enrollment.transfer.identifier == enrollment.policy.helperIdentifier
             && enrollment.transfer.cdhash == enrollment.policy.helperCDHash,
             "frozen helper transfer must match the enrollment receipt")
-        let helperPayloadBase64 = enrollment.transfer.base64
         let provisionCommand = commandLine(
             LaunchDaemonContract.provisionArguments(
                 ownerUID: enrollment.policy.ownerUID,
@@ -569,7 +594,7 @@ enum SecureHelperInstaller {
         current=\(q(AppPaths.rootCurrentDirectory))
         previous=\(q(AppPaths.rootPreviousDirectory))
         plist=\(q(AppPaths.launchDaemonPath))
-        helper_payload_base64=\(q(helperPayloadBase64))
+        helper_source=\(q(enrollment.transfer.sourcePath))
         receipt=\(q(receiptPath))
         stage=\(q(stage))
         stage_current=\(q(stagedCurrent))
@@ -748,21 +773,62 @@ enum SecureHelperInstaller {
         /bin/mkdir -m 0700 "$stage_current"
         /usr/sbin/chown root:wheel "$stage" "$stage_current"
         stage_is_verified || exit 65
-        # The payload is fixed in this authenticated administrator script from
-        # bytes already read, rehashed, and code-validated through the held
-        # descriptor. No privileged step resolves a user-controlled pathname.
-        /usr/bin/perl -MFcntl=:DEFAULT,:mode -MMIME::Base64=decode_base64 -e '
+        # The user-owned source is only a location hint. O_NOFOLLOW_ANY rejects
+        # every symlink component, and the held file must retain the exact
+        # frozen inode, ownership, mode, link count, size, bytes, and digest.
+        # Only the new root-owned O_EXCL copy is code-verified or executed.
+        /usr/bin/perl -MFcntl=:DEFAULT,:mode -MDigest::SHA -e '
           use strict; use warnings;
-          my ($encoded, $destination, $expected_size) = @ARGV;
-          die "transfer-encoding" unless defined($encoded) && $encoded =~ /\\A[A-Za-z0-9+\\/]*={0,2}\\z/ && length($encoded) <= 22369624;
-          my $payload = decode_base64($encoded); die "transfer-size" unless length($payload) == $expected_size && $expected_size > 0 && $expected_size <= 16777216;
-          sysopen(my $output, $destination, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0700) or die "stage-open";
+          my ($source, $destination, $expected_dev, $expected_ino, $expected_uid,
+              $expected_gid, $expected_mode, $expected_links, $expected_size,
+              $expected_sha256) = @ARGV;
+          for ($expected_dev, $expected_ino, $expected_uid, $expected_gid,
+               $expected_mode, $expected_links, $expected_size) {
+            die "transfer-metadata" unless defined($_) && /\\A[0-9]+\\z/;
+          }
+          die "transfer-size" unless $expected_size > 0 && $expected_size <= 16777216;
+          die "transfer-digest" unless defined($expected_sha256) && $expected_sha256 =~ /\\A[0-9a-f]{64}\\z/;
+          my $o_nofollow_any = 0x20000000;
+          my $o_cloexec = 0x01000000;
+          sysopen(my $input, $source, O_RDONLY | $o_nofollow_any | $o_cloexec) or die "transfer-open";
+          my @before = stat($input);
+          die "transfer-identity" unless @before && S_ISREG($before[2])
+            && $before[0] == $expected_dev && $before[1] == $expected_ino
+            && $before[2] == $expected_mode && $before[3] == $expected_links
+            && $before[4] == $expected_uid && $before[5] == $expected_gid
+            && $before[7] == $expected_size;
+          sysopen(my $output, $destination, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | $o_cloexec, 0700) or die "stage-open";
+          my $digest = Digest::SHA->new(256);
           my $total = 0;
-          while ($total < length($payload)) { my $wrote = syswrite($output, $payload, length($payload) - $total, $total); die "stage-write" unless defined($wrote) && $wrote > 0; $total += $wrote; }
+          while ($total < $expected_size) {
+            my $read = sysread($input, my $chunk, $expected_size - $total > 131072 ? 131072 : $expected_size - $total);
+            if (!defined($read)) { next if $!{EINTR}; die "transfer-read"; }
+            die "transfer-short" unless $read > 0;
+            $digest->add($chunk);
+            my $offset = 0;
+            while ($offset < $read) {
+              my $wrote = syswrite($output, $chunk, $read - $offset, $offset);
+              if (!defined($wrote)) { next if $!{EINTR}; die "stage-write"; }
+              die "stage-write" unless $wrote > 0;
+              $offset += $wrote;
+            }
+            $total += $read;
+          }
+          while (1) {
+            my $extra = sysread($input, my $byte, 1);
+            if (!defined($extra)) { next if $!{EINTR}; die "transfer-eof"; }
+            die "transfer-growth" unless $extra == 0;
+            last;
+          }
+          my @after = stat($input);
+          die "transfer-raced" unless @after
+            && join(":", @after[0,1,2,3,4,5,7]) eq join(":", @before[0,1,2,3,4,5,7]);
           die "stage-short" unless $total == $expected_size;
+          die "transfer-digest" unless $digest->hexdigest eq $expected_sha256;
           $output->sync or die "stage-fsync"; fcntl($output, 51, 0) or die "stage-fullfsync";
+          close($input) or die "transfer-close";
           close($output) or die "stage-close";
-        ' "$helper_payload_base64" "$helper" \(enrollment.policy.helperSize)
+        ' "$helper_source" "$helper" \(enrollment.transfer.sourceDevice) \(enrollment.transfer.sourceInode) \(enrollment.transfer.sourceOwnerUID) \(enrollment.transfer.sourceOwnerGID) \(enrollment.transfer.sourceMode) \(enrollment.transfer.sourceLinks) \(enrollment.policy.helperSize) \(enrollment.policy.helperSHA256.hexEncoded)
         [ ! -L "$helper" ] && [ -f "$helper" ] || exit 65
         [ "$(/usr/bin/stat -f '%HT:%u:%g:%Lp:%l:%z' "$helper")" = "Regular File:0:0:700:1:\(enrollment.policy.helperSize)" ] || exit 65
         [ "$(/usr/bin/shasum -a 256 "$helper" | /usr/bin/awk '{print $1}')" = "\(enrollment.policy.helperSHA256.hexEncoded)" ] || exit 65
@@ -905,6 +971,12 @@ enum AdministratorTransactionRunner {
             command: command,
             prompt: prompt
         )
+        guard PrivilegedHelperManager.administratorAppleScriptFitsSafeArgumentBudget(appleScript) else {
+            return .notStarted(
+                operation: operation,
+                reason: "administrator-command-exceeds-safe-argument-budget"
+            )
+        }
         let process = Shell.run(.privilegedAppleScript(appleScript))
         let deadline = MonotonicClock.seconds() + reconciliationSeconds
         var observation = readReceipt(
@@ -913,7 +985,8 @@ enum AdministratorTransactionRunner {
             operation: operation
         )
         var retryDelay: useconds_t = 25_000
-        while observation.shouldRetry, MonotonicClock.seconds() < deadline {
+        while observation.shouldRetry, !process.outcome.provesNoChildStarted,
+              MonotonicClock.seconds() < deadline {
             usleep(retryDelay)
             observation = readReceipt(
                 path: receiptPath,
@@ -957,6 +1030,13 @@ enum AdministratorTransactionRunner {
                     reason: "terminal-pending-invalid"
                 )
             }
+        case .absent where processOutcome.provesNoChildStarted:
+            return .notStarted(
+                operation: operation,
+                reason: processOutcome == .rejected
+                    ? "administrator-launch-rejected"
+                    : "administrator-launch-failed"
+            )
         case .absent where processOutcome == .completed && processExitCode != 0:
             // The generated root wrapper publishes `running` before bootout or
             // authority mutation. A completed authorization failure with no

@@ -2304,9 +2304,15 @@ final class PowerController: ObservableObject {
             case let .installedButStopped(receipt):
                 message = "The helper is stopped (\(receipt.reason)). Safe idle was not proved to this caller; keep LidSwitch open and repair the installation before starting or quitting."
             case let .notStarted(_, reason):
-                message = reason == "administrator-operation-already-running"
-                    ? "Another LidSwitch administrator operation is already running. This request made no changes; wait for the active operation to finish, then refresh."
-                    : "Administrator authorization did not start the transaction. Nothing was enabled."
+                if reason == "administrator-operation-already-running" {
+                    message = "Another LidSwitch administrator operation is already running. This request made no changes; wait for the active operation to finish, then refresh."
+                } else if reason == "administrator-launch-failed"
+                            || reason == "administrator-launch-rejected"
+                            || reason == "administrator-command-exceeds-safe-argument-budget" {
+                    message = "LidSwitch could not open the administrator authorization prompt, so the transaction did not start. Nothing was enabled."
+                } else {
+                    message = "Administrator authorization did not start the transaction. Nothing was enabled."
+                }
             case .completionIndeterminate:
                 message = "The administrator wait ended before a terminal receipt was available. The root transaction may still finish; refresh status before retrying."
             case .safeIdle:

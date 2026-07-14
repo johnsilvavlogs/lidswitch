@@ -113,9 +113,15 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         ))
     }
 
-    func testFrozenTransferReceiptRejectsPayloadDigestSizeAndIdentityDrift() {
+    func testFrozenTransferReceiptRejectsUnsafeSourceCapabilityMetadata() {
         let transfer = SecureHelperInstaller.FrozenHelperTransfer(
-            payload: Data([1, 2, 3]),
+            sourcePath: "/Users/fixture/.lidswitch-frozen/00000000-0000-4000-8000-000000000001/LidSwitchHelper",
+            sourceDevice: 10,
+            sourceInode: 20,
+            sourceOwnerUID: 501,
+            sourceOwnerGID: 20,
+            sourceMode: UInt32(S_IFREG | 0o700),
+            sourceLinks: 1,
             sha256: Data(SHA256.hash(data: Data([1, 2, 3]))),
             size: 3,
             identifier: AppPaths.helperLabel,
@@ -123,17 +129,55 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         )
         XCTAssertTrue(transfer.isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            payload: transfer.payload, sha256: digest, size: transfer.size,
+            sourcePath: "relative/LidSwitchHelper", sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
+            sourceLinks: transfer.sourceLinks, sha256: transfer.sha256, size: transfer.size,
             identifier: transfer.identifier, cdhash: transfer.cdhash
         ).isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            payload: transfer.payload, sha256: transfer.sha256, size: 2,
+            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: UInt32(S_IFREG | 0o755),
+            sourceLinks: transfer.sourceLinks, sha256: transfer.sha256, size: transfer.size,
             identifier: transfer.identifier, cdhash: transfer.cdhash
         ).isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            payload: transfer.payload, sha256: transfer.sha256, size: transfer.size,
-            identifier: "", cdhash: transfer.cdhash
+            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
+            sourceLinks: 2, sha256: transfer.sha256, size: transfer.size,
+            identifier: transfer.identifier, cdhash: transfer.cdhash
         ).isSelfConsistent)
+        XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
+            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
+            sourceLinks: transfer.sourceLinks, sha256: Data(), size: transfer.size,
+            identifier: transfer.identifier, cdhash: transfer.cdhash
+        ).isSelfConsistent)
+    }
+
+    func testAdministratorTransportIsDescriptorBoundAndFitsSafeArgumentBudget() {
+        let script = PrivilegedHelperManager.diagnosticInstallScript()
+        XCTAssertTrue(script.contains("helper_source="))
+        XCTAssertTrue(script.contains("my $o_nofollow_any = 0x20000000"))
+        XCTAssertTrue(script.contains("$before[1] == $expected_ino"))
+        XCTAssertTrue(script.contains("Digest::SHA->new(256)"))
+        XCTAssertTrue(script.contains("O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW"))
+        XCTAssertFalse(script.contains("helper_payload_base64="))
+        XCTAssertFalse(script.contains("MMIME::Base64=decode_base64"))
+
+        let command = PrivilegedHelperManager.diagnosticAdministratorCommand(script)
+        let source = PrivilegedHelperManager.administratorAppleScript(
+            command: command,
+            prompt: "LidSwitch fixture"
+        )
+        XCTAssertTrue(PrivilegedHelperManager.administratorAppleScriptFitsSafeArgumentBudget(source))
+        XCTAssertLessThanOrEqual(
+            source.lengthOfBytes(using: .utf8),
+            PrivilegedHelperManager.maximumAdministratorAppleScriptBytes
+        )
     }
 
     func testAdministratorTransactionRunnerIsUnreachableOnFreezeDenial() {
