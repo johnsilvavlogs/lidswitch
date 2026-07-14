@@ -140,6 +140,17 @@ enum SecureHelperInstaller {
         var isRegular: Bool { (mode & S_IFMT) == S_IFREG }
         var isDirectory: Bool { (mode & S_IFMT) == S_IFDIR }
         var permissions: mode_t { mode & 0o7777 }
+
+        func hasSameDirectoryCapabilityIdentity(as other: Snapshot) -> Bool {
+            isDirectory && other.isDirectory
+                && device == other.device && inode == other.inode
+                && owner == other.owner && group == other.group
+                && mode == other.mode
+            // Directory st_nlink and st_size are APFS inventory bookkeeping,
+            // not capability identity. Exact descriptor-relative inventory is
+            // checked separately, so the installer accepts only its own one
+            // staged helper leaf without trusting either mutable counter.
+        }
     }
 
     private struct HeldArtifact {
@@ -211,7 +222,7 @@ enum SecureHelperInstaller {
         var stagedClosed = false
         defer { if !stagedClosed { closeArtifactBestEffort(staged) } }
         let stagedBytes = try readExactly(staged)
-        let stagedStableBeforeIdentity = reassert(staged) && reassertStage(stage)
+        let stagedStableBeforeIdentity = reassert(staged) && reassertStage(stage, expectedLeaf: stagedName)
         stagedClosed = true
         guard closeArtifact(staged), stagedStableBeforeIdentity,
               stagedBytes == helperBytes,
@@ -222,10 +233,10 @@ enum SecureHelperInstaller {
         // Security's static-code API is pathname based.  It is therefore only
         // applied to the private staged copy, bracketed by held-directory inode
         // reassertions; the bundled pathname is never reopened for code identity.
-        guard reassertStage(stage),
+        guard reassertStage(stage, expectedLeaf: stagedName),
               let stagedIdentity = CodeIdentity.staticCode(at: stagedURL.path),
               manualAdHocIdentity(stagedIdentity, expectedIdentifier: AppPaths.helperLabel),
-              reassertStage(stage)
+              reassertStage(stage, expectedLeaf: stagedName)
         else { throw HelperControlError.rejected("staged-helper-code-identity-mismatch") }
 
         let anchorMatches = ReleaseHelperTrustAnchor.matches(
@@ -245,7 +256,7 @@ enum SecureHelperInstaller {
         )
         stageClosed = true
         guard reassertDirectory(appDescriptor), anchorMatches, bundledStable,
-              stagedStableBeforeIdentity, reassertStage(stage),
+              stagedStableBeforeIdentity, reassertStage(stage, expectedLeaf: stagedName),
               manualAdHocIdentity(stagedIdentity, expectedIdentifier: AppPaths.helperLabel),
               rootCopyContract, closeStage(stage)
         else {
@@ -405,15 +416,50 @@ enum SecureHelperInstaller {
         return PrivateStage(parentDescriptor: parent, descriptor: descriptor, parentPath: URL(fileURLWithPath: homePath, isDirectory: true).appendingPathComponent(parentName, isDirectory: true).path, name: name, initial: snapshot)
     }
 
-    private static func reassertStage(_ stage: PrivateStage) -> Bool {
+    private static func reassertStage(_ stage: PrivateStage, expectedLeaf: String?) -> Bool {
         var descriptorStat = stat(); var nameStat = stat()
-        return fstat(stage.descriptor, &descriptorStat) == 0
-            && fstatat(stage.parentDescriptor, stage.name, &nameStat, AT_SYMLINK_NOFOLLOW) == 0
-            && Snapshot(descriptorStat) == stage.initial && Snapshot(nameStat) == stage.initial
+        guard fstat(stage.descriptor, &descriptorStat) == 0,
+              fstatat(stage.parentDescriptor, stage.name, &nameStat, AT_SYMLINK_NOFOLLOW) == 0
+        else { return false }
+        return Snapshot(descriptorStat).hasSameDirectoryCapabilityIdentity(as: stage.initial)
+            && Snapshot(nameStat).hasSameDirectoryCapabilityIdentity(as: stage.initial)
+            && directoryInventoryMatches(stage.descriptor, expectedLeaf: expectedLeaf)
+    }
+
+    static func directoryCapabilityIdentityMatches(_ before: stat, _ after: stat) -> Bool {
+        Snapshot(after).hasSameDirectoryCapabilityIdentity(as: Snapshot(before))
+    }
+
+    static func directoryInventoryMatches(_ descriptor: Int32, expectedLeaf: String?) -> Bool {
+        let inventory = openat(descriptor, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard inventory >= 0, let stream = fdopendir(inventory) else {
+            if inventory >= 0 { _ = close(inventory) }
+            return false
+        }
+        defer { _ = closedir(stream) }
+        var names: [String] = []
+        errno = 0
+        while let pointer = readdir(stream) {
+            var entry = pointer.pointee
+            let length = Int(entry.d_namlen)
+            guard length > 0, length <= Int(NAME_MAX) else { return false }
+            var storage = entry.d_name
+            let name: String? = withUnsafeBytes(of: &storage) { raw in
+                guard length <= raw.count else { return nil }
+                return String(bytes: raw.prefix(length), encoding: .utf8)
+            }
+            guard let name else { return false }
+            if name == "." || name == ".." { continue }
+            guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else { return false }
+            names.append(name)
+            guard names.count <= 1 else { return false }
+        }
+        guard errno == 0 else { return false }
+        return names == (expectedLeaf.map { [$0] } ?? [])
     }
 
     private static func writeStage(_ stage: PrivateStage, leaf: String, bytes: Data) throws {
-        guard reassertStage(stage) else { throw HelperControlError.rejected("stage-parent-raced") }
+        guard reassertStage(stage, expectedLeaf: nil) else { throw HelperControlError.rejected("stage-parent-raced") }
         let descriptor = openat(stage.descriptor, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o700)
         guard descriptor >= 0 else { throw HelperControlError.rejected("stage-file-create-failed") }
         var outputCloseAttempted = false
@@ -431,7 +477,7 @@ enum SecureHelperInstaller {
             let outputClosed = close(descriptor) == 0
             outputCloseAttempted = true
             guard outputSynced, outputClosed,
-                  fsync(stage.descriptor) == 0, reassertStage(stage)
+                  fsync(stage.descriptor) == 0, reassertStage(stage, expectedLeaf: leaf)
             else { throw HelperControlError.rejected("stage-sync-or-close-failed") }
         } catch {
             if !outputCloseAttempted { precondition(close(descriptor) == 0, "stage descriptor close failed") }
@@ -440,7 +486,7 @@ enum SecureHelperInstaller {
     }
 
     private static func reopenStageArtifact(_ stage: PrivateStage, leaf: String, expectedUID: uid_t, expectedGID: gid_t) throws -> HeldArtifact {
-        guard reassertStage(stage) else { throw HelperControlError.rejected("stage-name-raced") }
+        guard reassertStage(stage, expectedLeaf: leaf) else { throw HelperControlError.rejected("stage-name-raced") }
         var before = stat()
         guard fstatat(stage.descriptor, leaf, &before, AT_SYMLINK_NOFOLLOW) == 0 else { throw HelperControlError.rejected("stage-file-lstat-failed") }
         let descriptor = openat(stage.descriptor, leaf, O_RDONLY | O_NOFOLLOW)

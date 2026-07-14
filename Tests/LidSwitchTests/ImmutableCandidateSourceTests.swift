@@ -175,4 +175,39 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         if throughSymlinkAncestor >= 0 { _ = close(throughSymlinkAncestor) }
     }
 
+    func testStageDirectoryIdentityAllowsItsOwnAPFSSizeGrowthButRejectsReplacement() throws {
+        let fixture = try TestSandbox.makeDirectory(label: "installer-stage-identity")
+        let descriptor = try TestSandbox.openManagedDirectory(at: fixture.url)
+        defer { XCTAssertEqual(close(descriptor), 0) }
+
+        var before = stat()
+        XCTAssertEqual(fstat(descriptor, &before), 0)
+        let payload = openat(descriptor, "LidSwitchHelper", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o700)
+        XCTAssertGreaterThanOrEqual(payload, 0)
+        if payload >= 0 {
+            var byte: UInt8 = 0x4c
+            XCTAssertEqual(write(payload, &byte, 1), 1)
+            XCTAssertEqual(fsync(payload), 0)
+            XCTAssertEqual(close(payload), 0)
+        }
+
+        var afterOwnWrite = stat()
+        XCTAssertEqual(fstat(descriptor, &afterOwnWrite), 0)
+        XCTAssertTrue(SecureHelperInstaller.directoryCapabilityIdentityMatches(before, afterOwnWrite))
+        XCTAssertTrue(SecureHelperInstaller.directoryInventoryMatches(descriptor, expectedLeaf: "LidSwitchHelper"))
+        XCTAssertFalse(SecureHelperInstaller.directoryInventoryMatches(descriptor, expectedLeaf: nil))
+
+        let unexpected = openat(descriptor, "unexpected", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        XCTAssertGreaterThanOrEqual(unexpected, 0)
+        if unexpected >= 0 { XCTAssertEqual(close(unexpected), 0) }
+        XCTAssertFalse(SecureHelperInstaller.directoryInventoryMatches(descriptor, expectedLeaf: "LidSwitchHelper"))
+
+        let replacement = try TestSandbox.makeDirectory(label: "installer-stage-replacement")
+        let replacementDescriptor = try TestSandbox.openManagedDirectory(at: replacement.url)
+        defer { XCTAssertEqual(close(replacementDescriptor), 0) }
+        var replacementStatus = stat()
+        XCTAssertEqual(fstat(replacementDescriptor, &replacementStatus), 0)
+        XCTAssertFalse(SecureHelperInstaller.directoryCapabilityIdentityMatches(before, replacementStatus))
+    }
+
 }
