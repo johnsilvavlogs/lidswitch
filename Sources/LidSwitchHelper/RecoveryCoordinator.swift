@@ -257,20 +257,35 @@ final class RecoveryCoordinator {
         case .missing:
             let idle = assessIdle(store, transaction)
             // An administrator one-shot is the only path allowed to quiesce
-            // and migrate historical writers.  Once that transaction has
-            // proven an exact terminal generation, publish the corresponding
-            // canonical v5 diagnostic before returning safe idle.  Daemon
-            // startup remains observation-only and merely hydrates a durable
-            // task left by the administrator transaction.
-            if legacyWritersStopped,
-               case let .terminalIdle(session, reason) = idle {
-                guard projectStatus(
-                    state: "terminal",
-                    reason: reason,
-                    sessionID: session,
-                    store: store,
-                    transaction: transaction
-                ) else { return .recoveryRequired("status-projection-enqueue-failed") }
+            // and migrate historical writers. Once that transaction has
+            // proved exact safe idle, publish the corresponding canonical
+            // diagnostic before returning. A pristine install needs this
+            // public projection just as a migrated or terminal install does;
+            // otherwise the app and release canary cannot distinguish proven
+            // pristine idle from a missing/failed projection. Daemon startup
+            // remains observation-only and merely hydrates a durable task
+            // left by the administrator transaction.
+            if legacyWritersStopped {
+                let projection: (state: String, reason: String, session: UUID?)?
+                switch idle {
+                case .pristineIdle:
+                    projection = ("inactive", "pristine", nil)
+                case let .migratedIdle(reason):
+                    projection = ("inactive", reason, nil)
+                case let .terminalIdle(session, reason):
+                    projection = ("terminal", reason, session)
+                case .legacyRestoreOnly, .reconnectCandidate, .recoveryRequired:
+                    projection = nil
+                }
+                if let projection {
+                    guard projectStatus(
+                        state: projection.state,
+                        reason: projection.reason,
+                        sessionID: projection.session,
+                        store: store,
+                        transaction: transaction
+                    ) else { return .recoveryRequired("status-projection-enqueue-failed") }
+                }
             }
             return idle
         case .invalid:

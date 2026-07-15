@@ -4507,8 +4507,8 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertLessThan(publishCurrent.lowerBound, bootstrap.lowerBound)
 
         let uninstallRecovery = try XCTUnwrap(uninstall.range(of: "recovery_payload="))
-        let uninstallDeletion = try XCTUnwrap(uninstall.range(of: "/bin/rm -f \"$plist\"", options: .backwards))
-        XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallDeletion.lowerBound)
+        let uninstallStatusRemoval = try XCTUnwrap(uninstall.range(of: "/bin/rm -f \"$status\" \"$plist\"", options: .backwards))
+        XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallStatusRemoval.lowerBound)
         XCTAssertEqual(
             AppPaths.legacyV4RootHelperVersionPath,
             "/Library/Application Support/LidSwitch/helper-version"

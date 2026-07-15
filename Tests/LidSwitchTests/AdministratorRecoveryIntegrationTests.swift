@@ -364,6 +364,8 @@ final class AdministratorRecoveryIntegrationTests: XCTestCase {
         XCTAssertFalse(uninstall.contains("recovery-reservations"))
         XCTAssertFalse(uninstall.contains("recovery-proof"))
         XCTAssertFalse(uninstall.contains("root-state.lock"))
+        XCTAssertTrue(uninstall.contains("status='\(AppPaths.rootHelperStatusPath)'"))
+        XCTAssertTrue(uninstall.contains("/bin/rm -f \"$status\" \"$plist\""))
         XCTAssertTrue(uninstall.contains("administrator-transaction-"))
         XCTAssertTrue(source.contains(".LidSwitch-administrator-"))
         XCTAssertFalse(source.contains("root + \"/.administrator-\""))

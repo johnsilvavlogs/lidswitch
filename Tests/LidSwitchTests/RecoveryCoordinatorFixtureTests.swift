@@ -624,6 +624,37 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.power.setCalls, [])
     }
 
+    func testAdministratorInstallPublishesPristineSafeIdleButDaemonStartupDoesNotManufactureIt() throws {
+        let administrator = try Fixture(provision: false)
+        defer { administrator.dispose() }
+        XCTAssertEqual(administrator.store.provision(), .ready)
+        XCTAssertEqual(
+            administrator.coordinator.recover(intent: .install, allowReconnect: false),
+            .pristineIdle
+        )
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
+        let payload = try String(contentsOfFile: administrator.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(payload.contains("state=inactive\n"))
+        XCTAssertTrue(payload.contains("reason=pristine\n"))
+        XCTAssertTrue(payload.contains("session=none\n"))
+        XCTAssertTrue(payload.contains("projection_authority="))
+        XCTAssertTrue(payload.contains("projection_generation="))
+        XCTAssertTrue(payload.contains("projection_token="))
+        XCTAssertEqual(administrator.store.statusProjectionTaskRecord(), .absent)
+        XCTAssertEqual(administrator.store.appliedRecord(), .missing)
+        XCTAssertEqual(administrator.power.setCalls, [])
+
+        let daemon = try Fixture(provision: false)
+        defer { daemon.dispose() }
+        XCTAssertEqual(daemon.store.provision(), .ready)
+        XCTAssertEqual(daemon.coordinator.recover(intent: .startup, allowReconnect: true), .pristineIdle)
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
+        XCTAssertEqual(daemon.store.evidenceState(for: "helper-status"), .absent)
+        XCTAssertEqual(daemon.store.statusProjectionTaskRecord(), .absent)
+        XCTAssertEqual(daemon.store.appliedRecord(), .missing)
+        XCTAssertEqual(daemon.power.setCalls, [])
+    }
+
     func testDaemonStartupAndRecoverOnceNeverProvisionMissingAuthority() throws {
         let fixture = try Fixture(provision: false)
         defer { fixture.dispose() }

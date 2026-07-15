@@ -244,8 +244,9 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
                 with self.assertRaisesRegex(preflight.PreflightError, error):
                     preflight._observe_before(args, self.runner_with_ioreg(output))
 
-    def test_preflight_accepts_only_exact_production_safe_idle_migration_status(self):
+    def test_preflight_accepts_only_exact_production_safe_idle_status(self):
         accepted = (
+            ("inactive", "pristine", "none"),
             ("inactive", "legacy-migration", "none"),
             ("inactive", "legacy-migration-superseded", "none"),
             ("terminal", "legacy-migration", "12345678-1234-1234-9234-123456789abc"),
@@ -260,6 +261,8 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
         rejected = (
             ("idle", "safe-idle", "none"),
             ("inactive", "unknown", "none"),
+            ("inactive", "pristine", "12345678-1234-1234-1234-123456789abc"),
+            ("terminal", "pristine", "12345678-1234-1234-9234-123456789abc"),
             ("inactive", "legacy-migration", "12345678-1234-1234-1234-123456789abc"),
             ("terminal", "legacy-migration", "none"),
             ("terminal", "legacy-migration-superseded", "12345678-1234-1234-9234-123456789abc"),

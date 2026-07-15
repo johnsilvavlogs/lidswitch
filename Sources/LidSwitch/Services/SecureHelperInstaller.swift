@@ -594,6 +594,7 @@ enum SecureHelperInstaller {
         current=\(q(AppPaths.rootCurrentDirectory))
         previous=\(q(AppPaths.rootPreviousDirectory))
         plist=\(q(AppPaths.launchDaemonPath))
+        status=\(q(AppPaths.rootHelperStatusPath))
         helper_source=\(q(enrollment.transfer.sourcePath))
         receipt=\(q(receiptPath))
         stage=\(q(stage))
@@ -934,7 +935,13 @@ enum SecureHelperInstaller {
         case .uninstall:
             return """
             failure_reason=uninstall-removal-failed
-            /bin/rm -f "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
+            # The recovery one-shot has already proved native safe idle. Its
+            # public status projection is diagnostic, not retained recovery
+            # authority, and leaving it behind makes the app correctly report
+            # dynamic installation residue. Remove only this public leaf;
+            # private ledgers, proof, locks, and administrator receipts remain
+            # intact for audit and future fail-closed recovery.
+            /bin/rm -f "$status" "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
             /bin/rm -rf "$current" "$previous"
             /bin/sync
             """
