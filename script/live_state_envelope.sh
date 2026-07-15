@@ -668,7 +668,16 @@ live_envelope_capture() {
       host_class="idle-uninstalled"
     fi
     if [[ "$LIVE_STATUS_LEGACY_STALE_IDLE" == true ]]; then
-      [[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths" && "$LIVE_LAUNCHD_PRESENCE" == "present" && "$LIVE_LAUNCHD_STATE" == "not running" && "$LIVE_LAUNCHD_PID" == "none" ]] || return 74
+      [[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths" ]] || return 74
+      case "$LIVE_LAUNCHD_PRESENCE" in
+        present)
+          [[ "$LIVE_LAUNCHD_STATE" == "not running" && "$LIVE_LAUNCHD_PID" == "none" ]] || return 74
+          ;;
+        absent)
+          [[ "$LIVE_LAUNCHD_STATE" == "none" && "$LIVE_LAUNCHD_PID" == "none" && "$LIVE_LAUNCHD_PROGRAM" == "none" ]] || return 74
+          ;;
+        *) return 74 ;;
+      esac
       [[ "$LIVE_POWER_SOURCE" == "ac" && "$LIVE_AC_SLEEP" == "0" ]] || return 74
     fi
     if [[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths" && ( -e "$real_home/Library/Application Support/LidSwitch/activation-lease" || -L "$real_home/Library/Application Support/LidSwitch/activation-lease" ) ]]; then

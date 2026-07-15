@@ -12,6 +12,92 @@ import XCTest
 final class RecoveryCoordinatorFixtureTests: XCTestCase {
     fileprivate static let boot = "00000000-0000-4000-8000-000000000001"
 
+    func testLegacyWriterProbeAcceptsExactDarwinMissingAndDisabledDiagnostics() {
+        let system = ContainedProcessResult(
+            stdout: "",
+            stderr: "Bad request.\nCould not find service \"com.johnsilva.lidswitch.helper\" in domain for system\n",
+            exitCode: 113,
+            outcome: .completed
+        )
+        XCTAssertTrue(LegacyWriterQuiescenceProbe.exactMissingService(
+            system,
+            target: "system/com.johnsilva.lidswitch.helper"
+        ))
+
+        let legacy = ContainedProcessResult(
+            stdout: "",
+            stderr: "Could not find service \"com.johnsilva.LidSwitch.login\" in domain for user gui: 501\n",
+            exitCode: 113,
+            outcome: .completed
+        )
+        XCTAssertTrue(LegacyWriterQuiescenceProbe.exactMissingService(
+            legacy,
+            target: "gui/501/com.johnsilva.LidSwitch.login"
+        ))
+
+        let currentDarwin = ContainedProcessResult(
+            stdout: "disabled services = {\n\t\"com.johnsilva.LidSwitch.login\" => disabled\n}\n",
+            stderr: "",
+            exitCode: 0,
+            outcome: .completed
+        )
+        XCTAssertTrue(LegacyWriterQuiescenceProbe.exactLegacyDisabled(
+            currentDarwin,
+            label: "com.johnsilva.LidSwitch.login"
+        ))
+
+        let legacyDarwin = ContainedProcessResult(
+            stdout: "disabled services = {\n\t\"com.johnsilva.LidSwitch.login\" => true\n}\n",
+            stderr: "",
+            exitCode: 0,
+            outcome: .completed
+        )
+        XCTAssertTrue(LegacyWriterQuiescenceProbe.exactLegacyDisabled(
+            legacyDarwin,
+            label: "com.johnsilva.LidSwitch.login"
+        ))
+    }
+
+    func testLegacyWriterProbeRejectsWrongOrAmbiguousLaunchctlDiagnostics() {
+        let label = "com.johnsilva.lidswitch.helper"
+        let expected = "Bad request.\nCould not find service \"\(label)\" in domain for system\n"
+        let malformed: [ContainedProcessResult] = [
+            .init(stdout: "unexpected", stderr: expected, exitCode: 113, outcome: .completed),
+            .init(stdout: "", stderr: expected + "extra\n", exitCode: 113, outcome: .completed),
+            .init(stdout: "", stderr: expected.replacingOccurrences(of: label, with: "com.johnsilva.other"), exitCode: 113, outcome: .completed),
+            .init(stdout: "", stderr: expected.replacingOccurrences(of: "system", with: "user gui: 501"), exitCode: 113, outcome: .completed),
+            .init(stdout: "", stderr: expected, exitCode: 0, outcome: .completed),
+            .init(stdout: "", stderr: expected, exitCode: 113, outcome: .timedOut),
+        ]
+        for result in malformed {
+            XCTAssertFalse(LegacyWriterQuiescenceProbe.exactMissingService(
+                result,
+                target: "system/\(label)"
+            ))
+        }
+        XCTAssertFalse(LegacyWriterQuiescenceProbe.exactMissingService(
+            .init(stdout: "", stderr: expected, exitCode: 113, outcome: .completed),
+            target: "gui/0501/\(label)"
+        ))
+
+        let disabled = "disabled services = {\n\t\"com.johnsilva.LidSwitch.login\" => disabled\n}\n"
+        let malformedDisabled: [ContainedProcessResult] = [
+            .init(stdout: disabled.replacingOccurrences(of: "=> disabled", with: "=> enabled"), stderr: "", exitCode: 0, outcome: .completed),
+            .init(stdout: disabled.replacingOccurrences(of: "=> disabled", with: "=> false"), stderr: "", exitCode: 0, outcome: .completed),
+            .init(stdout: disabled.replacingOccurrences(of: "LidSwitch.login", with: "LidSwitch.other"), stderr: "", exitCode: 0, outcome: .completed),
+            .init(stdout: disabled + "\t\"com.johnsilva.LidSwitch.login\" => disabled\n", stderr: "", exitCode: 0, outcome: .completed),
+            .init(stdout: disabled, stderr: "unexpected", exitCode: 0, outcome: .completed),
+            .init(stdout: disabled, stderr: "", exitCode: 1, outcome: .completed),
+            .init(stdout: disabled, stderr: "", exitCode: 0, outcome: .timedOut),
+        ]
+        for result in malformedDisabled {
+            XCTAssertFalse(LegacyWriterQuiescenceProbe.exactLegacyDisabled(
+                result,
+                label: "com.johnsilva.LidSwitch.login"
+            ))
+        }
+    }
+
     func testAdministratorRecoveryRequiresHelperOwnedQuiescenceEvidence() throws {
         let fixture = try Fixture(
             provision: false,

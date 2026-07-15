@@ -81,13 +81,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("a7f18b5d7f3afbf64c713dba94769353ef4cebdb5a8ec00108bb19b91b0cb568", 57547),
+    "script/live_state_envelope.sh": ("6019c9e058d91dfd2470f3412894a647d84704078ac82c42b46ab976209e6cd2", 57796),
     "script/swift_sandbox_common.sh": ("f93e57098e318d072169f1535f0b554fccb26fce36e30de9a597e58855e7e9cf", 67919),
     "script/swift_test_sandbox.sb.in": ("8b013f263b8df5bac4da437c2fa8a5e7c7f5e64f4ae33650904a1cf1d0e95e5e", 10764),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("ca46087d7c91bc8ee6141ccfc17e210ccee87a18d4a686e65f3b830cae9fc595", 3578),
+    "script/source_snapshot_manifest.jsonl": ("07fdf4970543a1cb9b72f9eb78b89958eb96b774573683f12fe9dfd5183d8e95", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1604,9 +1604,12 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn('[[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths"', envelope)
         self.assertIn('live_envelope_legacy_idle_status_is_not_future', envelope)
         self.assertIn('LIVE_STATUS_LEGACY_STALE_IDLE=true', envelope)
-        self.assertIn('"$LIVE_LAUNCHD_STATE" == "not running" && "$LIVE_LAUNCHD_PID" == "none"', envelope)
         self.assertIn('"$LIVE_POWER_SOURCE" == "ac" && "$LIVE_AC_SLEEP" == "0"', envelope)
         stale_idle = envelope[envelope.index('if [[ "$LIVE_STATUS_LEGACY_STALE_IDLE" == true ]]') : envelope.index('LIVE_AUTHORITY_KIND="none"')]
+        self.assertIn('[[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths" ]]', stale_idle)
+        self.assertIn('case "$LIVE_LAUNCHD_PRESENCE" in', stale_idle)
+        self.assertIn('"$LIVE_LAUNCHD_STATE" == "not running" && "$LIVE_LAUNCHD_PID" == "none"', stale_idle)
+        self.assertIn('"$LIVE_LAUNCHD_STATE" == "none" && "$LIVE_LAUNCHD_PID" == "none" && "$LIVE_LAUNCHD_PROGRAM" == "none"', stale_idle)
         self.assertNotIn('[[ -e "$real_home/Library/Application Support/LidSwitch/activation-lease"', stale_idle)
         self.assertIn('if [[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths" && ( -e "$real_home/Library/Application Support/LidSwitch/activation-lease"', stale_idle)
         self.assertIn('live_envelope_capture_idle_lease "$real_home"', stale_idle)

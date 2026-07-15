@@ -53,27 +53,64 @@ struct LegacyWriterQuiescenceProbe: Sendable {
 
     static let fixtureQuiesced = LegacyWriterQuiescenceProbe { .quiesced }
 
-    private static func exactMissingService(
+    static func exactMissingService(
         _ result: ContainedProcessResult,
         target: String
     ) -> Bool {
         guard result.outcome == .completed,
               result.exitCode != 0,
+              result.stdout.isEmpty,
               result.stdout.utf8.count + result.stderr.utf8.count < 16 * 1_024
         else { return false }
-        let text = result.stdout + "\n" + result.stderr
-        return text.contains(target)
-            && (text.contains("Could not find service") || text.contains("could not find service"))
+
+        let components = target.split(separator: "/", omittingEmptySubsequences: false)
+        let label: String
+        let domainDescription: String
+        switch components.count {
+        case 2 where components[0] == "system":
+            label = String(components[1])
+            domainDescription = "system"
+        case 3 where components[0] == "gui":
+            let rawUID = String(components[1])
+            guard let uid = UInt32(rawUID), uid > 0, String(uid) == rawUID else { return false }
+            label = String(components[2])
+            domainDescription = "user gui: \(uid)"
+        default:
+            return false
+        }
+        guard label.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", options: .regularExpression) != nil else {
+            return false
+        }
+
+        let missing = "Could not find service \"\(label)\" in domain for \(domainDescription)"
+        let accepted = [
+            missing,
+            missing + "\n",
+            "Bad request.\n" + missing,
+            "Bad request.\n" + missing + "\n",
+        ]
+        return accepted.contains(result.stderr)
     }
 
-    private static func exactLegacyDisabled(
+    static func exactLegacyDisabled(
         _ result: ContainedProcessResult,
         label: String
     ) -> Bool {
-        guard result.outcome == .completed, result.exitCode == 0 else { return false }
-        return result.stdout.split(separator: "\n", omittingEmptySubsequences: false).contains { line in
-            let text = String(line)
-            return text.contains("\"\(label)\"") && text.contains("=> true")
+        guard result.outcome == .completed,
+              result.exitCode == 0,
+              result.stderr.isEmpty,
+              result.stdout.utf8.count < 16 * 1_024
+        else { return false }
+        guard label.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", options: .regularExpression) != nil else {
+            return false
         }
+        let accepted = Set([
+            "\"\(label)\" => true",
+            "\"\(label)\" => disabled",
+        ])
+        let matches = result.stdout.split(separator: "\n", omittingEmptySubsequences: false).filter { line in
+            accepted.contains(String(line).trimmingCharacters(in: .whitespaces))
+        }
+        return matches.count == 1
     }
 }
