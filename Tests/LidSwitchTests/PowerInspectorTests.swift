@@ -2230,6 +2230,62 @@ final class SessionSafetyTests: XCTestCase {
     }
 
     @MainActor
+    func testIdleQuitSkipsAdministratorRestoreAfterTerminalMigrationAgesOut() async throws {
+        let events = LockedBox([String]())
+        let waits = LockedBox(0)
+        let now = Date()
+        let status = HelperStatusRecord(
+            state: "terminal",
+            reason: "legacy-migration",
+            sessionID: UUID(),
+            updatedAt: now.addingTimeInterval(-60),
+            bootID: BootIdentity.current() ?? "test-boot",
+            updatedMonotonic: max(0, MonotonicClock.seconds() - 60)
+        )
+        let idle = makeSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            lease: nil,
+            status: status,
+            checkedAt: now
+        )
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in idle },
+            sideEffects: .recordingFixture(
+                { event in events.withValue { $0.append(event) } },
+                administratorResult: { operation in
+                    .completionIndeterminate(
+                        transactionID: UUID(uuidString: "11111111-2222-4333-8444-555555555555")!,
+                        operation: operation,
+                        reason: "administrator-wait-timed-out"
+                    )
+                }
+            ),
+            safeRollbackWaiter: {
+                waits.withValue { $0 += 1 }
+                return idle
+            }
+        )
+
+        controller.refresh()
+        await waitForRefresh(controller)
+        XCTAssertEqual(controller.displayedStatus.title, "Ready for monitored session")
+        XCTAssertFalse(try XCTUnwrap(controller.snapshot.helperStatus).isFresh(at: now))
+        XCTAssertFalse(controller.requiresTerminationCleanup)
+
+        controller.quitSafely()
+
+        XCTAssertEqual(waits.value, 0)
+        XCTAssertEqual(events.value.filter { $0 == "restore-sleep" }.count, 0)
+        XCTAssertEqual(events.value.filter { $0 == "terminate" }, ["terminate"])
+        XCTAssertTrue(controller.consumeAuthorizedTermination())
+        XCTAssertFalse(controller.consumeAuthorizedTermination())
+        XCTAssertNil(controller.errorMessage)
+    }
+
+    @MainActor
     func testQuitFallsBackToOneAdministratorRestoreAndTerminatesOnlyAfterSafeIdle() async {
         let events = LockedBox([String]())
         let waits = LockedBox(0)
@@ -2240,7 +2296,7 @@ final class SessionSafetyTests: XCTestCase {
         )
         let controller = PowerController(
             bootstrap: false,
-            snapshotProvider: { _ in safe },
+            snapshotProvider: { _ in unsafe },
             inventoryInvalidator: { events.withValue { $0.append("inventory-invalidated") } },
             sideEffects: .recordingFixture { event in
                 events.withValue { $0.append(event) }
@@ -2252,6 +2308,10 @@ final class SessionSafetyTests: XCTestCase {
                 }
             }
         )
+
+        controller.refresh()
+        await waitForRefresh(controller)
+        XCTAssertTrue(controller.requiresTerminationCleanup)
 
         controller.quitSafely()
         for _ in 0..<200 where controller.isBusy {
@@ -2292,6 +2352,10 @@ final class SessionSafetyTests: XCTestCase {
             ),
             safeRollbackWaiter: { unsafe }
         )
+
+        controller.refresh()
+        await waitForRefresh(controller)
+        XCTAssertTrue(controller.requiresTerminationCleanup)
 
         controller.quitSafely()
         for _ in 0..<200 where controller.isBusy {

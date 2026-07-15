@@ -1175,7 +1175,10 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
                 return inactiveNone.contains(reason) && age <= 60 && signature == "boot_id,updated_monotonic"
             case ("terminal", "uuid"):
                 let expected = reason == "legacy-migration" ? projectionSignature : "boot_id,updated_monotonic"
-                return terminalReasons.contains(reason) && age <= 60 && signature == expected
+                let ageIsValid = reason == "legacy-migration"
+                    ? age >= -2
+                    : age >= -2 && age <= 60
+                return terminalReasons.contains(reason) && ageIsValid && signature == expected
             case ("recovery-required", "none"):
                 return recoveryNone.contains(reason) && age <= 30 && signature == "boot_id,updated_monotonic"
             case ("recovery-required", "uuid"):
@@ -1186,6 +1189,9 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
         }
         XCTAssertTrue(candidateAccepts("terminal", "user-end", "uuid", 10, "boot_id,updated_monotonic"))
         XCTAssertTrue(candidateAccepts("terminal", "legacy-migration", "uuid", 10, projectionSignature))
+        XCTAssertTrue(candidateAccepts("terminal", "legacy-migration", "uuid", 3_600, projectionSignature))
+        XCTAssertFalse(candidateAccepts("terminal", "legacy-migration", "uuid", -3, projectionSignature))
+        XCTAssertFalse(candidateAccepts("terminal", "user-end", "uuid", 61, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("terminal", "legacy-migration", "uuid", 10, "boot_id,updated_monotonic"))
         XCTAssertTrue(candidateAccepts("recovery-required", "invalid-applied-state", "none", 10, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("terminal", "user-end", "none", 10, "boot_id,updated_monotonic"))

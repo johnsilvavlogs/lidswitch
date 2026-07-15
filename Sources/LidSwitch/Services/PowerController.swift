@@ -1764,6 +1764,17 @@ final class PowerController: ObservableObject {
 
     func quitSafely() {
         guard !isBusy else { return }
+        // The panel has already collected an explicit Restore-and-Quit
+        // confirmation.  Match the application-delegate path: when this
+        // process owns no cleanup work, do not launch a redundant
+        // administrator transaction merely to quit an already-idle app.
+        // Mark the next AppKit termination callback as authorized so it does
+        // not present a second confirmation dialog.
+        guard requiresTerminationCleanup else {
+            nextTerminationIsAuthorized = true
+            sideEffects.terminateApplication()
+            return
+        }
         stopSession(quitWhenRestored: true, terminationReplyID: nil)
     }
 

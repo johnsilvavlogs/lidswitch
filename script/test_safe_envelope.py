@@ -81,13 +81,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("c7500fa1c16a2e2b93077bded1c02f9a51cdefa7d327f789a384ef38b6d249a8", 58948),
+    "script/live_state_envelope.sh": ("120457ecf3b0c19cd7abfa48d3d3a1852c9d8dee2413436c9ff683605794a891", 59494),
     "script/swift_sandbox_common.sh": ("f93e57098e318d072169f1535f0b554fccb26fce36e30de9a597e58855e7e9cf", 67919),
     "script/swift_test_sandbox.sb.in": ("8b013f263b8df5bac4da437c2fa8a5e7c7f5e64f4ae33650904a1cf1d0e95e5e", 10764),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("aa3ebfd52cf71dab6eb654e1fe4c28b4a1a75495c59d325c04c02a726cf651e2", 3578),
+    "script/source_snapshot_manifest.jsonl": ("1a96bf58566d909f9d80ebcf2a4f3f0ab16e5239dbc1ba6d52bea985f0956174", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1611,6 +1611,21 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn('expires <= current', envelope)
         self.assertIn('[[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths"', envelope)
         self.assertIn('live_envelope_legacy_idle_status_is_not_future', envelope)
+        self.assertIn('live_envelope_durable_migration_status_is_not_future', envelope)
+        durable_migration = envelope[
+            envelope.index('live_envelope_durable_migration_status_is_not_future()') :
+            envelope.index('live_envelope_override_evidence_is_exact()')
+        ]
+        self.assertIn('"$LIVE_STATUS_SCHEMA" == "canonical-v2"', durable_migration)
+        self.assertIn('"$LIVE_STATUS_BOOT_ID" == "$LIVE_KERNEL_BOOT"', durable_migration)
+        self.assertIn('[[ "$wall_age" -ge -2 ]]', durable_migration)
+        self.assertIn('if ((now - then) < -2) exit 74', durable_migration)
+        candidate_terminal = envelope[
+            envelope.index('true:terminal:uuid)') :
+            envelope.index('true:recovery-required:none)')
+        ]
+        self.assertIn('live_envelope_durable_migration_status_is_not_future', candidate_terminal)
+        self.assertEqual(candidate_terminal.count('live_envelope_status_is_current 60'), 1)
         self.assertIn('LIVE_STATUS_LEGACY_STALE_IDLE=true', envelope)
         self.assertIn('"$LIVE_POWER_SOURCE" == "ac" && "$LIVE_AC_SLEEP" == "0"', envelope)
         stale_idle = envelope[envelope.index('if [[ "$LIVE_STATUS_LEGACY_STALE_IDLE" == true ]]') : envelope.index('LIVE_AUTHORITY_KIND="none"')]

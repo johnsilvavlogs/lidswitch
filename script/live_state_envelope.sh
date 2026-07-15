@@ -238,6 +238,17 @@ live_envelope_legacy_idle_status_is_not_future() {
   [[ "$wall_age" -ge -2 ]] || return 74
 }
 
+live_envelope_durable_migration_status_is_not_future() {
+  local wall_now wall_age
+  [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_BOOT_ID" == "$LIVE_KERNEL_BOOT" ]] || return 74
+  wall_now="$(/bin/date +%s)" || return 74
+  wall_age=$((wall_now - LIVE_STATUS_UPDATED))
+  [[ "$wall_age" -ge -2 ]] || return 74
+  /usr/bin/awk -v now="$LIVE_KERNEL_MONOTONIC" -v then="$LIVE_STATUS_MONOTONIC" '
+    BEGIN { if ((now - then) < -2) exit 74 }
+  ' || return 74
+}
+
 live_envelope_override_evidence_is_exact() {
   local now age
   [[ "$LIVE_STATUS_EVENT" == "override-drift" && "$LIVE_STATUS_OBSERVED_POWER" == "ac" ]] || return 74
@@ -290,10 +301,11 @@ live_envelope_status_matrix() {
       live_envelope_reason_in_list "$LIVE_STATUS_REASON" "$LIDSWITCH_CANDIDATE_TERMINAL_SESSION_REASONS" || return 74
       if [[ "$LIVE_STATUS_REASON" == "legacy-migration" ]]; then
         [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
+        live_envelope_durable_migration_status_is_not_future || return 74
       else
         [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
+        live_envelope_status_is_current 60 || return 74
       fi
-      live_envelope_status_is_current 60 || return 74
       LIVE_STATUS_REASON_CLASS="safe-idle"
       ;;
     true:recovery-required:none)
