@@ -81,13 +81,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("120457ecf3b0c19cd7abfa48d3d3a1852c9d8dee2413436c9ff683605794a891", 59494),
+    "script/live_state_envelope.sh": ("b27597aaf9bc4a23f95b69c25d64f8b23321a2885a627735237a71164e8c8b27", 59685),
     "script/swift_sandbox_common.sh": ("30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985", 68188),
     "script/swift_test_sandbox.sb.in": ("851794f1b655898dd2618ee880c8f9e393687b5362a3a9e81f79ef99f69e23c7", 10822),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("7b7e8fcf73cca29a1a0a8b631a5676e23a037806e2bf2a6f18e25880fbb137d6", 3578),
+    "script/source_snapshot_manifest.jsonl": ("d7c6db0eeaa1766297f6888fc42f9c2b3682cb4af3116a4345728907ba15a280", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1600,6 +1600,16 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertNotRegex(envelope, r'print\s+(?:signature|count|found)\b')
         projection_signature = "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic"
         self.assertIn(f'"$LIVE_STATUS_EVIDENCE_SIGNATURE" == "{projection_signature}"', envelope)
+        candidate_projection_branches = (
+            ("true:active:uuid)", "false:active:uuid)"),
+            ("true:inactive:none)", "true:terminal:uuid)"),
+            ("true:terminal:uuid)", "true:recovery-required:none)"),
+            ("true:recovery-required:none)", "true:recovery-required:uuid)"),
+            ("true:recovery-required:uuid)", "false:inactive:none|false:inactive:uuid)"),
+        )
+        for start, end in candidate_projection_branches:
+            branch = envelope[envelope.index(start) : envelope.index(end)]
+            self.assertIn(f'"$LIVE_STATUS_EVIDENCE_SIGNATURE" == "{projection_signature}"', branch)
         for key in ("projection_authority", "projection_generation", "projection_token"):
             self.assertIn(f'key != "{key}"', envelope)
             self.assertIn(f'live_envelope_kv_optional {key}', envelope)
@@ -1615,21 +1625,21 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn('expires <= current', envelope)
         self.assertIn('[[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths"', envelope)
         self.assertIn('live_envelope_legacy_idle_status_is_not_future', envelope)
-        self.assertIn('live_envelope_durable_migration_status_is_not_future', envelope)
-        durable_migration = envelope[
-            envelope.index('live_envelope_durable_migration_status_is_not_future()') :
+        self.assertIn('live_envelope_durable_terminal_status_is_not_future', envelope)
+        durable_terminal = envelope[
+            envelope.index('live_envelope_durable_terminal_status_is_not_future()') :
             envelope.index('live_envelope_override_evidence_is_exact()')
         ]
-        self.assertIn('"$LIVE_STATUS_SCHEMA" == "canonical-v2"', durable_migration)
-        self.assertIn('"$LIVE_STATUS_BOOT_ID" == "$LIVE_KERNEL_BOOT"', durable_migration)
-        self.assertIn('[[ "$wall_age" -ge -2 ]]', durable_migration)
-        self.assertIn('if ((now - then) < -2) exit 74', durable_migration)
+        self.assertIn('"$LIVE_STATUS_SCHEMA" == "canonical-v2"', durable_terminal)
+        self.assertIn('"$LIVE_STATUS_BOOT_ID" == "$LIVE_KERNEL_BOOT"', durable_terminal)
+        self.assertIn('[[ "$wall_age" -ge -2 ]]', durable_terminal)
+        self.assertIn('if ((now - then) < -2) exit 74', durable_terminal)
         candidate_terminal = envelope[
             envelope.index('true:terminal:uuid)') :
             envelope.index('true:recovery-required:none)')
         ]
-        self.assertIn('live_envelope_durable_migration_status_is_not_future', candidate_terminal)
-        self.assertEqual(candidate_terminal.count('live_envelope_status_is_current 60'), 1)
+        self.assertEqual(candidate_terminal.count('live_envelope_durable_terminal_status_is_not_future'), 1)
+        self.assertNotIn('live_envelope_status_is_current', candidate_terminal)
         self.assertIn('LIVE_STATUS_LEGACY_STALE_IDLE=true', envelope)
         self.assertIn('"$LIVE_POWER_SOURCE" == "ac" && "$LIVE_AC_SLEEP" == "0"', envelope)
         stale_idle = envelope[envelope.index('if [[ "$LIVE_STATUS_LEGACY_STALE_IDLE" == true ]]') : envelope.index('LIVE_AUTHORITY_KIND="none"')]

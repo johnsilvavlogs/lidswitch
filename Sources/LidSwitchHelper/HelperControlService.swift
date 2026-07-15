@@ -775,8 +775,18 @@ final class HelperSessionAuthority: @unchecked Sendable {
             _ = restoreActive(reason: "peer-process-invalid", store: store, transaction: transaction)
             return
         }
+        // Classify an unsolicited owner death before the composite private
+        // authority predicate folds peer liveness into a generic state
+        // mismatch. Recheck after a failed predicate to close the race where
+        // the peer exits between this observation and the predicate's own
+        // liveness fence.
+        guard peerIsLive(activePeer) else {
+            _ = restoreActive(reason: "peer-process-invalid", store: store, transaction: transaction)
+            return
+        }
         guard privateAuthorityMatches(expectedSession: session, peer: activePeer, expiry: expiry, store: store) else {
-            _ = restoreActive(reason: "invalid-applied-state", store: store, transaction: transaction)
+            let reason = peerIsLive(activePeer) ? "invalid-applied-state" : "peer-process-invalid"
+            _ = restoreActive(reason: reason, store: store, transaction: transaction)
             return
         }
         if monotonicNow() >= expiry {

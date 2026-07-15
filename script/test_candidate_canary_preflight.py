@@ -81,7 +81,7 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
             ("/usr/bin/pgrep", "-x", "LidSwitch"): (1, ""),
             ("/usr/bin/pmset", "-g", "batt"): (0, "Now drawing from 'AC Power'\n"),
             ("/usr/bin/pmset", "-g", "live"): (0, " SleepDisabled 0\n"),
-            ("/usr/bin/pmset", "-g", "custom"): (0, "AC Power:\n sleep 0\nBattery Power:\n sleep 10\n"),
+            ("/usr/bin/pmset", "-g", "custom"): (0, "Battery Power:\n sleep 10\nAC Power:\n sleep 0\n"),
         }
         return values[argv]
 
@@ -189,6 +189,17 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
         self.assertEqual(final["rollback"]["terminal_reason"], "peer-process-invalid")
         self.assertTrue(all(command[0] in {"/usr/bin/shasum", "/usr/bin/codesign", "/usr/sbin/sysctl", "/usr/bin/pgrep", "/usr/bin/pmset"} for command in self.commands))
         self.assertNotIn(("/usr/bin/pmset", "-a", "disablesleep", "0"), self.commands)
+
+    def test_custom_sleep_accepts_both_native_section_orders_and_canonicalizes(self):
+        expected = {"AC Power": 0, "Battery Power": 10}
+        self.assertEqual(
+            preflight._custom_sleep("AC Power:\n sleep 0\nBattery Power:\n sleep 10\n"),
+            expected,
+        )
+        self.assertEqual(
+            preflight._custom_sleep("Battery Power:\n sleep 10\nAC Power:\n sleep 0\n"),
+            expected,
+        )
 
     def test_preflight_rejects_unknown_lid_mode_and_binding_hash(self):
         bad = self.args(); bad.lid_open_observed = "yes"

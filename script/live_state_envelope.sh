@@ -238,7 +238,7 @@ live_envelope_legacy_idle_status_is_not_future() {
   [[ "$wall_age" -ge -2 ]] || return 74
 }
 
-live_envelope_durable_migration_status_is_not_future() {
+live_envelope_durable_terminal_status_is_not_future() {
   local wall_now wall_age
   [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_BOOT_ID" == "$LIVE_KERNEL_BOOT" ]] || return 74
   wall_now="$(/bin/date +%s)" || return 74
@@ -270,9 +270,9 @@ live_envelope_status_matrix() {
     true:active:uuid)
       case "$LIVE_STATUS_REASON" in
         verified|renewed|reconnected)
-          [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74 ;;
+          [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74 ;;
         override-recovered)
-          [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,recovery_budget,updated_monotonic" && "$LIVE_STATUS_RECOVERY_BUDGET" == "spent" ]] || return 74 ;;
+          [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74 ;;
         *) return 74 ;;
       esac
       live_envelope_status_is_current 15 || return 74
@@ -293,30 +293,28 @@ live_envelope_status_matrix() {
       ;;
     true:inactive:none)
       live_envelope_reason_in_list "$LIVE_STATUS_REASON" "$LIDSWITCH_CANDIDATE_INACTIVE_NONE_REASONS" || return 74
-      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
+      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
       live_envelope_status_is_current 60 || return 74
       LIVE_STATUS_REASON_CLASS="safe-idle"
       ;;
     true:terminal:uuid)
       live_envelope_reason_in_list "$LIVE_STATUS_REASON" "$LIDSWITCH_CANDIDATE_TERMINAL_SESSION_REASONS" || return 74
-      if [[ "$LIVE_STATUS_REASON" == "legacy-migration" ]]; then
-        [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
-        live_envelope_durable_migration_status_is_not_future || return 74
-      else
-        [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
-        live_envelope_status_is_current 60 || return 74
-      fi
+      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
+      # Terminal projections are durable safe-idle receipts, not heartbeats.
+      # Their current-boot identity and non-future timestamps remain exact,
+      # while elapsed wall time must not make an otherwise safe host untestable.
+      live_envelope_durable_terminal_status_is_not_future || return 74
       LIVE_STATUS_REASON_CLASS="safe-idle"
       ;;
     true:recovery-required:none)
       live_envelope_reason_in_list "$LIVE_STATUS_REASON" "$LIDSWITCH_CANDIDATE_RECOVERY_NONE_REASONS" || return 74
-      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
+      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
       live_envelope_status_is_current 30 || return 74
       LIVE_STATUS_REASON_CLASS="recovery-required"
       ;;
     true:recovery-required:uuid)
       live_envelope_reason_in_list "$LIVE_STATUS_REASON" "$LIDSWITCH_CANDIDATE_RECOVERY_SESSION_REASONS" || return 74
-      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
+      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
       live_envelope_status_is_current 30 || return 74
       LIVE_STATUS_REASON_CLASS="recovery-required"
       ;;

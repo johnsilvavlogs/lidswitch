@@ -193,9 +193,12 @@ def _custom_sleep(custom: str):
             if active in result:
                 fail("pmset-custom-invalid")
             result[active] = int(match.group(1))
-    if tuple(result) != ("AC Power", "Battery Power"):
+    if set(result) != {"AC Power", "Battery Power"}:
         fail("pmset-custom-invalid")
-    return result
+    return {
+        "AC Power": result["AC Power"],
+        "Battery Power": result["Battery Power"],
+    }
 
 
 def _lid_open_observation(mode: str, runner=None):

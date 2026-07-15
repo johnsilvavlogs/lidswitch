@@ -337,6 +337,43 @@ final class RawXPCSecurityTests: XCTestCase {
         XCTAssertEqual(authority.handle(connection: 1, peer: peer, operation: UInt32(LS_OPERATION_RENEW.rawValue), sessionID: session).result, 0)
     }
 
+    func testReconcileClassifiesDeadActivePeerBeforeAuthorityDrift() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let peerIsAlive = SecurityBox(true)
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: fixture.recoveryStoreFactory,
+            statusProjectionWriter: fixture.statusProjectionWriter,
+            peerIsLive: { _ in peerIsAlive.value },
+            timerStarter: { _ in NSObject() }
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        let session = UUID()
+        XCTAssertEqual(
+            authority.handle(
+                connection: 1,
+                operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+                sessionID: session
+            ).result,
+            0
+        )
+        XCTAssertEqual(fixture.power.disabled, true)
+        XCTAssertNotNil(fixture.privateApplied())
+
+        peerIsAlive.withValue { $0 = false }
+        authority.reconcileForTesting()
+
+        XCTAssertEqual(fixture.power.disabled, false)
+        XCTAssertEqual(fixture.power.ac, 10)
+        XCTAssertEqual(fixture.store.appliedRecord(), .missing)
+        XCTAssertEqual(fixture.store.proof()?.kind, .terminal)
+        XCTAssertEqual(fixture.store.proof()?.sessionID, session)
+        XCTAssertEqual(fixture.store.proof()?.reason, "peer-process-invalid")
+        XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.terminalBasename)?.last, session)
+    }
+
     func testHistoricalRecoveryReservationDoesNotBlockNextSessionLifecycle() throws {
         let fixture = try AuthorityFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -1176,31 +1213,29 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
         let candidateAccepts: (String, String, String, Int, String) -> Bool = { state, reason, session, age, signature in
             switch (state, session) {
             case ("inactive", "none"):
-                return inactiveNone.contains(reason) && age <= 60 && signature == "boot_id,updated_monotonic"
+                return inactiveNone.contains(reason) && age <= 60 && signature == projectionSignature
             case ("terminal", "uuid"):
-                let expected = reason == "legacy-migration" ? projectionSignature : "boot_id,updated_monotonic"
-                let ageIsValid = reason == "legacy-migration"
-                    ? age >= -2
-                    : age >= -2 && age <= 60
-                return terminalReasons.contains(reason) && ageIsValid && signature == expected
+                return terminalReasons.contains(reason) && age >= -2 && signature == projectionSignature
             case ("recovery-required", "none"):
-                return recoveryNone.contains(reason) && age <= 30 && signature == "boot_id,updated_monotonic"
+                return recoveryNone.contains(reason) && age <= 30 && signature == projectionSignature
             case ("recovery-required", "uuid"):
-                return recoverySession.contains(reason) && age <= 30 && signature == "boot_id,updated_monotonic"
+                return recoverySession.contains(reason) && age <= 30 && signature == projectionSignature
             default:
                 return false
             }
         }
-        XCTAssertTrue(candidateAccepts("terminal", "user-end", "uuid", 10, "boot_id,updated_monotonic"))
+        XCTAssertTrue(candidateAccepts("terminal", "user-end", "uuid", 10, projectionSignature))
+        XCTAssertTrue(candidateAccepts("terminal", "user-end", "uuid", 3_600, projectionSignature))
         XCTAssertTrue(candidateAccepts("terminal", "legacy-migration", "uuid", 10, projectionSignature))
         XCTAssertTrue(candidateAccepts("terminal", "legacy-migration", "uuid", 3_600, projectionSignature))
         XCTAssertFalse(candidateAccepts("terminal", "legacy-migration", "uuid", -3, projectionSignature))
-        XCTAssertFalse(candidateAccepts("terminal", "user-end", "uuid", 61, "boot_id,updated_monotonic"))
+        XCTAssertFalse(candidateAccepts("terminal", "user-end", "uuid", -3, projectionSignature))
+        XCTAssertFalse(candidateAccepts("terminal", "user-end", "uuid", 10, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("terminal", "legacy-migration", "uuid", 10, "boot_id,updated_monotonic"))
-        XCTAssertTrue(candidateAccepts("recovery-required", "invalid-applied-state", "none", 10, "boot_id,updated_monotonic"))
-        XCTAssertFalse(candidateAccepts("terminal", "user-end", "none", 10, "boot_id,updated_monotonic"))
-        XCTAssertFalse(candidateAccepts("inactive", "unknown", "none", 10, "boot_id,updated_monotonic"))
-        XCTAssertFalse(candidateAccepts("recovery-required", "invalid-applied-state", "none", 31, "boot_id,updated_monotonic"))
+        XCTAssertTrue(candidateAccepts("recovery-required", "invalid-applied-state", "none", 10, projectionSignature))
+        XCTAssertFalse(candidateAccepts("terminal", "user-end", "none", 10, projectionSignature))
+        XCTAssertFalse(candidateAccepts("inactive", "unknown", "none", 10, projectionSignature))
+        XCTAssertFalse(candidateAccepts("recovery-required", "invalid-applied-state", "none", 31, projectionSignature))
         XCTAssertFalse(candidateAccepts("terminal", "user-end", "uuid", 10, "boot_id,event,updated_monotonic"))
 
         let migrationProjection = """
