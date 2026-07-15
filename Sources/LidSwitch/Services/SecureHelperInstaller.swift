@@ -764,7 +764,10 @@ enum SecureHelperInstaller {
 
         failure_reason=stage-verification-failed
         [ ! -L "$stage_parent" ] && [ -d "$stage_parent" ] || exit 65
-        [ "$(/usr/bin/stat -f '%u:%g:%Lp:%d' "$stage_parent")" = "0:0:755:$(/usr/bin/stat -f '%d' "$root")" ] || exit 65
+        # macOS owns this one canonical ancestor as root:admin. Keep the
+        # exception exact and aligned with VerifiedRootStateDirectory's
+        # production chain; the product root itself remains root:wheel.
+        [ "$(/usr/bin/stat -f '%u:%g:%Lp:%d' "$stage_parent")" = "0:80:755:$(/usr/bin/stat -f '%d' "$root")" ] || exit 65
         # `mkdir` is exclusive: an existing or substituted stage is never
         # recursively removed, inspected as ours, or reused.
         /bin/mkdir -m 0700 "$stage" || exit 65

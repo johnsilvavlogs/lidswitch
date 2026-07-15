@@ -4422,6 +4422,8 @@ final class SessionSafetyTests: XCTestCase {
             XCTAssertFalse(script.contains("original-battery-sleep"))
             XCTAssertTrue(script.contains(".LidSwitch-administrator-"))
             XCTAssertTrue(script.contains("stage_parent="))
+            XCTAssertTrue(script.contains("0:80:755:$(/usr/bin/stat -f '%d' \"$root\")"))
+            XCTAssertFalse(script.contains("0:0:755:$(/usr/bin/stat -f '%d' \"$root\")"))
             XCTAssertTrue(script.contains("legacy_target="))
             XCTAssertTrue(script.contains("cleanup_verified_stage"))
         }
