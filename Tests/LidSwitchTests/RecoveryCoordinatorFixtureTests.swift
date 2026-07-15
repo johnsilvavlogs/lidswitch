@@ -563,6 +563,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
     func testStatusProjectionWriterVerifiedSwapPublishesOnlyNewerGeneration() throws {
         let fixture = try Fixture()
         defer { fixture.dispose() }
+        try FileManager.default.removeItem(atPath: fixture.configuration.statusPath)
         let first = try XCTUnwrap(StatusProjectionTask(generation: 1, state: "active", reason: "fixture-first",
                                                        sessionID: nil, issuedEpoch: 10, issuedMonotonicMillis: 10,
                                                        bootID: "fixture-boot", deadlineNanoseconds: 100))
@@ -1975,6 +1976,7 @@ private final class Fixture {
             )
             XCTAssertEqual(coordinator.recover(intent: .startup, allowReconnect: true), .pristineIdle)
         }
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
     }
 
     static func makeConfiguration(

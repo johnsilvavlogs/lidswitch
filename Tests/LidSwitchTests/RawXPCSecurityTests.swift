@@ -467,6 +467,7 @@ final class RawXPCSecurityTests: XCTestCase {
             timerStarter: { _ in NSObject() }
         )
         XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
 
         let blocked = try XCTUnwrap(RecoveryAuthorityStore(
             supportDirectory: fixture.directory.path,

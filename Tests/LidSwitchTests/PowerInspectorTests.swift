@@ -4519,7 +4519,7 @@ final class SessionSafetyTests: XCTestCase {
             AppPaths.legacyV4RootHelperVersionPath
         ].map { "'\($0)'" }.joined(separator: " ")
         let installLegacyCleanup = "/bin/rm -f \(legacyArtifacts)"
-        let uninstallLegacyCleanup = "/bin/rm -f \"$plist\" \(legacyArtifacts)"
+        let uninstallLegacyCleanup = "/bin/rm -f \"$status\" \"$plist\" \(legacyArtifacts)"
         let installLegacyMarkerDeletion = try XCTUnwrap(install.range(of: installLegacyCleanup))
         let uninstallLegacyMarkerDeletion = try XCTUnwrap(uninstall.range(of: uninstallLegacyCleanup))
         XCTAssertLessThan(bootstrap.lowerBound, installLegacyMarkerDeletion.lowerBound)
