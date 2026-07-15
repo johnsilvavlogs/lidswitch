@@ -637,6 +637,60 @@ final class LegacyMigrationFixtureTests: XCTestCase {
         XCTAssertNil(mismatched.store.proof())
     }
 
+    func testShippedV4TerminalOnlyLedgerPublishesEmptyReservationThenMigrates() throws {
+        let terminal = UUID()
+        let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+        defer { fixture.dispose() }
+        try fixture.installRegular(name: "helper-version", bytes: "4\n", mode: 0o644)
+        try fixture.installRegular(
+            name: RecoveryAuthorityStore.terminalBasename,
+            bytes: terminal.uuidString.lowercased() + "\n",
+            mode: 0o644
+        )
+        try fixture.installLegacyStatus(state: "inactive", session: terminal)
+
+        XCTAssertEqual(fixture.store.provision(), .ready)
+        XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.terminalBasename), [terminal])
+        XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
+        XCTAssertEqual(
+            fixture.store.proof(),
+            RecoveryProof(kind: .terminal, sessionID: terminal, reason: "legacy-migration")
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testTerminalOnlyLedgerStillRejectsWrongVersionOrInactiveLineage() throws {
+        let terminal = UUID()
+        for (version, session) in [(3, terminal), (4, UUID())] {
+            let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+            defer { fixture.dispose() }
+            try fixture.installRegular(name: "helper-version", bytes: "\(version)\n", mode: 0o644)
+            try fixture.installRegular(
+                name: RecoveryAuthorityStore.terminalBasename,
+                bytes: terminal.uuidString.lowercased() + "\n",
+                mode: 0o644
+            )
+            try fixture.installLegacyStatus(state: "inactive", session: session)
+
+            XCTAssertTrue(fixture.prepareMustFailWithoutSetter())
+            XCTAssertEqual(fixture.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+            XCTAssertEqual(fixture.power.setCalls, [])
+        }
+
+        let missingLineage = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+        defer { missingLineage.dispose() }
+        try missingLineage.installRegular(name: "helper-version", bytes: "4\n", mode: 0o644)
+        try missingLineage.installRegular(
+            name: RecoveryAuthorityStore.terminalBasename,
+            bytes: "",
+            mode: 0o644
+        )
+
+        XCTAssertTrue(missingLineage.prepareMustFailWithoutSetter())
+        XCTAssertEqual(missingLineage.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+        XCTAssertEqual(missingLineage.power.setCalls, [])
+    }
+
     func testDurableJournalAndPristineProofResumeOnlyTheirOwnPartialEmptyLedgerPair() throws {
         let journaled = try LegacyFixture(disabled: false, ac: nil, battery: nil)
         defer { journaled.dispose() }

@@ -684,6 +684,29 @@ final class RecoveryAuthorityStore {
             guard historicalArtifactsAreStrict else {
                 return .recoveryRequired("unsafe-legacy-history")
             }
+
+            // v0.2.9/helper-v4 shipped terminal-generations but had no
+            // recovery-reservations concept.  Admit only that exact strict
+            // legacy shape, with no timer authority and with status lineage
+            // bound to the newest terminal UUID (or exact empty idle state).
+            // Publishing the new empty reservation first is the durable resume
+            // marker: a crash leaves both ledgers present, and the ordinary
+            // descriptor-held migration below can safely continue without
+            // guessing or discarding any terminal history.
+            if case let .legacyReadable(entries, _) = terminal,
+               reservation == .absent,
+               ac == .absent,
+               battery == .absent,
+               historicalStatusAllowsShippedV4LedgerPair(entries) {
+                guard publishLedger(
+                    bytes: "",
+                    basename: Self.reservationBasename,
+                    transaction: transaction
+                ).isVerified else {
+                    return .recoveryRequired("legacy-v4-reservation-publication-failed")
+                }
+                reservation = ledger(Self.reservationBasename)
+            }
             guard terminal == .absent || reservation != .absent,
                   reservation == .absent || terminal != .absent
             else { return .recoveryRequired("legacy-history-ledger-conflict") }
@@ -945,7 +968,29 @@ final class RecoveryAuthorityStore {
         case .absent:
             return true
         case let .valid(status):
-            return status.state == "terminal" && status.sessionID == terminal
+            // v0.2.9/helper-v4 recorded a successfully restored terminal
+            // generation as `inactive`; helper-v5 records the same durable
+            // conclusion as `terminal`.  The exact newest tombstone UUID is
+            // the authority in either spelling, so no broader inactive state
+            // can be promoted during migration.
+            let acceptedState = status.state == "terminal"
+                || (historicalHelperVersion == 4 && status.state == "inactive")
+            return acceptedState && status.sessionID == terminal
+        case .invalid:
+            return false
+        }
+    }
+
+    private func historicalStatusAllowsShippedV4LedgerPair(_ entries: [UUID]) -> Bool {
+        guard historicalHelperVersion == 4 else { return false }
+        switch historicalStatusRecord {
+        case .absent:
+            return false
+        case let .valid(status):
+            if let latest = entries.last {
+                return status.state == "inactive" && status.sessionID == latest
+            }
+            return status.state == "inactive" && status.sessionID == nil
         case .invalid:
             return false
         }
@@ -1020,6 +1065,16 @@ final class RecoveryAuthorityStore {
         return version
     }
 
+    private var historicalHelperVersion: Int? {
+        guard directory.entryState("helper-version") == .present else { return nil }
+        let raw: String
+        switch classifiedText("helper-version", maximumBytes: 128) {
+        case let .privateMode(value), let .legacyMode(value): raw = value
+        case .invalid: return nil
+        }
+        return Self.parseHistoricalHelperVersion(raw)
+    }
+
     private var historicalArtifactsAreStrict: Bool {
         for basename in Self.legacyHistoryBasenames {
             switch directory.entryState(basename) {
@@ -1038,12 +1093,7 @@ final class RecoveryAuthorityStore {
                 case "helper-status":
                     guard historicalStatusRecord != .invalid else { return false }
                 case "helper-version":
-                    let raw: String
-                    switch classifiedText(basename, maximumBytes: 128) {
-                    case let .privateMode(value), let .legacyMode(value): raw = value
-                    case .invalid: return false
-                    }
-                    guard Self.parseHistoricalHelperVersion(raw) != nil else { return false }
+                    guard historicalHelperVersion != nil else { return false }
                 case "lidswitch-helper", "LidSwitchHelper":
                     guard historicalRegularIsValid(basename, expectedMode: 0o755, maximumBytes: 16 * 1_024 * 1_024) else {
                         return false
