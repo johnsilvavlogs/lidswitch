@@ -881,6 +881,7 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
         XCTAssertTrue(profile.contains("(allow file-read-data (literal \"/\"))"))
         XCTAssertTrue(profile.contains("(allow file-read-metadata (literal \"/\"))"))
         XCTAssertTrue(profile.contains("(allow file-read-metadata (literal \"/usr\"))"))
+        XCTAssertTrue(profile.contains("(allow file-read-metadata (literal \"@BENCHMARK_PARENT@\"))"))
         XCTAssertTrue(profile.contains("(allow file-read* (subpath \"@EXEC_ROOT@\"))"))
         XCTAssertTrue(profile.contains("(allow file-read* (literal \"@XCODE_XCTEST_TOOL@\"))"))
         XCTAssertTrue(profile.contains("(allow process-exec (literal \"@XCODE_XCTEST_TOOL@\"))"))
@@ -998,10 +999,13 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
         XCTAssertLessThan(expected.lowerBound, observed.lowerBound)
         XCTAssertLessThan(observed.lowerBound, comparison.lowerBound)
         XCTAssertLessThan(comparison.lowerBound, success.lowerBound)
+        XCTAssertTrue(destination.contains("if allow_nlink_growth:"))
+        XCTAssertTrue(destination.contains("observed[:5] != expected[:5] or observed[5] < expected[5]"))
         XCTAssertTrue(files.contains("F_FULLFSYNC"))
         let publisher = try pythonFunction("copy_new", in: files)
         XCTAssertLessThan(try XCTUnwrap(publisher.range(of: "validate_benchmark_jsonl")).lowerBound,
                           try XCTUnwrap(publisher.range(of: "open_private_destination")).lowerBound)
+        XCTAssertEqual(publisher.components(separatedBy: "allow_nlink_growth=True").count - 1, 1)
         XCTAssertTrue(try pythonFunction("validate_benchmark_jsonl", in: files).contains("canonical != text"))
     }
 

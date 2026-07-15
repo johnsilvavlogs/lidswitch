@@ -77,17 +77,17 @@ except BaseException:
 # intentionally external: the manager bootstrap supplies it before this file
 # can execute, avoiding a self-referential hash.
 DEPENDENCY_FREEZE = {
-    "safe_file_capability": ("cc9da60f429aefdbbb7f9a672d314dfb644fe000cbdd82529083f7bb7f3893cb", 117148),
+    "safe_file_capability": ("1efa793bfd62d718addaa4bf588e3ba11c1e7b2d601f60b877f60801afddb96c", 118213),
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
     "script/live_state_envelope.sh": ("120457ecf3b0c19cd7abfa48d3d3a1852c9d8dee2413436c9ff683605794a891", 59494),
-    "script/swift_sandbox_common.sh": ("f93e57098e318d072169f1535f0b554fccb26fce36e30de9a597e58855e7e9cf", 67919),
-    "script/swift_test_sandbox.sb.in": ("8b013f263b8df5bac4da437c2fa8a5e7c7f5e64f4ae33650904a1cf1d0e95e5e", 10764),
+    "script/swift_sandbox_common.sh": ("30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985", 68188),
+    "script/swift_test_sandbox.sb.in": ("851794f1b655898dd2618ee880c8f9e393687b5362a3a9e81f79ef99f69e23c7", 10822),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("1a96bf58566d909f9d80ebcf2a4f3f0ab16e5239dbc1ba6d52bea985f0956174", 3578),
+    "script/source_snapshot_manifest.jsonl": ("7b7e8fcf73cca29a1a0a8b631a5676e23a037806e2bf2a6f18e25880fbb137d6", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1209,6 +1209,9 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         )
 
     def test_production_artifact_capabilities_reject_tree_swaps_and_false_rows(self):
+        self.assertEqual(FILES.installed_helper_directory_groups("/Library"), {0, os.getgid()})
+        self.assertEqual(FILES.installed_helper_directory_groups("/Library/Application Support"), {0, os.getgid(), 80})
+        self.assertEqual(FILES.installed_helper_directory_groups("/Library/Application Support/LidSwitch"), {0, os.getgid()})
         artifact_root, args = self.artifact_fixture()
         with self.assertRaises(SystemExit):
             FILES.InstalledHelperCapability(args.benchmark_helper, {os.getuid()})
@@ -1489,6 +1492,7 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn('(allow file-read-metadata (literal "/usr"))', profile)
         self.assertIn('(allow file-read-metadata (literal "/private"))', profile)
         self.assertIn('(allow file-read-metadata (literal "/private/tmp"))', profile)
+        self.assertIn('(allow file-read-metadata (literal "@BENCHMARK_PARENT@"))', profile)
         self.assertIn('(allow file-read-metadata (literal "/Library"))', profile)
         self.assertIn('(allow file-read-metadata (literal "/Library/Developer"))', profile)
         self.assertIn('(allow file-read-metadata (literal "@CLT_ROOT@"))', profile)

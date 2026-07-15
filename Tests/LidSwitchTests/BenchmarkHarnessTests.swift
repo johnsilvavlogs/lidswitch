@@ -644,9 +644,68 @@ private enum BenchmarkHarness {
     static func write(_ object: [String: Any], to handle: FileHandle) throws {
         // The host-side publisher requires one byte-canonical JSONL spelling;
         // keeping slashes literal matches its UTF-8 sorted-key serializer.
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        // Foundation may expand an otherwise shortest Double spelling (for
+        // example, 27330308.4) into 27330308.399999999. Summary rows therefore
+        // render their closed schema explicitly with Swift's shortest
+        // round-tripping Double spelling, which is also the publisher's
+        // canonical JSON number spelling. Other rows contain no floating-point
+        // values and remain on JSONSerialization's sorted-key path.
+        let data: Data
+        if object["record_type"] as? String == "summary" {
+            data = try canonicalSummaryData(object)
+        } else {
+            data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+        }
         handle.write(data)
         handle.write(Data([0x0A]))
+    }
+
+    private static func canonicalSummaryData(_ object: [String: Any]) throws -> Data {
+        let keys = [
+            "median_nanoseconds", "p95_nanoseconds", "quantile", "record_type",
+            "sample_count", "sample_standard_deviation_nanoseconds", "scenario", "schema_version",
+        ]
+        guard Set(object.keys) == Set(keys),
+              let median = object["median_nanoseconds"] as? Double,
+              let p95 = object["p95_nanoseconds"] as? Double,
+              let quantile = object["quantile"] as? String,
+              let recordType = object["record_type"] as? String,
+              let sampleCount = object["sample_count"] as? Int,
+              let deviation = object["sample_standard_deviation_nanoseconds"] as? Double,
+              let scenario = object["scenario"] as? String,
+              let schema = object["schema_version"] as? String,
+              sampleCount > 0 else {
+            throw failure("invalid summary record")
+        }
+        let fields = [
+            "\"median_nanoseconds\":" + (try canonicalJSONNumber(median)),
+            "\"p95_nanoseconds\":" + (try canonicalJSONNumber(p95)),
+            "\"quantile\":" + (try canonicalJSONString(quantile)),
+            "\"record_type\":" + (try canonicalJSONString(recordType)),
+            "\"sample_count\":\(sampleCount)",
+            "\"sample_standard_deviation_nanoseconds\":" + (try canonicalJSONNumber(deviation)),
+            "\"scenario\":" + (try canonicalJSONString(scenario)),
+            "\"schema_version\":" + (try canonicalJSONString(schema)),
+        ]
+        return Data(("{" + fields.joined(separator: ",") + "}").utf8)
+    }
+
+    private static func canonicalJSONNumber(_ value: Double) throws -> String {
+        guard value.isFinite, value >= 0 else { throw failure("invalid summary number") }
+        if value.rounded(.towardZero) == value, value <= Double(UInt64.max) {
+            return String(UInt64(value))
+        }
+        let rendered = String(value)
+        guard rendered.range(of: #"^[0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?$"#, options: .regularExpression) != nil else {
+            throw failure("summary number is not canonical JSON")
+        }
+        return rendered
+    }
+
+    private static func canonicalJSONString(_ value: String) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+        guard let rendered = String(data: data, encoding: .utf8) else { throw failure("invalid summary string") }
+        return rendered
     }
 
     static func failure(_ message: String) -> NSError { NSError(domain: "BenchmarkHarness", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -708,6 +767,24 @@ final class BenchmarkHarnessTests: XCTestCase {
             }, "expensive operation leaked into \(row)")
         }
         XCTAssertFalse(records.contains { ($0["scenario"] as? String)?.hasPrefix("native.power-inspector") == true })
+    }
+
+    func testSummaryWriterUsesShortestCanonicalFloatingPointJSON() throws {
+        let root = try TestSandbox.makeDirectory(label: "benchmark-canonical-summary").url
+        let output = root.appendingPathComponent("summary.jsonl")
+        let handle = try TestSandbox.createBenchmarkOutput(at: output)
+        try BenchmarkHarness.write(
+            BenchmarkHarness.summary(
+                scenario: "fixture.power.fast-dynamic",
+                samples: [1, 2, 3, 27_000_000, 27_000_003]
+            ),
+            to: handle
+        )
+        try handle.close()
+        let text = try String(contentsOf: output, encoding: .utf8)
+        XCTAssertTrue(text.contains("\"p95_nanoseconds\":27000002.4"))
+        XCTAssertFalse(text.contains("27000002.399999999"))
+        XCTAssertTrue(text.hasSuffix("\n"))
     }
 
     func testHarnessRejectsTrackedOutputAndTooFewWarmSamples() throws {

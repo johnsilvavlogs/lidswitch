@@ -138,6 +138,7 @@
 (deny file-read* (subpath "/Applications/LidSwitch.app"))
 (deny file-read* (prefix "/Library/Preferences/SystemConfiguration/com.apple.PowerManagement."))
 (deny file-read* (prefix "/Library/Preferences/com.apple.PowerManagement."))
+(allow file-read-metadata (literal "@BENCHMARK_PARENT@"))
 (allow file-read* (subpath "@BENCHMARK_APP@"))
 (allow file-read* (literal "@BENCHMARK_HELPER@"))
 (deny file-read* (literal "@REPO_ROOT@"))
