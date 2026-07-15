@@ -4,7 +4,7 @@
 
 - Apple Silicon Mac
 - macOS `26.5.2` build `25F84` for activation in this recovery release
-- Administrator access to install or remove the helper and to run explicit force restore
+- Administrator access to install or remove the helper and to run explicit recovery
 
 ## Install the manual build
 
@@ -23,4 +23,8 @@ There is no login launch or battery mode. Reconnecting power never starts a sess
 
 Choose **Remove Helper** and confirm. LidSwitch revokes the session, verifies restoration, disables and unloads the daemon, and removes current and legacy helper files. Delete `/Applications/LidSwitch.app` afterward if desired.
 
-If the administrator prompt is cancelled, the UI reports: **Administrator approval was cancelled. Nothing was enabled.**
+If authorization ends before the root transaction publishes its running
+receipt, the UI reports that authorization did not start and nothing was
+enabled. If the wait times out after a running receipt exists, the UI reports
+completion as indeterminate and asks for a status refresh; it never claims that
+the still-running root transaction was cancelled.

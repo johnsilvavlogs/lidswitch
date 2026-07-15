@@ -1,0 +1,257 @@
+import CryptoKit
+import Darwin
+import Foundation
+import XCTest
+@testable import LidSwitch
+import LidSwitchCore
+
+final class ImmutableCandidateSourceTests: XCTestCase {
+    private let digest = Data(repeating: 0x11, count: 32)
+    private let cdhash = Data(repeating: 0x22, count: 20)
+
+    private func anchor(
+        channel: String = ReleaseIdentity.channel,
+        helperDigest: Data? = nil,
+        helperSize: UInt64 = 42,
+        helperCDHash: Data? = nil,
+        resourceName: String = ReleaseHelperTrustAnchor.releaseIdentityResourceName,
+        version: String = ReleaseIdentity.appVersion,
+        resourceDigest: Data? = nil
+    ) -> ReleaseHelperTrustAnchor.Value {
+        .init(
+            channel: channel,
+            helperSHA256: helperDigest ?? digest,
+            helperSize: helperSize,
+            helperIdentifier: AppPaths.helperLabel,
+            helperCDHash: helperCDHash ?? cdhash,
+            releaseIdentityResourceName: resourceName,
+            releaseIdentityVersion: version,
+            releaseIdentitySHA256: resourceDigest ?? digest
+        )
+    }
+
+    private func candidate() -> ReleaseHelperTrustAnchor.Candidate {
+        .init(
+            channel: ReleaseIdentity.channel,
+            helperIdentifier: AppPaths.helperLabel,
+            helperCDHash: cdhash,
+            helperSHA256: digest,
+            helperSize: 42,
+            releaseIdentityResourceName: ReleaseHelperTrustAnchor.releaseIdentityResourceName,
+            releaseIdentityVersion: ReleaseIdentity.appVersion,
+            releaseIdentitySHA256: digest
+        )
+    }
+
+    func testGeneratedReleaseAnchorAcceptsExactHelperAndIdentityResource() {
+        XCTAssertTrue(ReleaseHelperTrustAnchor.matches(candidate(), generated: anchor()))
+    }
+
+    func testNormalBuildAnchorCategoricallyFailsClosed() {
+        XCTAssertFalse(ReleaseHelperTrustAnchor.matches(
+            helperIdentifier: AppPaths.helperLabel,
+            helperCDHash: cdhash,
+            helperSHA256: digest,
+            helperSize: 42,
+            releaseIdentitySHA256: digest
+        ))
+        XCTAssertFalse(ReleaseHelperTrustAnchor.matches(candidate(), generated: nil))
+    }
+
+    func testMalformedGeneratedAnchorsDenyBeforeEnrollment() {
+        let zeros32 = Data(repeating: 0, count: 32)
+        let zeros20 = Data(repeating: 0, count: 20)
+        let malformed = [
+            anchor(channel: "debug"),
+            anchor(helperDigest: zeros32),
+            anchor(helperSize: 0),
+            anchor(helperCDHash: zeros20),
+            anchor(resourceName: "Other.json"),
+            anchor(version: "0"),
+            anchor(resourceDigest: zeros32),
+        ]
+        for value in malformed {
+            XCTAssertFalse(ReleaseHelperTrustAnchor.matches(candidate(), generated: value))
+        }
+    }
+
+    func testReleaseIdentityDigestAndHelperFieldsMustAllMatch() {
+        var changedDigest = candidate()
+        changedDigest = .init(channel: changedDigest.channel, helperIdentifier: changedDigest.helperIdentifier,
+                              helperCDHash: changedDigest.helperCDHash, helperSHA256: changedDigest.helperSHA256,
+                              helperSize: changedDigest.helperSize, releaseIdentityResourceName: changedDigest.releaseIdentityResourceName,
+                              releaseIdentityVersion: changedDigest.releaseIdentityVersion,
+                              releaseIdentitySHA256: Data(repeating: 0x33, count: 32))
+        XCTAssertFalse(ReleaseHelperTrustAnchor.matches(changedDigest, generated: anchor()))
+        XCTAssertFalse(ReleaseHelperTrustAnchor.matches(
+            .init(channel: ReleaseIdentity.channel, helperIdentifier: AppPaths.helperLabel, helperCDHash: cdhash,
+                  helperSHA256: digest, helperSize: 43,
+                  releaseIdentityResourceName: ReleaseHelperTrustAnchor.releaseIdentityResourceName,
+                  releaseIdentityVersion: ReleaseIdentity.appVersion, releaseIdentitySHA256: digest),
+            generated: anchor()
+        ))
+    }
+
+    func testRootCopyAuthorityRejectsDigestSizeAndCodeIdentityMismatches() {
+        let identity = CodeIdentity(identifier: AppPaths.helperLabel, cdhash: cdhash, teamIdentifier: nil)
+        XCTAssertTrue(SecureHelperInstaller.rootCopyContractIsExact(
+            sourceDigest: digest, sourceSize: 42, copiedDigest: digest, copiedSize: 42,
+            sourceIdentity: identity, copiedIdentity: identity
+        ))
+        XCTAssertFalse(SecureHelperInstaller.rootCopyContractIsExact(
+            sourceDigest: digest, sourceSize: 42, copiedDigest: Data(repeating: 0x44, count: 32), copiedSize: 42,
+            sourceIdentity: identity, copiedIdentity: identity
+        ))
+        XCTAssertFalse(SecureHelperInstaller.rootCopyContractIsExact(
+            sourceDigest: digest, sourceSize: 42, copiedDigest: digest, copiedSize: 41,
+            sourceIdentity: identity, copiedIdentity: identity
+        ))
+        XCTAssertFalse(SecureHelperInstaller.rootCopyContractIsExact(
+            sourceDigest: digest, sourceSize: 42, copiedDigest: digest, copiedSize: 42,
+            sourceIdentity: identity,
+            copiedIdentity: CodeIdentity(identifier: AppPaths.helperLabel, cdhash: Data(repeating: 0x45, count: 20), teamIdentifier: nil)
+        ))
+    }
+
+    func testFrozenTransferReceiptRejectsUnsafeSourceCapabilityMetadata() {
+        let transfer = SecureHelperInstaller.FrozenHelperTransfer(
+            sourcePath: "/Users/fixture/.lidswitch-frozen/00000000-0000-4000-8000-000000000001/LidSwitchHelper",
+            sourceDevice: 10,
+            sourceInode: 20,
+            sourceOwnerUID: 501,
+            sourceOwnerGID: 20,
+            sourceMode: UInt32(S_IFREG | 0o700),
+            sourceLinks: 1,
+            sha256: Data(SHA256.hash(data: Data([1, 2, 3]))),
+            size: 3,
+            identifier: AppPaths.helperLabel,
+            cdhash: cdhash
+        )
+        XCTAssertTrue(transfer.isSelfConsistent)
+        XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
+            sourcePath: "relative/LidSwitchHelper", sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
+            sourceLinks: transfer.sourceLinks, sha256: transfer.sha256, size: transfer.size,
+            identifier: transfer.identifier, cdhash: transfer.cdhash
+        ).isSelfConsistent)
+        XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
+            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: UInt32(S_IFREG | 0o755),
+            sourceLinks: transfer.sourceLinks, sha256: transfer.sha256, size: transfer.size,
+            identifier: transfer.identifier, cdhash: transfer.cdhash
+        ).isSelfConsistent)
+        XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
+            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
+            sourceLinks: 2, sha256: transfer.sha256, size: transfer.size,
+            identifier: transfer.identifier, cdhash: transfer.cdhash
+        ).isSelfConsistent)
+        XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
+            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
+            sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
+            sourceLinks: transfer.sourceLinks, sha256: Data(), size: transfer.size,
+            identifier: transfer.identifier, cdhash: transfer.cdhash
+        ).isSelfConsistent)
+    }
+
+    func testAdministratorTransportIsDescriptorBoundAndFitsSafeArgumentBudget() {
+        let script = PrivilegedHelperManager.diagnosticInstallScript()
+        XCTAssertTrue(script.contains("helper_source="))
+        XCTAssertTrue(script.contains("my $o_nofollow_any = 0x20000000"))
+        XCTAssertTrue(script.contains("$before[1] == $expected_ino"))
+        XCTAssertTrue(script.contains("Digest::SHA->new(256)"))
+        XCTAssertTrue(script.contains("O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW"))
+        XCTAssertFalse(script.contains("helper_payload_base64="))
+        XCTAssertFalse(script.contains("MMIME::Base64=decode_base64"))
+
+        let command = PrivilegedHelperManager.diagnosticAdministratorCommand(script)
+        let source = PrivilegedHelperManager.administratorAppleScript(
+            command: command,
+            prompt: "LidSwitch fixture"
+        )
+        XCTAssertTrue(PrivilegedHelperManager.administratorAppleScriptFitsSafeArgumentBudget(source))
+        XCTAssertLessThanOrEqual(
+            source.lengthOfBytes(using: .utf8),
+            PrivilegedHelperManager.maximumAdministratorAppleScriptBytes
+        )
+    }
+
+    func testAdministratorTransactionRunnerIsUnreachableOnFreezeDenial() {
+        struct DenyingAdapter: SecureHelperInstaller.FrozenEnrollmentAdapter {
+            func freeze() throws -> SecureHelperInstaller.FrozenEnrollment {
+                throw NSError(domain: "ImmutableCandidate", code: 1)
+            }
+        }
+        var runnerInvoked = false
+        XCTAssertThrowsError(try SecureHelperInstaller.authorizeThenRun(
+            freeze: { throw NSError(domain: "ImmutableCandidate", code: 2) },
+            run: { _ in runnerInvoked = true }
+        ))
+        XCTAssertFalse(runnerInvoked)
+        XCTAssertThrowsError(try SecureHelperInstaller.perform(.install, using: DenyingAdapter()))
+    }
+
+    func testImmutableDirectoryOpenFlagsAreKernelCompatibleAndRejectSymlinkAncestors() throws {
+        let flags = SecureHelperInstaller.immutableDirectoryOpenFlags
+        XCTAssertNotEqual(flags & O_NOFOLLOW_ANY, 0)
+        XCTAssertEqual(flags & O_NOFOLLOW, 0)
+        XCTAssertNotEqual(flags & O_CLOEXEC, 0)
+
+        let fixture = try TestSandbox.makeDirectory(label: "installer-open-flags")
+        let realParent = fixture.url.appendingPathComponent("real", isDirectory: true)
+        let child = realParent.appendingPathComponent("child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+
+        let direct = open(child.path, flags)
+        XCTAssertGreaterThanOrEqual(direct, 0, "the production flag set must be accepted by the running Darwin kernel")
+        if direct >= 0 { XCTAssertEqual(close(direct), 0) }
+
+        let alias = fixture.url.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: realParent)
+        errno = 0
+        let throughSymlinkAncestor = open(alias.appendingPathComponent("child").path, flags)
+        XCTAssertEqual(throughSymlinkAncestor, -1)
+        XCTAssertEqual(errno, ELOOP, "O_NOFOLLOW_ANY must continue rejecting an ancestor symlink")
+        if throughSymlinkAncestor >= 0 { _ = close(throughSymlinkAncestor) }
+    }
+
+    func testStageDirectoryIdentityAllowsItsOwnAPFSSizeGrowthButRejectsReplacement() throws {
+        let fixture = try TestSandbox.makeDirectory(label: "installer-stage-identity")
+        let descriptor = try TestSandbox.openManagedDirectory(at: fixture.url)
+        defer { XCTAssertEqual(close(descriptor), 0) }
+
+        var before = stat()
+        XCTAssertEqual(fstat(descriptor, &before), 0)
+        let payload = openat(descriptor, "LidSwitchHelper", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o700)
+        XCTAssertGreaterThanOrEqual(payload, 0)
+        if payload >= 0 {
+            var byte: UInt8 = 0x4c
+            XCTAssertEqual(write(payload, &byte, 1), 1)
+            XCTAssertEqual(fsync(payload), 0)
+            XCTAssertEqual(close(payload), 0)
+        }
+
+        var afterOwnWrite = stat()
+        XCTAssertEqual(fstat(descriptor, &afterOwnWrite), 0)
+        XCTAssertTrue(SecureHelperInstaller.directoryCapabilityIdentityMatches(before, afterOwnWrite))
+        XCTAssertTrue(SecureHelperInstaller.directoryInventoryMatches(descriptor, expectedLeaf: "LidSwitchHelper"))
+        XCTAssertFalse(SecureHelperInstaller.directoryInventoryMatches(descriptor, expectedLeaf: nil))
+
+        let unexpected = openat(descriptor, "unexpected", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        XCTAssertGreaterThanOrEqual(unexpected, 0)
+        if unexpected >= 0 { XCTAssertEqual(close(unexpected), 0) }
+        XCTAssertFalse(SecureHelperInstaller.directoryInventoryMatches(descriptor, expectedLeaf: "LidSwitchHelper"))
+
+        let replacement = try TestSandbox.makeDirectory(label: "installer-stage-replacement")
+        let replacementDescriptor = try TestSandbox.openManagedDirectory(at: replacement.url)
+        defer { XCTAssertEqual(close(replacementDescriptor), 0) }
+        var replacementStatus = stat()
+        XCTAssertEqual(fstat(replacementDescriptor, &replacementStatus), 0)
+        XCTAssertFalse(SecureHelperInstaller.directoryCapabilityIdentityMatches(before, replacementStatus))
+    }
+
+}

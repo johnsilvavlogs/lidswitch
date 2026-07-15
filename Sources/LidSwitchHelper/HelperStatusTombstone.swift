@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import LidSwitchCore
 
 struct HelperStatusTombstone: Equatable {
     let state: String
@@ -8,42 +9,18 @@ struct HelperStatusTombstone: Equatable {
     let recoveryBudget: String?
 
     var isTerminal: Bool {
-        state == "inactive" || state == "blocked" || state == "recovery-required"
+        state == "inactive" || state == "terminal" || state == "blocked" || state == "recovery-required"
     }
 
     var recoveryReserved: Bool { recoveryBudget == "reserved" || reason == "override-drift-observed" }
     var recoverySpent: Bool { recoveryBudget == "spent" || reason == "override-recovered" || reason == "verified-after-override-recovery" }
 
     static func read(path: String, expectedOwnerUID: uid_t = geteuid()) -> HelperStatusTombstone? {
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
-        guard descriptor >= 0 else { return nil }
-        defer { close(descriptor) }
-
-        var metadata = stat()
-        guard fstat(descriptor, &metadata) == 0,
-              (metadata.st_mode & S_IFMT) == S_IFREG,
-              metadata.st_nlink == 1,
-              metadata.st_uid == expectedOwnerUID,
-              metadata.st_mode & (S_IWGRP | S_IWOTH) == 0,
-              metadata.st_size >= 0,
-              metadata.st_size <= 4_096
-        else { return nil }
-
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 1_024)
-        while data.count <= 4_096 {
-            let count = Darwin.read(descriptor, &buffer, buffer.count)
-            if count > 0 {
-                data.append(buffer, count: count)
-                continue
-            }
-            if count == 0 { break }
-            if errno == EINTR { continue }
-            return nil
-        }
-        guard data.count <= 4_096,
-              let raw = String(data: data, encoding: .utf8)
-        else { return nil }
+        let policy = BoundedFileReadPolicy(
+            maximumBytes: 4_096, expectedOwnerUID: expectedOwnerUID, requireSingleLink: true,
+            rejectGroupOrWorldWritable: true, requireNonEmpty: true, safeParentDepth: 1
+        )
+        guard case let .success(raw) = BoundedFileReader.readUTF8(path: path, policy: policy) else { return nil }
 
         var values: [String: String] = [:]
         for line in raw.split(separator: "\n") {

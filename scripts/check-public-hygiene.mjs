@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 
 const root = process.env.LIDSWITCH_HYGIENE_ROOT
@@ -85,6 +85,7 @@ for (const file of trackedFiles) {
   if (!isTextFile(file) || contentRuleExemptions.has(file)) continue;
 
   const absolutePath = join(root, file);
+  if (!existsSync(absolutePath)) continue; // A pending tracked deletion is not part of the candidate tree.
   const stat = statSync(absolutePath);
   if (stat.size > 1_500_000) continue;
 

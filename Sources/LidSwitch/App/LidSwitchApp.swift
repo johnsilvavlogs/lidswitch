@@ -9,9 +9,10 @@ struct LidSwitchApp: App {
 
     init() {
         // Diagnostic/packaging commands must exit before a controller is created.
-        // Normal controller startup revokes orphaned leases by design.
+        // Production explicitly selects the authenticated raw-XPC client.
         DebugCommands.handleIfNeeded()
-        let controller = PowerController()
+        let client = try? RawHelperControlClient.production()
+        let controller = PowerController(sideEffects: .production(client: client))
         _controller = StateObject(wrappedValue: controller)
         _confirmationPresenter = StateObject(wrappedValue: NativeConfirmationPresenter())
         LidSwitchApplicationDelegate.controller = controller
@@ -22,8 +23,8 @@ struct LidSwitchApp: App {
             LidSwitchPanel(controller: controller, confirmationPresenter: confirmationPresenter)
                 .frame(width: 370)
         } label: {
-            Label(controller.snapshot.statusTitle, systemImage: controller.menuBarSymbol)
-                .accessibilityLabel(controller.snapshot.accessibilityState)
+            Label(controller.displayedStatus.title, systemImage: controller.menuBarSymbol)
+                .accessibilityLabel(controller.displayedStatus.accessibilityState)
         }
         .menuBarExtraStyle(.window)
     }

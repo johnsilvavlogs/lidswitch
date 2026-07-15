@@ -22,6 +22,11 @@ struct LidSwitchPanel: View {
             controls
         }
         .padding(18)
+        .onAppear {
+            // Opening the menu publishes live power/safety truth immediately,
+            // then reuses or refreshes the bounded installation inventory.
+            controller.refresh()
+        }
     }
 
     private var header: some View {
@@ -43,10 +48,10 @@ struct LidSwitchPanel: View {
 
             Spacer()
 
-            if controller.isBusy {
+            if controller.isBusy || controller.isChecking {
                 ProgressView()
                     .controlSize(.small)
-                    .accessibilityLabel("LidSwitch operation in progress")
+                    .accessibilityLabel(progressAccessibilityLabel)
             }
         }
     }
@@ -58,13 +63,11 @@ struct LidSwitchPanel: View {
                     .foregroundStyle(statusColor)
                     .accessibilityHidden(true)
 
-                Text(controller.isStarting ? "Starting and verifying…" : controller.snapshot.statusTitle)
+                Text(controller.displayedStatus.title)
                     .font(.subheadline.weight(.semibold))
             }
 
-            Text(controller.isStarting
-                 ? "LidSwitch is checking current power, issuing a monitored lease, and waiting for the helper to verify the system sleep override."
-                 : controller.snapshot.statusDetail)
+            Text(controller.displayedStatus.detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -75,23 +78,24 @@ struct LidSwitchPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(controller.isStarting
-                            ? "Starting and verifying LidSwitch session. Protection is not active yet."
-                            : controller.snapshot.accessibilityState)
+        .accessibilityLabel(controller.displayedStatus.accessibilityState)
         .accessibilityValue(controller.snapshot.systemSummary)
     }
 
     @ViewBuilder
     private var primaryAction: some View {
-        if controller.isStarting {
-            Button {} label: {
-                Label("Starting and verifying…", systemImage: "clock.fill")
+        if controller.primaryAction == .cancelStart {
+            Button {
+                controller.cancelPendingStart()
+            } label: {
+                Label("Cancel and Restore", systemImage: "xmark.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(true)
-            .accessibilityLabel("Starting and verifying LidSwitch session")
-        } else if controller.snapshot.sessionActive || controller.snapshot.sessionPending {
+            .keyboardShortcut("k", modifiers: [.command])
+            .accessibilityLabel("Cancel pending session and restore system sleep")
+            .accessibilityHint("Cancels the pending start. Protection may not yet be active.")
+        } else if controller.primaryAction == .stopAndRestore {
             Button {
                 controller.stopSession()
             } label: {
@@ -100,10 +104,10 @@ struct LidSwitchPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut("k", modifiers: [.command])
-            .disabled(controller.isBusy)
+            .disabled(controller.isBusy && !controller.isCancelRestoring)
             .accessibilityLabel("Stop and restore system sleep")
             .accessibilityHint("Ends this session, stops lease renewal, and verifies that the sleep override is off.")
-        } else if controller.snapshot.restoreRequired {
+        } else if controller.primaryAction == .restoreSleep {
             Button {
                 controller.restoreNow()
             } label: {
@@ -112,9 +116,53 @@ struct LidSwitchPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut("k", modifiers: [.command])
-            .disabled(controller.isBusy)
+            .disabled(controller.isBusy && !controller.isCancelRestoring)
             .accessibilityHint("Clears the remaining system sleep override with administrator approval.")
-        } else if !controller.snapshot.helperReady || controller.snapshot.legacyResiduePresent {
+        } else if controller.primaryAction == .cancelRestoringProgress {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Canceling and restoring…")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(controller.displayedStatus.accessibilityState)
+        } else if controller.primaryAction == .endingRestoringProgress {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Ending and restoring…")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(controller.displayedStatus.accessibilityState)
+        } else if controller.primaryAction == .preparingHelperProgress {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Preparing safe helper…")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(controller.displayedStatus.accessibilityState)
+        } else if controller.primaryAction == .removingHelperProgress {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Removing helper…")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 7)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(controller.displayedStatus.accessibilityState)
+        } else if controller.primaryAction == .prepareHelper {
             Button {
                 controller.prepareHelper()
             } label: {
@@ -125,6 +173,7 @@ struct LidSwitchPanel: View {
             .keyboardShortcut("p", modifiers: [.command])
             .disabled(
                 controller.isBusy
+                    || controller.isChecking
                     || !controller.snapshot.canPrepareHelper
                     || !controller.snapshot.sleepDisabledVerified
             )
@@ -138,7 +187,7 @@ struct LidSwitchPanel: View {
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut("k", modifiers: [.command])
-            .disabled(controller.isBusy || !controller.snapshot.canStartSession)
+            .disabled(controller.isBusy || controller.isChecking || !controller.snapshot.canStartSession)
             .accessibilityLabel("Start plugged-in session")
             .accessibilityHint("Asks for confirmation, then starts one monitored session only while this Mac remains plugged in and LidSwitch stays open.")
         }
@@ -147,7 +196,7 @@ struct LidSwitchPanel: View {
     private var controls: some View {
         HStack(spacing: 10) {
             Button {
-                controller.refresh()
+                controller.refreshManually()
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
@@ -167,7 +216,7 @@ struct LidSwitchPanel: View {
                     Label("Remove Helper", systemImage: "trash")
                 }
                 .controlSize(.small)
-                .disabled(controller.isBusy)
+                .disabled(controller.isBusy || controller.isChecking)
                 .accessibilityHint("Asks for confirmation, restores system sleep, and removes LidSwitch helper files.")
             }
 
@@ -185,30 +234,41 @@ struct LidSwitchPanel: View {
     }
 
     private var statusSymbol: String {
-        if controller.isStarting { return "clock.fill" }
-        if controller.snapshot.hasCriticalSafetyIssue {
-            return "exclamationmark.triangle.fill"
+        controller.displayedStatus.panelSymbol
+    }
+
+    private var progressAccessibilityLabel: String {
+        if controller.isCancelRestoring {
+            return "Canceling and restoring LidSwitch session"
         }
-        if controller.snapshot.sessionActive {
-            return "checkmark.circle.fill"
+        if controller.isEndingRestoring {
+            return "Ending and restoring LidSwitch session"
         }
-        if controller.snapshot.sessionPending {
-            return "clock.fill"
+        if controller.operationPhase == .preparingHelper {
+            return "Preparing the LidSwitch helper safely"
         }
-        return "circle"
+        if controller.operationPhase == .removingHelper {
+            return "Removing the LidSwitch helper safely"
+        }
+        if controller.snapshot.installationInventoryPending {
+            return "Checking LidSwitch installation"
+        }
+        if controller.isChecking {
+            return "Checking current macOS state"
+        }
+        return "LidSwitch operation in progress"
     }
 
     private var statusColor: Color {
-        if controller.isStarting { return .yellow }
-        if controller.snapshot.hasCriticalSafetyIssue {
+        switch controller.displayedStatus.tone {
+        case .warning:
             return .orange
-        }
-        if controller.snapshot.sessionActive {
+        case .active:
             return .green
-        }
-        if controller.snapshot.sessionPending {
+        case .progress:
             return .yellow
+        case .neutral:
+            return .secondary
         }
-        return .secondary
     }
 }

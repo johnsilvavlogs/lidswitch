@@ -1,22 +1,36 @@
 #!/bin/bash
 set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 APP_NAME="LidSwitch"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(/usr/bin/dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT_DIR/script/release.env"
 APP_BUNDLE="${LIDSWITCH_INSTALLED_APP:-/Applications/LidSwitch.app}"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-HELPER_LABEL="com.johnsilva.lidswitch.helper"
-HELPER="/Library/Application Support/LidSwitch/LidSwitchHelper"
-HELPER_VERSION="/Library/Application Support/LidSwitch/helper-version"
+HELPER_LABEL="$LIDSWITCH_HELPER_LABEL"
+HELPER="$LIDSWITCH_ROOT_HELPER_PATH"
+HELPER_VERSION="$LIDSWITCH_ROOT_SUPPORT_DIRECTORY/Current/helper-version"
+POLICY="$LIDSWITCH_ROOT_ENROLLMENT_POLICY_PATH"
+PLIST="/Library/LaunchDaemons/$LIDSWITCH_HELPER_LABEL.plist"
+MACH_SERVICE="$LIDSWITCH_MACH_SERVICE"
+TERMINAL_LEDGER="/Library/Application Support/LidSwitch/terminal-generations"
+RECOVERY_LEDGER="/Library/Application Support/LidSwitch/recovery-reservations"
+RECOVERY_PROOF="/Library/Application Support/LidSwitch/recovery-proof"
 APPLIED_STATE="/Library/Application Support/LidSwitch/applied-state"
 STATUS_FILE="/Library/Application Support/LidSwitch/helper-status"
-LEASE="$HOME/Library/Application Support/LidSwitch/activation-lease"
 LEGACY_LOGIN="$HOME/Library/LaunchAgents/com.johnsilva.LidSwitch.login.plist"
 LEGACY_HELPER="/Library/Application Support/LidSwitch/lidswitch-helper"
+LEGACY_V4_HELPER="/Library/Application Support/LidSwitch/LidSwitchHelper"
+LEGACY_V4_VERSION="/Library/Application Support/LidSwitch/helper-version"
 EXPECTED_HELPER_VERSION="$LIDSWITCH_HELPER_VERSION"
-EXPECTED_BUILD="25F84"
+EXPECTED_BUILD="$LIDSWITCH_QUALIFIED_SYSTEM_BUILD"
 OBSERVATION_SECONDS="${LIDSWITCH_LIVE_OBSERVATION_SECONDS:-40}"
+CANARY_PREFLIGHT_TOOL="$ROOT_DIR/script/candidate_canary_preflight.py"
+CANARY_PREFLIGHT_RECEIPT="${LIDSWITCH_CANARY_PREFLIGHT_RECEIPT:-}"
+CANARY_ACTIVE_RECEIPT="${LIDSWITCH_CANARY_ACTIVE_RECEIPT:-}"
+CANARY_FINAL_RECEIPT="${LIDSWITCH_CANARY_FINAL_RECEIPT:-}"
+CANARY_CANDIDATE_MANIFEST="${LIDSWITCH_CANARY_CANDIDATE_MANIFEST:-}"
+CANARY_BINDING="${LIDSWITCH_CANARY_BINDING:-}"
 
 fail() {
   echo "controlled-live-canary: $*" >&2
@@ -26,6 +40,15 @@ fail() {
 if [ "${LIDSWITCH_CONTROLLED_CANARY:-0}" != "1" ]; then
   fail "refusing live power validation without LIDSWITCH_CONTROLLED_CANARY=1"
 fi
+test -f "$CANARY_PREFLIGHT_TOOL" || fail "candidate canary preflight tool is missing"
+test -n "$CANARY_PREFLIGHT_RECEIPT" || fail "LIDSWITCH_CANARY_PREFLIGHT_RECEIPT is required from the safe-idle preflight"
+test -n "$CANARY_ACTIVE_RECEIPT" || fail "LIDSWITCH_CANARY_ACTIVE_RECEIPT is required for exact session binding"
+test -n "$CANARY_FINAL_RECEIPT" || fail "LIDSWITCH_CANARY_FINAL_RECEIPT is required for canonical finalization"
+test -n "$CANARY_CANDIDATE_MANIFEST" || fail "LIDSWITCH_CANARY_CANDIDATE_MANIFEST is required"
+test -n "$CANARY_BINDING" || fail "LIDSWITCH_CANARY_BINDING is required"
+test -f "$CANARY_PREFLIGHT_RECEIPT" || fail "candidate preflight receipt is missing"
+test ! -e "$CANARY_ACTIVE_RECEIPT" || fail "active receipt path must be a new file"
+test ! -e "$CANARY_FINAL_RECEIPT" || fail "final receipt path must be a new file"
 case "$OBSERVATION_SECONDS" in
   ''|*[!0-9]*) fail "LIDSWITCH_LIVE_OBSERVATION_SECONDS must be an integer of at least 40" ;;
 esac
@@ -80,34 +103,54 @@ status_value() {
   /usr/bin/awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$STATUS_FILE"
 }
 
-lease_is_absent_or_expired() {
-  [ ! -e "$LEASE" ] && return 0
-  expires="$(/usr/bin/awk -F= '$1 == "expires" { print $2; exit }' "$LEASE" 2>/dev/null || true)"
-  case "$expires" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$expires" -le "$(/bin/date +%s)" ]
-}
-
 test "$(/usr/sbin/sysctl -n kern.osversion)" = "$EXPECTED_BUILD" || fail "macOS build is not $EXPECTED_BUILD"
 power_is_ac || fail "Mac must remain on AC power"
 test "$(sleep_disabled)" = "1" || fail "start a verified LidSwitch session before this canary"
 test -x "$APP_BINARY" || fail "installed app is missing"
 test -x "$HELPER" || fail "native helper is missing"
 test ! -e "$LEGACY_HELPER" || fail "legacy shell helper is still present"
+test ! -e "$LEGACY_V4_HELPER" || fail "legacy v4 helper is still present"
+test ! -e "$LEGACY_V4_VERSION" || fail "legacy v4 helper version marker is still present"
 test ! -e "$LEGACY_LOGIN" || fail "legacy login item is still present"
 test -f "$HELPER_VERSION" || fail "helper version marker is missing"
+test -f "$POLICY" || fail "authenticated enrollment policy is missing"
+test -f "$TERMINAL_LEDGER" || fail "terminal ledger is missing"
+test -f "$RECOVERY_LEDGER" || fail "recovery reservation ledger is missing"
+test -f "$RECOVERY_PROOF" || fail "recovery proof is missing"
+for private_authority in "$TERMINAL_LEDGER" "$RECOVERY_LEDGER" "$RECOVERY_PROOF"; do
+  test "$(/usr/bin/stat -f '%u:%g:%Lp:%l' "$private_authority")" = "0:0:600:1" \
+    || fail "private recovery authority metadata is unsafe"
+done
 test "$(/usr/bin/tr -d '[:space:]' < "$HELPER_VERSION")" = "$EXPECTED_HELPER_VERSION" || fail "helper version is not $EXPECTED_HELPER_VERSION"
+test -f "$PLIST" || fail "LaunchDaemon plist is missing"
+if /usr/bin/plutil -extract WatchPaths raw -o - "$PLIST" >/dev/null 2>&1; then
+  fail "LaunchDaemon retained the retired WatchPaths lease trigger"
+fi
+if /usr/bin/plutil -extract StartInterval raw -o - "$PLIST" >/dev/null 2>&1; then
+  fail "LaunchDaemon retained a StartInterval poller"
+fi
+test "$(/usr/libexec/PlistBuddy -c "Print :MachServices:$MACH_SERVICE" "$PLIST" 2>/dev/null)" = "true" || fail "authenticated raw-XPC Mach service is missing"
 /bin/launchctl print "system/$HELPER_LABEL" >/dev/null || fail "helper is not registered with launchd"
-test -f "$LEASE" || fail "activation lease is missing"
 test -f "$APPLIED_STATE" || fail "applied-state ownership record is missing"
+test "$(/usr/bin/stat -f '%u:%g:%Lp:%l' "$APPLIED_STATE")" = "0:0:600:1" \
+  || fail "applied-state authority metadata is unsafe"
 test -f "$STATUS_FILE" || fail "helper status is missing"
 pid="$(app_pid)"
 test -n "$pid" || fail "installed LidSwitch app is not running"
-changed_ac="$(/usr/bin/awk -F= '$1 == "changed_ac_sleep" { print $2; exit }' "$APPLIED_STATE")"
-original_ac="$(/usr/bin/awk -F= '$1 == "original_ac_sleep" { print $2; exit }' "$APPLIED_STATE")"
-case "$changed_ac:$original_ac" in
-  1:[1-9]*|0:unknown) ;;
-  *) fail "applied-state has an invalid AC restoration baseline" ;;
-esac
+# Ordinary-user validation intentionally treats 0600 recovery files as opaque.
+# Exact content/schema checks belong to the root no-launch gate and the helper's
+# descriptor-held parsers; this canary consumes only public status projection,
+# private-file metadata, native power, and final authority disappearance.
+
+# The manager creates the preflight receipt while the candidate is safely idle,
+# then manually starts it.  This read-only bind records the exact public active
+# session before any deliberate SIGKILL occurs; it cannot manufacture a session.
+/usr/bin/python3 -I -S -B "$CANARY_PREFLIGHT_TOOL" bind-active \
+  --preflight-receipt "$CANARY_PREFLIGHT_RECEIPT" \
+  --active-receipt "$CANARY_ACTIVE_RECEIPT" \
+  --status-file "$STATUS_FILE" --candidate-manifest "$CANARY_CANDIDATE_MANIFEST" \
+  --canary-binding "$CANARY_BINDING" --app-bundle "$APP_BUNDLE" --helper "$HELPER" \
+  || fail "candidate receipt could not bind the active session"
 
 # This is intentionally a second opt-in. It changes only SleepDisabled through
 # pmset; it never edits the root-owned lease, status, applied-state, or ledger.
@@ -115,8 +158,10 @@ esac
 if [ "${LIDSWITCH_INJECT_OVERRIDE_DRIFT:-0}" = "1" ]; then
   session_before="$(status_value session)"
   updated_before="$(status_value updated)"
+  monotonic_before="$(status_value updated_monotonic)"
   test -n "$session_before" && test "$session_before" != "none" || fail "active helper session is missing"
   test -n "$updated_before" || fail "active helper timestamp is missing"
+  test -n "$monotonic_before" || fail "active helper monotonic timestamp is missing"
   test "$(status_value state)" = "active" || fail "helper is not active before drift injection"
   test "$(sleep_disabled)" = "1" || fail "SleepDisabled is not helper-owned before injection"
   echo "Injecting owned SleepDisabled loss; waiting up to 10 seconds for same-session recovery."
@@ -130,7 +175,8 @@ if [ "${LIDSWITCH_INJECT_OVERRIDE_DRIFT:-0}" = "1" ]; then
       && [ "$(status_value state)" = "active" ] \
       && [ "$(status_value reason)" = "override-recovered" ] \
       && [ "$(status_value session)" = "$session_before" ] \
-      && [ "$current_updated" -ge "$updated_before" ]; then
+      && [ "$current_updated" -ge "$updated_before" ] \
+      && [ -n "$(status_value updated_monotonic)" ]; then
       recovered=1
       break
     fi
@@ -143,25 +189,18 @@ for _ in $(/usr/bin/jot "$OBSERVATION_SECONDS"); do
   power_is_ac || fail "power changed during active observation"
   test "$(sleep_disabled)" = "1" || fail "sleep override dropped during active observation"
   test "$(status_value state)" = "active" || fail "helper did not acknowledge the active session"
-  updated="$(status_value updated)"
-  now="$(/bin/date +%s)"
-  test -n "$updated" || fail "helper status timestamp is missing"
-  age=$((now - updated))
-  test "$age" -ge -2 && test "$age" -le 6 || fail "helper acknowledgement is stale"
+  test -n "$(status_value boot_id)" || fail "helper status boot identity is missing"
+  test -n "$(status_value updated_monotonic)" || fail "helper monotonic acknowledgement is missing"
   /bin/sleep 1
 done
 
-echo "Active session remained verified for $OBSERVATION_SECONDS seconds; killing app PID $pid to prove lease-expiry rollback."
+echo "Active session remained verified for $OBSERVATION_SECONDS seconds; killing app PID $pid to prove peer-process-invalid rollback."
 /bin/kill -KILL "$pid"
 
 restored=0
 for _ in $(/usr/bin/jot 45); do
   current="$(sleep_disabled 2>/dev/null || true)"
-  ac_restored=1
-  if [ "$changed_ac" = "1" ]; then
-    test "$(ac_sleep_minutes 2>/dev/null || true)" = "$original_ac" || ac_restored=0
-  fi
-  if [ "$current" = "0" ] && [ "$ac_restored" = "1" ] && lease_is_absent_or_expired && [ ! -e "$APPLIED_STATE" ]; then
+  if [ "$current" = "0" ] && [ ! -e "$APPLIED_STATE" ]; then
     restored=1
     break
   fi
@@ -172,8 +211,15 @@ test -z "$(app_pid)" || fail "app relaunched automatically after SIGKILL"
 
 /bin/sleep 5
 test "$(sleep_disabled)" = "0" || fail "sleep override rearmed after restoration"
-lease_is_absent_or_expired || fail "a current lease reappeared without a new user action"
 test ! -e "$APPLIED_STATE" || fail "applied-state remained after verified restoration"
-test "$(status_value state)" = "inactive" || fail "helper did not record a verified inactive state"
+test "$(status_value state)" = "terminal" || fail "helper did not record a verified terminal state"
+test "$(status_value reason)" = "peer-process-invalid" || fail "helper misclassified unsolicited app death"
+
+/usr/bin/python3 -I -S -B "$CANARY_PREFLIGHT_TOOL" finalize \
+  --active-receipt "$CANARY_ACTIVE_RECEIPT" \
+  --final-receipt "$CANARY_FINAL_RECEIPT" \
+  --status-file "$STATUS_FILE" --candidate-manifest "$CANARY_CANDIDATE_MANIFEST" \
+  --canary-binding "$CANARY_BINDING" --app-bundle "$APP_BUNDLE" --helper "$HELPER" \
+  || fail "candidate receipt could not finalize exact rollback evidence"
 
 echo "Controlled live canary passed: active proof, SIGKILL rollback, and no automatic rearm."

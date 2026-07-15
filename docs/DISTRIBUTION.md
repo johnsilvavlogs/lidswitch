@@ -1,28 +1,54 @@
 # Distribution
 
-## Current channel
+## Candidate status
 
-LidSwitch `0.2.9` build `1` is distributed as a public manual DMG. It is ad-hoc signed, not Developer ID signed, and not notarized. Recipients must expect Gatekeeper's **Open Anyway** flow.
+LidSwitch `0.2.10` build `2` is a blocked release candidate, not a distributed or release-qualified artifact. A local immutable candidate path now exists, but it remains blocked until its held build receipt, emitted immutable manifest, benchmark evidence, and native canary are reviewed together.
 
-Do not claim App Store distribution, Apple notarization, automatic background protection, battery support, or compatibility beyond qualified build `25F84`.
+The intended future tier is a public manual DMG with ad-hoc signing, no Developer ID signature, and no notarization; recipients would use Gatekeeper’s **Open Anyway** flow. This is an intended delivery boundary, not a claim that an artifact is currently shipped. Do not claim App Store distribution, Apple notarization, automatic background protection, battery support, or compatibility beyond qualified build `25F84`.
 
-## Release checklist
+## Local zero-cost immutable candidate path
 
-1. Confirm the branch diff contains no unrelated user work.
-2. Run the JTBD impact plan and `full-release` profile.
-3. Confirm session simulations and the no-launch bundle/DMG checks are green.
-4. Confirm the bundle reports app version `0.2.9`, build `1`, helper version `4`, arm64, and strict ad-hoc signature validity.
-5. Confirm Gatekeeper rejection is expected and documented.
-6. Run public hygiene, site Playwright, and secret scans.
-7. Run the explicit local canary after automated gates, then the unplug/replug and short lid-close observations.
-8. Publish `dist/LidSwitch.dmg` and `dist/LidSwitch.dmg.sha256` on GitHub Releases.
-9. State the exact qualified macOS build and manual approval requirement in release notes.
-
-Packaging commands:
+The release owner first performs the held `release-candidate` build. It then
+captures the sealed source manifest, held wrapper, selected local Swift binary,
+and the frozen held `release-output` directory into a create-once envelope
+receipt. The release output must contain exactly the generated trust anchor,
+`LidSwitch`, pre-signed `LidSwitchHelper`, and canonical build receipt:
 
 ```bash
-./script/build_dmg.sh
-./script/validate_dmg.sh
+RELEASE_OUTPUT=/private/tmp/lidswitch-swift.RETAINED/release-output
+PACKAGE_PARENT="$(/usr/bin/mktemp -d /private/tmp/lidswitch-package.XXXXXX)"
+/usr/bin/python3 -I -S -B script/capture_immutable_build_envelope.py \
+  --source-commit "$(/usr/bin/git rev-parse HEAD)" \
+  --source-manifest script/source_snapshot_manifest.jsonl \
+  --held-build-wrapper script/run_swift_build_safely.sh \
+  --swift /Library/Developer/CommandLineTools/usr/bin/swift \
+  --release-output "$RELEASE_OUTPUT" \
+  --output "$PACKAGE_PARENT/build-envelope.json"
+/usr/bin/python3 -I -S -B script/assemble_manual_adhoc_candidate.py \
+  --envelope-receipt "$PACKAGE_PARENT/build-envelope.json" \
+  --release-output "$RELEASE_OUTPUT" \
+  --output-root "$PACKAGE_PARENT/candidate"
 ```
 
-Neither command launches the app or changes live power state.
+The assembler has no compiler or network authority. It uses only the local
+system `codesign` ad-hoc identity (`-`), `hdiutil`, `ditto`, and `shasum`; it
+does not call `xcodebuild`, require an Apple account, Developer ID/Team ID,
+notarization, paid CI, or any paid service. It rejects substituted or stale
+release-output bytes/receipt data by exact inventory, mode, hash, size,
+identifier, and helper CDHash checks. It creates a fresh private root, copies
+only the bound prebuilt binaries, signs the outer app once (the helper remains
+pre-signed), makes one DMG, extracts it, and invokes the immutable build/package manifest
+publishers plus their descriptor validation. Legacy `build_dmg.sh` and
+`validate_dmg.sh` are intentionally still fail-closed.
+
+## Current validation boundary
+
+Public hygiene is available only as an **observational source scan**:
+
+```bash
+/usr/bin/python3 -I -S scripts/scan-public-secrets.py --path <tree>
+```
+
+It uses descriptor-relative, no-follow traversal, nonblocking regular-file opens, bounded reads, capped findings, and a bounded identity-and-digest second pass. Its typed receipts are exact per-file observations, but a moving-tree result is not an immutable snapshot and is never release-candidate proof. `--release-artifacts` deliberately returns `immutable-candidate-manifest-required` before opening any input. `validate_dmg.sh` remains an inert typed nonzero refusal; use the immutable assembler above only after the held build has completed.
+
+Receipt roots contain an ordinal plus a hash of the encoded input root; paths requiring escaping are hashed. Do not invoke the scanner without the exact `-I -S` startup flags.

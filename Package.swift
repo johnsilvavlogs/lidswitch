@@ -1,5 +1,14 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
+
+// The candidate builder writes the measured private anchor source into the
+// LidSwitch target immediately before a release-candidate build.  Ordinary
+// builds never receive this define and therefore cannot reference that source.
+let isReleaseCandidate = ProcessInfo.processInfo.environment["LIDSWITCH_RELEASE_CANDIDATE"] == "1"
+let lidSwitchSwiftSettings: [SwiftSetting] = isReleaseCandidate
+    ? [.define("LIDSWITCH_RELEASE_CANDIDATE")]
+    : []
 
 let package = Package(
     name: "LidSwitch",
@@ -15,14 +24,27 @@ let package = Package(
             name: "LidSwitchCore",
             path: "Sources/LidSwitchCore"
         ),
+        .target(
+            name: "LidSwitchXPCBridge",
+            path: "Sources/LidSwitchXPCBridge",
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(["-fblocks"])
+            ],
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
+        ),
         .executableTarget(
             name: "LidSwitch",
-            dependencies: ["LidSwitchCore"],
-            path: "Sources/LidSwitch"
+            dependencies: ["LidSwitchCore", "LidSwitchXPCBridge"],
+            path: "Sources/LidSwitch",
+            resources: [.copy("../../Resources/LidSwitchReleaseIdentity.json")],
+            swiftSettings: lidSwitchSwiftSettings
         ),
         .executableTarget(
             name: "LidSwitchHelper",
-            dependencies: ["LidSwitchCore"],
+            dependencies: ["LidSwitchCore", "LidSwitchXPCBridge"],
             path: "Sources/LidSwitchHelper",
             linkerSettings: [
                 .linkedFramework("IOKit")

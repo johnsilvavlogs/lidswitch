@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LidSwitch release-tag collision gate receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "releaseTag",
+    "repository",
+    "collisionFree",
+    "checkedAt"
+  ],
+  "properties": {
+    "releaseTag": {
+      "const": "v0.2.10"
+    },
+    "repository": {
+      "const": "johnsilvavlogs/lidswitch"
+    },
+    "collisionFree": {
+      "const": true
+    },
+    "checkedAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

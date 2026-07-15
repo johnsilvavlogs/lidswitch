@@ -1,6 +1,8 @@
 import Darwin
 import Foundation
 
+#if DEBUG
+
 struct HelperConfiguration: Equatable {
     let leasePath: String
     let expectedOwnerUID: uid_t
@@ -45,3 +47,4 @@ struct HelperConfiguration: Equatable {
         )
     }
 }
+#endif

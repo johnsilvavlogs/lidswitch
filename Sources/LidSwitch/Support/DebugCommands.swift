@@ -24,17 +24,11 @@ enum DebugCommands {
             print(PrivilegedHelperManager.diagnosticRestoreScript())
             exit(0)
         case "--print-helper-status":
-            let helperLoaded = PowerInspector.helperInstalled()
-            let helperArtifactsPresent = PowerInspector.artifactsPresent()
-            let helperArtifactsNeedUpdate = PowerInspector.helperNeedsUpdate(
-                helperArtifactsPresent: helperArtifactsPresent,
-                helperLoaded: helperLoaded
-            )
-            let snapshot = PowerInspector.snapshot()
-            print("helperArtifactsPresent=\(helperArtifactsPresent)")
-            print("helperLoaded=\(helperLoaded)")
+            let snapshot = PowerInspector.snapshot(inspectionPolicy: .forceFresh)
+            print("helperArtifactsPresent=\(snapshot.helperArtifactsPresent)")
+            print("helperLoaded=\(snapshot.helperLoaded)")
             print("helperReady=\(snapshot.helperReady)")
-            print("helperNeedsUpdate=\(helperArtifactsNeedUpdate)")
+            print("helperNeedsUpdate=\(snapshot.helperNeedsUpdate)")
             print("helperVersionMatch=\(helperVersionMatches())")
             print("legacyResiduePresent=\(snapshot.legacyResiduePresent)")
             print("sessionActive=\(snapshot.sessionActive)")
@@ -48,7 +42,10 @@ enum DebugCommands {
     }
 
     private static func helperVersionMatches() -> Bool {
-        let version = Shell.run("/bin/cat", [AppPaths.rootHelperVersionPath]).stdout
+        let result = Shell.run(.rootFileContents(AppPaths.rootHelperVersionPath, maximumOutputBytes: 256))
+        guard result.outcome == .completed, result.exitCode == 0,
+              !result.stdout.contains("[output truncated]") else { return false }
+        let version = result.stdout
         return version.trimmingCharacters(in: .whitespacesAndNewlines) == AppPaths.helperVersion
     }
 }

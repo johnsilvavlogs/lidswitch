@@ -47,7 +47,7 @@ public struct ActivationLease: Equatable, Sendable {
     }
 
     public func validationFailure(
-        now: Date,
+        now _: Date,
         nowMonotonic: TimeInterval,
         currentBootID: String,
         expectedOwnerUID: uid_t,
@@ -69,8 +69,7 @@ public struct ActivationLease: Equatable, Sendable {
             return .expired
         }
         guard expiresMonotonic - issuedMonotonic <= maximumLifetime,
-              expiresMonotonic - nowMonotonic <= maximumLifetime,
-              expiresAt.timeIntervalSince(now) <= maximumLifetime + 5
+              expiresMonotonic - nowMonotonic <= maximumLifetime
         else {
             return .excessiveLifetime
         }
@@ -191,7 +190,7 @@ public enum SystemBuild {
 }
 
 public enum CompatibilityPolicy {
-    public static let qualifiedBuilds: Set<String> = ["25F84"]
+    public static let qualifiedBuilds: Set<String> = [ReleaseIdentity.qualifiedSystemBuild]
 
     public static func isQualified(systemBuild: String) -> Bool {
         qualifiedBuilds.contains(systemBuild)

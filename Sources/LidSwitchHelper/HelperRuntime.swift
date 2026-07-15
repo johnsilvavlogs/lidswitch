@@ -3,7 +3,27 @@ import Foundation
 import IOKit.ps
 import LidSwitchCore
 
+#if DEBUG
+// Legacy lease runtime retained only as an isolated fixture harness for the
+// v0.2.9 migration tests. The executable entry point cannot select it, and it
+// is absent from release builds.
+
 final class HelperRuntime: @unchecked Sendable {
+    private struct StatusProjectionWriter {
+        let write: (String, String, UUID?, String, [String: String]) -> Bool
+
+        @discardableResult
+        func callAsFunction(
+            state: String,
+            reason: String,
+            sessionID: UUID?,
+            path: String,
+            evidence: [String: String] = [:]
+        ) -> Bool {
+            write(state, reason, sessionID, path, evidence)
+        }
+    }
+
     private enum StartupRecovery {
         case recovered
         case needsActivation
@@ -23,6 +43,16 @@ final class HelperRuntime: @unchecked Sendable {
     private let reconciliationInterval: TimeInterval
     private let terminalGenerationAllows: (UUID, String) -> Bool
     private let terminalGenerationRecord: (UUID, String) -> Bool
+    private let appliedStateWrite: (AppliedState, String) throws -> Void
+    // Sandboxed DEBUG fixtures cannot register a live IOKit notification
+    // source. Production-equivalent fixture runs may acknowledge installation
+    // and rely on the same reconciliation timer that drives state checks.
+    private let powerNotificationInstall: (() -> Bool)?
+    // The legacy runtime is DEBUG-only. Production keeps its diagnostic status
+    // route as a no-op; fixture callers must inject a descriptor-held writer
+    // and reader rather than reopening a sandbox pathname.
+    private let statusProjectionWrite: StatusProjectionWriter
+    private let statusProjectionRead: (String) -> HelperStatusTombstone?
     private var activeSessionID: UUID?
     // A session gets one bounded repair for an owned SleepDisabled-only loss.
     // A second loss is terminal so we never fight another power-policy actor.
@@ -39,7 +69,7 @@ final class HelperRuntime: @unchecked Sendable {
 
     init(
         configuration: HelperConfiguration,
-        power: HelperPowerSystem = SystemPowerSystem(),
+        power: HelperPowerSystem,
         currentBootID: @escaping () -> String? = BootIdentity.current,
         currentSystemBuild: @escaping () -> String? = SystemBuild.current,
         reconciliationInterval: TimeInterval = 2,
@@ -48,6 +78,16 @@ final class HelperRuntime: @unchecked Sendable {
         },
         terminalGenerationRecord: @escaping (UUID, String) -> Bool = { sessionID, path in
             TerminalGenerationStore.record(sessionID: sessionID, path: path)
+        },
+        appliedStateWrite: @escaping (AppliedState, String) throws -> Void = { state, path in
+            try AppliedStateStore.write(state, path: path)
+        },
+        powerNotificationInstall: (() -> Bool)? = nil,
+        statusProjectionWrite: @escaping (String, String, UUID?, String, [String: String]) -> Bool = { state, reason, sessionID, path, evidence in
+            HelperStatusStore.legacyDiagnosticWrite(state: state, reason: reason, sessionID: sessionID, path: path, evidence: evidence)
+        },
+        statusProjectionRead: @escaping (String) -> HelperStatusTombstone? = { path in
+            HelperStatusTombstone.read(path: path)
         }
     ) {
         self.configuration = configuration
@@ -57,6 +97,10 @@ final class HelperRuntime: @unchecked Sendable {
         self.reconciliationInterval = reconciliationInterval
         self.terminalGenerationAllows = terminalGenerationAllows
         self.terminalGenerationRecord = terminalGenerationRecord
+        self.appliedStateWrite = appliedStateWrite
+        self.powerNotificationInstall = powerNotificationInstall
+        self.statusProjectionWrite = StatusProjectionWriter(write: statusProjectionWrite)
+        self.statusProjectionRead = statusProjectionRead
     }
 
     func run() -> Int32 {
@@ -66,7 +110,7 @@ final class HelperRuntime: @unchecked Sendable {
             return 0
         }
         guard let lease = validatedLease() else {
-            let preservedSessionID = HelperStatusTombstone.read(path: configuration.statusPath)
+            let preservedSessionID = statusProjectionRead(configuration.statusPath)
                 .flatMap(\.sessionID)
             _ = restoreOwnedStateThenRecordTerminal(
                 reason: "no-valid-lease",
@@ -75,7 +119,7 @@ final class HelperRuntime: @unchecked Sendable {
             return 0
         }
         let terminalGeneration = !terminalGenerationAllows(lease.sessionID, terminalGenerationsPath)
-        let terminalStatus = HelperStatusTombstone.read(path: configuration.statusPath).map {
+        let terminalStatus = statusProjectionRead(configuration.statusPath).map {
             $0.sessionID == lease.sessionID && $0.isTerminal
         } ?? false
         if terminalGeneration || terminalStatus {
@@ -107,7 +151,7 @@ final class HelperRuntime: @unchecked Sendable {
             return 0
         }
 
-        guard installPowerNotification() else {
+        guard powerNotificationInstall?() ?? installPowerNotification() else {
             _ = restoreOwnedStateThenRecordTerminal(
                 reason: "power-notification-unavailable",
                 sessionID: lease.sessionID
@@ -156,7 +200,7 @@ final class HelperRuntime: @unchecked Sendable {
               power.sleepDisabled() == false,
               let currentACSleep = power.acSleepMinutes()
         else {
-            HelperStatusStore.write(
+            statusProjectionWrite(
                 state: "blocked",
                 reason: "preflight-failed",
                 sessionID: lease.sessionID,
@@ -173,7 +217,7 @@ final class HelperRuntime: @unchecked Sendable {
             originalACSleep: changedACSleep ? currentACSleep : nil
         )
         do {
-            try AppliedStateStore.write(appliedState, path: configuration.appliedStatePath)
+            try appliedStateWrite(appliedState, configuration.appliedStatePath)
             if changedACSleep {
                 try power.setACSleepMinutes(0)
                 guard power.acSleepMinutes() == 0 else {
@@ -196,7 +240,7 @@ final class HelperRuntime: @unchecked Sendable {
 
         activeSessionID = lease.sessionID
         successfulOverrideRecoveries = 0
-        HelperStatusStore.write(
+        statusProjectionWrite(
             state: "active",
             reason: "verified",
             sessionID: lease.sessionID,
@@ -206,7 +250,7 @@ final class HelperRuntime: @unchecked Sendable {
     }
 
     private func recoverAppliedSession(lease: ActivationLease) -> StartupRecovery {
-        let priorStatus = HelperStatusTombstone.read(path: configuration.statusPath)
+        let budget = recoveryBudget(for: lease.sessionID)
         switch AppliedStateStore.load(
             path: configuration.appliedStatePath,
             expectedOwnerUID: getuid()
@@ -214,7 +258,7 @@ final class HelperRuntime: @unchecked Sendable {
         case .missing:
             return .needsActivation
         case .invalid:
-            HelperStatusStore.write(
+            statusProjectionWrite(
                 state: "recovery-required",
                 reason: "invalid-applied-state",
                 sessionID: nil,
@@ -222,8 +266,7 @@ final class HelperRuntime: @unchecked Sendable {
             )
             return .failed
         case let .success(applied):
-            if applied.sessionID == lease.sessionID, priorStatus?.sessionID == lease.sessionID,
-               priorStatus?.recoveryReserved == true
+            if applied.sessionID == lease.sessionID, budget?.phase == .reserved
             {
                 // A crash after recording the pre-mutation reservation is not
                 // evidence of a successful repair. Roll back and tombstone it;
@@ -237,8 +280,8 @@ final class HelperRuntime: @unchecked Sendable {
                power.acSleepMinutes() == 0
             {
                 activeSessionID = lease.sessionID
-                successfulOverrideRecoveries = priorStatus?.sessionID == lease.sessionID && priorStatus?.recoverySpent == true ? 1 : 0
-                HelperStatusStore.write(
+                successfulOverrideRecoveries = budget?.phase == .spent ? 1 : 0
+                statusProjectionWrite(
                     state: "active",
                     reason: "recovered-after-abnormal-exit",
                     sessionID: lease.sessionID,
@@ -249,6 +292,25 @@ final class HelperRuntime: @unchecked Sendable {
             }
             return restoreOwnedState(reason: "startup-state-mismatch") ? .needsActivation : .failed
         }
+    }
+
+    /// Recovery-budget authority is private and session-bound. Public status
+    /// remains a projection and may never re-authorize a spent/reserved retry.
+    private func recoveryBudget(for sessionID: UUID) -> RecoveryBudgetState? {
+        let store: RecoveryAuthorityStore?
+        if configuration.supportDirectory == ReleaseIdentity.rootSupportDirectory {
+            store = RecoveryAuthorityStore(supportDirectory: configuration.supportDirectory)
+        } else {
+            store = RecoveryAuthorityStore(
+                supportDirectory: configuration.supportDirectory,
+                expectations: .init(ownerUID: getuid(), groupID: getgid(), mode: 0o755),
+                ancestorPolicy: .testTemporaryDirectory
+            )
+        }
+        guard let store, case let .valid(budget) = store.recoveryBudgetRecord(), budget.sessionID == sessionID else {
+            return nil
+        }
+        return budget
     }
 
     private func reconcile() {
@@ -280,7 +342,7 @@ final class HelperRuntime: @unchecked Sendable {
             stop(reason: "override-lost", evidence: evidence)
             return
         }
-        HelperStatusStore.write(
+        statusProjectionWrite(
             state: "active",
             reason: successfulOverrideRecoveries == 1 ? "verified-after-override-recovery" : "verified",
             sessionID: activeSessionID,
@@ -335,7 +397,7 @@ final class HelperRuntime: @unchecked Sendable {
 
         // Persist causal evidence before mutation; a terminal status below keeps
         // it if the reapply fails. It is bounded, root-owned, and non-sensitive.
-        HelperStatusStore.write(
+        statusProjectionWrite(
             state: "active",
             reason: "override-drift-observed",
             sessionID: lease.sessionID,
@@ -359,7 +421,7 @@ final class HelperRuntime: @unchecked Sendable {
               let currentLease = validatedLease(), currentLease.sessionID == lease.sessionID,
               terminalGenerationAllows(lease.sessionID, terminalGenerationsPath)
         else { return false }
-        HelperStatusStore.write(
+        statusProjectionWrite(
             state: "active",
             reason: "override-recovered",
             sessionID: lease.sessionID,
@@ -407,7 +469,7 @@ final class HelperRuntime: @unchecked Sendable {
         // Publish a durable retry marker before mutating power state. If the helper
         // is interrupted anywhere in rollback, startup will retry restoration
         // instead of reactivating or treating the session as already cleaned up.
-        HelperStatusStore.write(
+        statusProjectionWrite(
             state: "recovery-required",
             reason: "\(reason)-restore-pending",
             sessionID: sessionID,
@@ -436,7 +498,7 @@ final class HelperRuntime: @unchecked Sendable {
         ) {
         case .missing:
             removeLegacyPreferenceResidue()
-            HelperStatusStore.write(
+            statusProjectionWrite(
                 state: "inactive",
                 reason: reason,
                 sessionID: activeSessionID ?? statusSessionID,
@@ -445,7 +507,7 @@ final class HelperRuntime: @unchecked Sendable {
             )
             return true
         case .invalid:
-            HelperStatusStore.write(
+            statusProjectionWrite(
                 state: "recovery-required",
                 reason: "\(reason)-invalid-applied-state",
                 sessionID: activeSessionID ?? statusSessionID,
@@ -462,7 +524,7 @@ final class HelperRuntime: @unchecked Sendable {
             }
             if restoreOwnedChanges(applied) {
                 guard AppliedStateStore.remove(path: configuration.appliedStatePath) else {
-                    HelperStatusStore.write(
+                    statusProjectionWrite(
                         state: "recovery-required",
                         reason: "\(reason)-applied-state-remove-failed",
                         sessionID: applied.sessionID,
@@ -472,7 +534,7 @@ final class HelperRuntime: @unchecked Sendable {
                     return false
                 }
                 removeLegacyPreferenceResidue()
-                HelperStatusStore.write(
+                statusProjectionWrite(
                     state: "inactive",
                     reason: reason,
                     sessionID: applied.sessionID,
@@ -483,7 +545,7 @@ final class HelperRuntime: @unchecked Sendable {
             }
         }
 
-        HelperStatusStore.write(
+        statusProjectionWrite(
             state: "recovery-required",
             reason: "\(reason)-restore-unverified",
             sessionID: applied.sessionID,
@@ -594,3 +656,4 @@ final class HelperRuntime: @unchecked Sendable {
         }
     }
 }
+#endif

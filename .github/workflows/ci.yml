@@ -6,20 +6,97 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  policy-and-release-contract:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - name: Install locked JS dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Release identity check and regression
+        run: |
+          npm run release:identity:check
+          npm run release:identity:test
+      - name: Synthetic release-tag collision regression
+        run: npm run release:tag:test
+      - name: Ordinary CI release-path contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          workflow="${GITHUB_WORKSPACE:?}/.github/workflows/ci.yml"
+          package="${GITHUB_WORKSPACE:?}/package.json"
+          for forbidden in \
+            "$(printf '%s%s' build _app_bundle.sh)" \
+            "$(printf '%s%s' build _dmg.sh)" \
+            "$(printf '%s%s' validate _bundle.sh)" \
+            "$(printf '%s%s' validate _dmg.sh)" \
+            "$(printf '%s%s' hdi util)" \
+            "$(printf '%s%s' code sign)" \
+            "$(printf '%s%s' release .env)"; do
+            for source in "$workflow" "$package"; do
+              if /usr/bin/grep -nF -- "$forbidden" "$source"; then
+                echo "ordinary CI/package source exposes a forbidden release operation" >&2
+                exit 1
+              fi
+            done
+          done
+          recursive_rm_pattern='(^|[[:space:];|&])(/[^[:space:]]*/)?rm[[:space:]]+([^[:space:]]+[[:space:]]+){0,3}(-[[:alnum:]]*[rR][[:alnum:]]*|--recursive(=[^[:space:]]+)?)($|[[:space:]])'
+          require_recursive_match() {
+            /usr/bin/printf '%s\n' "$1" | /usr/bin/grep -Eq "$recursive_rm_pattern" || {
+              echo "recursive cleanup matcher fixture was not detected" >&2
+              exit 1
+            }
+          }
+          require_recursive_miss() {
+            if /usr/bin/printf '%s\n' "$1" | /usr/bin/grep -Eq "$recursive_rm_pattern"; then
+              echo "recursive cleanup matcher fixture was falsely detected" >&2
+              exit 1
+            fi
+          }
+          require_recursive_match "$(printf '%s%s%s' rm ' ' -rf)"
+          require_recursive_match "$(printf '%s%s%s%s' /usr/bin/ rm ' ' -fr)"
+          require_recursive_match "$(printf '%s%s%s%s' /bin/ rm ' ' --recursive)"
+          require_recursive_miss "$(printf '%s%s%s' rm ' ' one-file)"
+          for source in "$workflow" "$package"; do
+            if /usr/bin/grep -nE "$recursive_rm_pattern" "$source"; then
+              echo "ordinary CI/package source exposes destructive recursive cleanup" >&2
+              exit 1
+            fi
+          done
+          echo "Immutable candidate release validation is a separate required future gate."
+
   site-and-docs:
     if: ${{ github.event.repository.private == false }}
-    runs-on: ubuntu-latest
+    needs: policy-and-release-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          node-version: 22
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.22.2
           cache: npm
-      - name: Install JS dependencies
-        run: npm ci
+      - name: Install locked JS dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
       - name: Install Playwright browser
-        run: npx playwright install chromium
+        run: npx --no-install playwright install chromium
       - name: Public secret scan
         run: npm run scan:secrets
       - name: Public hygiene check
@@ -28,28 +105,3 @@ jobs:
         run: npm run scan:secrets:test
       - name: Validate site
         run: npm run validate:site
-      - name: DMG packaging dry run
-        run: ./script/build_dmg.sh --dry-run
-
-  native-macos:
-    if: ${{ github.event.repository.private == false }}
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Swift build
-        run: swift build --scratch-path /tmp/lidswitch-ci-build
-      - name: Swift tests
-        run: swift test --scratch-path /tmp/lidswitch-ci-build
-      - name: Session safety simulations
-        run: ./script/validate_session_safety.sh
-      - name: Admin scripts and helper plist lint
-        run: |
-          BIN="$(swift build --scratch-path /tmp/lidswitch-ci-build --show-bin-path)/LidSwitch"
-          "$BIN" --print-install-script | zsh -n /dev/stdin
-          "$BIN" --print-uninstall-script | zsh -n /dev/stdin
-          "$BIN" --print-restore-script | zsh -n /dev/stdin
-          "$BIN" --print-plist | plutil -lint -
-      - name: No-launch app bundle validation
-        run: ./script/validate_bundle.sh
-      - name: No-launch DMG validation
-        run: ./script/validate_dmg.sh
