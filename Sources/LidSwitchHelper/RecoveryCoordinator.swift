@@ -255,7 +255,24 @@ final class RecoveryCoordinator {
 
         switch store.appliedRecord() {
         case .missing:
-            return assessIdle(store, transaction)
+            let idle = assessIdle(store, transaction)
+            // An administrator one-shot is the only path allowed to quiesce
+            // and migrate historical writers.  Once that transaction has
+            // proven an exact terminal generation, publish the corresponding
+            // canonical v5 diagnostic before returning safe idle.  Daemon
+            // startup remains observation-only and merely hydrates a durable
+            // task left by the administrator transaction.
+            if legacyWritersStopped,
+               case let .terminalIdle(session, reason) = idle {
+                guard projectStatus(
+                    state: "terminal",
+                    reason: reason,
+                    sessionID: session,
+                    store: store,
+                    transaction: transaction
+                ) else { return .recoveryRequired("status-projection-enqueue-failed") }
+            }
+            return idle
         case .invalid:
             return required(store, transaction, "invalid-applied-state")
         case let .quarantinedApplied(state):

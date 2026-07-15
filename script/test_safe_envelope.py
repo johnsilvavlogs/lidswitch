@@ -81,13 +81,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("6019c9e058d91dfd2470f3412894a647d84704078ac82c42b46ab976209e6cd2", 57796),
+    "script/live_state_envelope.sh": ("c7500fa1c16a2e2b93077bded1c02f9a51cdefa7d327f789a384ef38b6d249a8", 58948),
     "script/swift_sandbox_common.sh": ("f93e57098e318d072169f1535f0b554fccb26fce36e30de9a597e58855e7e9cf", 67919),
     "script/swift_test_sandbox.sb.in": ("8b013f263b8df5bac4da437c2fa8a5e7c7f5e64f4ae33650904a1cf1d0e95e5e", 10764),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("5ee32156568153d201928a9e358e788e31b10b526e4fbd2c91bf9885c051b79a", 3578),
+    "script/source_snapshot_manifest.jsonl": ("aa3ebfd52cf71dab6eb654e1fe4c28b4a1a75495c59d325c04c02a726cf651e2", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1594,6 +1594,14 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn('print (signature == "" ? "none" : signature)', envelope)
         self.assertNotIn('print signature == "" ? "none" : signature', envelope)
         self.assertNotRegex(envelope, r'print\s+(?:signature|count|found)\b')
+        projection_signature = "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic"
+        self.assertIn(f'"$LIVE_STATUS_EVIDENCE_SIGNATURE" == "{projection_signature}"', envelope)
+        for key in ("projection_authority", "projection_generation", "projection_token"):
+            self.assertIn(f'key != "{key}"', envelope)
+            self.assertIn(f'live_envelope_kv_optional {key}', envelope)
+        self.assertIn('[[ "$projection_authority" =~ ^[0-9a-f]{16}$ ]]', envelope)
+        self.assertIn('live_envelope_canonical_uint "$projection_generation"', envelope)
+        self.assertIn('live_envelope_canonical_uuid "$projection_token"', envelope)
         self.assertIn('--allow-root-nlink-growth', envelope)
         self.assertIn('write.add_argument("--allow-root-nlink-growth", action="store_true")', safe_file)
         self.assertEqual(safe_file.count('allow_nlink_growth=args.allow_root_nlink_growth'), 2)

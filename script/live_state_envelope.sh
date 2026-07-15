@@ -20,7 +20,7 @@ LIDSWITCH_TRANSITIONAL_REASONS="reconnect-pending override-drift-observed"
 LIDSWITCH_ACTIVE_RENEWAL_CADENCE_SECONDS=8
 LIDSWITCH_ACTIVE_STATUS_FRESH_SECONDS=15
 LIDSWITCH_CANDIDATE_INACTIVE_NONE_REASONS="legacy-migration legacy-migration-superseded"
-LIDSWITCH_CANDIDATE_TERMINAL_SESSION_REASONS="ac-disconnect activation-failed activation-publication-failed activation-verification-failed confirmed-power-unknown drift expired helper-restart install-recovery legacy-restore peer-process-invalid reconnect-expired reconnect-power-drift renewal-publication-failed replay-or-durability-denial startup-recovery uninstall-recovery unproven-schema2-restore user-end user-restore-recovery"
+LIDSWITCH_CANDIDATE_TERMINAL_SESSION_REASONS="ac-disconnect activation-failed activation-publication-failed activation-verification-failed confirmed-power-unknown drift expired helper-restart install-recovery legacy-migration legacy-restore peer-process-invalid reconnect-expired reconnect-power-drift renewal-publication-failed replay-or-durability-denial startup-recovery uninstall-recovery unproven-schema2-restore user-end user-restore-recovery"
 LIDSWITCH_CANDIDATE_RECOVERY_SESSION_REASONS="ac-disconnect-rollback-unverified activation-failed-rollback-unverified activation-publication-failed-rollback-unverified activation-verification-failed-rollback-unverified authority-unavailable-rollback-unverified confirmed-power-unknown-rollback-unverified drift-rollback-unverified expired-rollback-unverified peer-process-invalid-rollback-unverified reconnect-expired-rollback-unverified reconnect-power-drift-rollback-unverified renewal-publication-failed-rollback-unverified user-end-rollback-unverified"
 LIDSWITCH_CANDIDATE_RECOVERY_NONE_REASONS="active-proof-conflict applied-disappeared-during-recovery applied-removal-unsafe applied-removal-unverified applied-state-ambiguous battery-precondition-conflict idle-power-state-unknown idle-sleep-override-active invalid-applied-state invalid-legacy-recovery-journal invalid-private-ledger invalid-recovery-proof legacy-applied-migration-not-published legacy-applied-migration-unverified legacy-evidence-removal-unverified legacy-journal-disappeared legacy-journal-removal-unsafe legacy-journal-removal-unverified legacy-native-idle-unverified legacy-post-proof-native-drift legacy-proof-conflict legacy-proof-journal-mismatch legacy-proof-journal-unverified legacy-proof-missing legacy-proof-not-published legacy-proof-unverified legacy-safe-journal-unverified legacy-sleep-disabled-unknown legacy-sleep-override-ambiguous legacy-sleep-postcondition-unknown legacy-sleep-restore-failed legacy-timer-final-state-unknown legacy-timer-state-unknown legacy-writers-not-quiesced migrated-history-conflict missing-recovery-proof owned-restore-failed power-precondition-conflict power-precondition-unknown pristine-history-conflict recovery-proof-not-published recovery-proof-unverified restore-postcondition-unknown terminal-proof-ledger-mismatch terminal-publication-not-published terminal-publication-unverified unowned-sleep-override-active unproven-applied-state"
 LIDSWITCH_LEGACY_INACTIVE_REASONS="activation-failed lease-expired-or-invalid no-valid-lease override-lost power-notification-unavailable recovery-failed signal startup-interrupted-override-recovery startup-state-mismatch terminal-session-recovery"
@@ -288,7 +288,11 @@ live_envelope_status_matrix() {
       ;;
     true:terminal:uuid)
       live_envelope_reason_in_list "$LIVE_STATUS_REASON" "$LIDSWITCH_CANDIDATE_TERMINAL_SESSION_REASONS" || return 74
-      [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
+      if [[ "$LIVE_STATUS_REASON" == "legacy-migration" ]]; then
+        [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic" ]] || return 74
+      else
+        [[ "$LIVE_STATUS_SCHEMA" == "canonical-v2" && "$LIVE_STATUS_EVIDENCE_SIGNATURE" == "boot_id,updated_monotonic" ]] || return 74
+      fi
       live_envelope_status_is_current 60 || return 74
       LIVE_STATUS_REASON_CLASS="safe-idle"
       ;;
@@ -345,6 +349,7 @@ live_envelope_status_matrix() {
 live_envelope_capture_status() {
   local scratch="$1" phase="$2" copy
   local before after type owner group mode links size remainder count signature recovery_budget
+  local projection_authority projection_generation projection_token
   LIVE_STATUS_LEGACY_STALE_IDLE=false
   if [[ ! -e "$LIDSWITCH_LIVE_STATUS_PATH" && ! -L "$LIDSWITCH_LIVE_STATUS_PATH" ]]; then
     LIVE_STATUS_PRESENCE="absent"
@@ -381,7 +386,9 @@ live_envelope_capture_status() {
         if (key != "boot_id" && key != "event" && key != "observed_ac_sleep" &&
             key != "observed_at" && key != "observed_power" && key != "observed_session" &&
             key != "observed_sleep_disabled" && key != "recovered_at" &&
-            key != "recovery_budget" && key != "updated_monotonic") exit 65
+            key != "projection_authority" && key != "projection_generation" &&
+            key != "projection_token" && key != "recovery_budget" &&
+            key != "updated_monotonic") exit 65
         signature = signature (signature == "" ? "" : ",") key
         prior=key
       }
@@ -396,6 +403,9 @@ live_envelope_capture_status() {
   LIVE_STATUS_MONOTONIC="$(/usr/bin/awk -F= '$1 == "updated_monotonic" { count++; value=substr($0,index($0,"=")+1) } END { if (count > 1) exit 65; print (count == 1 ? value : "none") }' "$copy")" || return 74
   LIVE_STATUS_BOOT_ID="$(/usr/bin/awk -F= '$1 == "boot_id" { count++; value=substr($0,index($0,"=")+1) } END { if (count > 1) exit 65; print (count == 1 ? value : "none") }' "$copy")" || return 74
   recovery_budget="$(/usr/bin/awk -F= '$1 == "recovery_budget" { count++; value=substr($0,index($0,"=")+1) } END { if (count > 1) exit 65; print (count == 1 ? value : "none") }' "$copy")" || return 74
+  projection_authority="$(live_envelope_kv_optional projection_authority "$copy")" || return 74
+  projection_generation="$(live_envelope_kv_optional projection_generation "$copy")" || return 74
+  projection_token="$(live_envelope_kv_optional projection_token "$copy")" || return 74
   LIVE_STATUS_RECOVERY_BUDGET="$recovery_budget"
   LIVE_STATUS_EVENT="$(live_envelope_kv_optional event "$copy")" || return 74
   LIVE_STATUS_OBSERVED_AC_SLEEP="$(live_envelope_kv_optional observed_ac_sleep "$copy")" || return 74
@@ -411,6 +421,12 @@ live_envelope_capture_status() {
   fi
   if [[ "$LIVE_STATUS_BOOT_ID" != "none" ]]; then
     live_envelope_canonical_uuid "$LIVE_STATUS_BOOT_ID" || return 74
+  fi
+  if [[ "$projection_authority" != "none" || "$projection_generation" != "none" || "$projection_token" != "none" ]]; then
+    [[ "$projection_authority" =~ ^[0-9a-f]{16}$ ]] || return 74
+    live_envelope_canonical_uint "$projection_generation" || return 74
+    [[ "$projection_generation" -gt 0 ]] || return 74
+    live_envelope_canonical_uuid "$projection_token" || return 74
   fi
   LIVE_STATUS_EVIDENCE_SIGNATURE="$signature"
   if [[ "$count" == "4" ]]; then

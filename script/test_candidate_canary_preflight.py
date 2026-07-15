@@ -233,17 +233,26 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
                 with self.assertRaisesRegex(preflight.PreflightError, error):
                     preflight._observe_before(args, self.runner_with_ioreg(output))
 
-    def test_preflight_accepts_only_exact_production_inactive_no_session_reasons(self):
-        for reason in ("legacy-migration", "legacy-migration-superseded"):
-            with self.subTest(accepted=reason):
-                self.status.write_text(status("inactive", reason, "none"), encoding="utf-8")
+    def test_preflight_accepts_only_exact_production_safe_idle_migration_status(self):
+        accepted = (
+            ("inactive", "legacy-migration", "none"),
+            ("inactive", "legacy-migration-superseded", "none"),
+            ("terminal", "legacy-migration", "12345678-1234-1234-9234-123456789abc"),
+        )
+        for state_name, reason, session in accepted:
+            with self.subTest(accepted=(state_name, reason, session)):
+                self.status.write_text(status(state_name, reason, session), encoding="utf-8")
                 observed = preflight._observe_before(self.args(), self.runner)
-                self.assertEqual(observed["before"]["status_state"], "inactive")
+                self.assertEqual(observed["before"]["status_state"], state_name)
                 self.assertEqual(observed["before"]["status_reason"], reason)
+                self.assertEqual(observed["before"]["status_session"], session)
         rejected = (
             ("idle", "safe-idle", "none"),
             ("inactive", "unknown", "none"),
             ("inactive", "legacy-migration", "12345678-1234-1234-1234-123456789abc"),
+            ("terminal", "legacy-migration", "none"),
+            ("terminal", "legacy-migration-superseded", "12345678-1234-1234-9234-123456789abc"),
+            ("terminal", "legacy-migration", "12345678-1234-1234-9234-123456789ABC"),
             ("terminal", "peer-process-invalid", "none"),
         )
         for state_name, reason, session in rejected:

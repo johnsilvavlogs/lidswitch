@@ -1162,17 +1162,20 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
         let recoveryNone = try shellWords("LIDSWITCH_CANDIDATE_RECOVERY_NONE_REASONS", in: envelope)
         let recoverySession = try shellWords("LIDSWITCH_CANDIDATE_RECOVERY_SESSION_REASONS", in: envelope)
         XCTAssertTrue(terminalReasons.contains("user-end"))
+        XCTAssertTrue(terminalReasons.contains("legacy-migration"))
         XCTAssertTrue(recoveryNone.contains("invalid-applied-state"))
         XCTAssertTrue(recoverySession.contains("authority-unavailable-rollback-unverified"))
         XCTAssertTrue(terminalReasons.isDisjoint(with: recoveryNone))
         XCTAssertTrue(recoveryNone.isDisjoint(with: recoverySession))
         XCTAssertTrue(terminalReasons.union(recoveryNone).union(recoverySession).allSatisfy { $0.range(of: "^[a-z0-9-]+$", options: .regularExpression) != nil })
+        let projectionSignature = "boot_id,projection_authority,projection_generation,projection_token,updated_monotonic"
         let candidateAccepts: (String, String, String, Int, String) -> Bool = { state, reason, session, age, signature in
             switch (state, session) {
             case ("inactive", "none"):
                 return inactiveNone.contains(reason) && age <= 60 && signature == "boot_id,updated_monotonic"
             case ("terminal", "uuid"):
-                return terminalReasons.contains(reason) && age <= 60 && signature == "boot_id,updated_monotonic"
+                let expected = reason == "legacy-migration" ? projectionSignature : "boot_id,updated_monotonic"
+                return terminalReasons.contains(reason) && age <= 60 && signature == expected
             case ("recovery-required", "none"):
                 return recoveryNone.contains(reason) && age <= 30 && signature == "boot_id,updated_monotonic"
             case ("recovery-required", "uuid"):
@@ -1182,11 +1185,41 @@ final class SafeEnvelopeRevision4SourceTests: XCTestCase {
             }
         }
         XCTAssertTrue(candidateAccepts("terminal", "user-end", "uuid", 10, "boot_id,updated_monotonic"))
+        XCTAssertTrue(candidateAccepts("terminal", "legacy-migration", "uuid", 10, projectionSignature))
+        XCTAssertFalse(candidateAccepts("terminal", "legacy-migration", "uuid", 10, "boot_id,updated_monotonic"))
         XCTAssertTrue(candidateAccepts("recovery-required", "invalid-applied-state", "none", 10, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("terminal", "user-end", "none", 10, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("inactive", "unknown", "none", 10, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("recovery-required", "invalid-applied-state", "none", 31, "boot_id,updated_monotonic"))
         XCTAssertFalse(candidateAccepts("terminal", "user-end", "uuid", 10, "boot_id,event,updated_monotonic"))
+
+        let migrationProjection = """
+        state=terminal
+        reason=legacy-migration
+        session=12345678-1234-4234-9234-123456789abc
+        updated=10
+        boot_id=12345678-1234-4234-9234-123456789abc
+        projection_authority=0123456789abcdef
+        projection_generation=1
+        projection_token=abcdefab-cdef-4abc-8def-abcdefabcdef
+        updated_monotonic=12.345
+
+        """
+        let projectionFields = migrationProjection.split(separator: "\n").map { line -> (String, String) in
+            let pair = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            return (String(pair[0]), String(pair[1]))
+        }
+        XCTAssertEqual(projectionFields.map(\.0), [
+            "state", "reason", "session", "updated", "boot_id", "projection_authority",
+            "projection_generation", "projection_token", "updated_monotonic",
+        ])
+        XCTAssertEqual(projectionFields.dropFirst(4).map(\.0).joined(separator: ","), projectionSignature)
+        for key in projectionFields.dropFirst(4).map(\.0) {
+            XCTAssertTrue(envelope.contains("key != \"\(key)\"" ) || key == "boot_id" || key == "updated_monotonic")
+        }
+        XCTAssertTrue(projectionFields[5].1.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil)
+        XCTAssertEqual(UInt64(projectionFields[6].1), 1)
+        XCTAssertEqual(UUID(uuidString: projectionFields[7].1)?.uuidString.lowercased(), projectionFields[7].1)
         let current = try XCTUnwrap(envelope.range(of: "live_envelope_status_is_current()"))
         let matrix = try XCTUnwrap(envelope.range(of: "live_envelope_status_matrix()"))
         let currentBody = String(envelope[current.lowerBound..<matrix.lowerBound])

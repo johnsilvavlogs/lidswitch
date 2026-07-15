@@ -245,11 +245,14 @@ def _validate_lid_observation(observation):
     return observation
 
 
-def _safe_no_session_status(state, reason, session):
+def _safe_idle_status(state, reason, session):
+    if state == "inactive" and reason in SAFE_INACTIVE_REASONS and session == "none":
+        return True
     return (
-        state == "inactive"
-        and reason in SAFE_INACTIVE_REASONS
-        and session == "none"
+        state == "terminal"
+        and reason == "legacy-migration"
+        and session == session.lower()
+        and SESSION.fullmatch(session) is not None
     )
 
 
@@ -357,7 +360,7 @@ def _observe_before(args, runner=None):
         fail("power-not-safe-idle")
     sleeps = _custom_sleep(custom)
     status, status_sha = _status(args.status_file)
-    if os.path.lexists(args.applied_state) or not _safe_no_session_status(status["state"], status["reason"], status["session"]):
+    if os.path.lexists(args.applied_state) or not _safe_idle_status(status["state"], status["reason"], status["session"]):
         fail("active-lease-present")
     return {
         "schema_version": RECEIPT_SCHEMA,
@@ -386,7 +389,7 @@ def _load_receipt(path, phase):
         _hex(installed["app_sha256"]); _cdhash(installed["app_cdhash"]); _hex(installed["helper_sha256"]); _cdhash(installed["helper_cdhash"])
         _validate_lid_observation(receipt["lid_observation"])
         before = _keys(receipt["before"], ("power_source", "sleep_disabled", "applied_state_present", "ac_sleep_minutes", "battery_sleep_minutes", "pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_state", "status_reason", "status_session", "status_sha256"))
-        if before["power_source"] != "AC" or before["sleep_disabled"] != 0 or before["applied_state_present"] is not False or not _safe_no_session_status(before["status_state"], before["status_reason"], before["status_session"]):
+        if before["power_source"] != "AC" or before["sleep_disabled"] != 0 or before["applied_state_present"] is not False or not _safe_idle_status(before["status_state"], before["status_reason"], before["status_session"]):
             fail("receipt-schema-invalid")
         for name in ("pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_sha256"):
             _hex(before[name])

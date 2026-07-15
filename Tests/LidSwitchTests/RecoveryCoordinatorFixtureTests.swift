@@ -423,6 +423,53 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.store.appliedRecord(), .missing)
     }
 
+    func testTerminalMigrationTaskReplacesOnlyMatchingShippedV4InactiveStatus() throws {
+        let session = UUID(uuidString: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")!
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try fixture.createLegacyFile(
+            "helper-status",
+            bytes: [
+                "state=inactive",
+                "reason=no-valid-lease",
+                "session=\(session.uuidString.lowercased())",
+                "updated=10",
+                "",
+            ].joined(separator: "\n")
+        )
+        let task = try XCTUnwrap(StatusProjectionTask(
+            generation: 1,
+            state: "terminal",
+            reason: "legacy-migration",
+            sessionID: session,
+            issuedEpoch: 11,
+            issuedMonotonicMillis: 12,
+            bootID: "fixture-boot",
+            deadlineNanoseconds: 100
+        ))
+        XCTAssertEqual(fixture.statusWriteOutcome(task: task), .written)
+        XCTAssertEqual(
+            try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8),
+            task.statusPayload
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        let mismatch = try Fixture()
+        defer { mismatch.dispose() }
+        try mismatch.createLegacyFile(
+            "helper-status",
+            bytes: [
+                "state=inactive",
+                "reason=no-valid-lease",
+                "session=\(UUID().uuidString.lowercased())",
+                "updated=10",
+                "",
+            ].joined(separator: "\n")
+        )
+        XCTAssertEqual(mismatch.statusWriteOutcome(task: task), .unsafeExisting)
+        XCTAssertEqual(mismatch.power.setCalls, [])
+    }
+
     /// Zero and partial bytes at the one fixed temp name are not public
     /// status and never authority. They are the descriptor-bound residue of
     /// an interrupted writer transaction and are retired while holding the

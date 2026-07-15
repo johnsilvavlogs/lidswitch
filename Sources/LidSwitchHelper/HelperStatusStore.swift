@@ -110,6 +110,21 @@ enum HelperStatusStore {
                     replacing: (metadata: metadata, payload: payload),
                     stageGate: stageGate
                 )
+            case let .shippedV4Inactive(sessionID, metadata, payload):
+                // The migration task is root-private authority.  Permit it to
+                // retire only the exact four-field status shape shipped by
+                // helper v4, and only when that stale status names the same
+                // terminal generation.  No malformed, sessionless, active,
+                // or unrelated legacy bytes become replaceable here.
+                guard task.state == "terminal",
+                      task.reason == "legacy-migration",
+                      task.sessionID == sessionID
+                else { return .unsafeExisting }
+                return capability.publish(
+                    task.statusPayload,
+                    replacing: (metadata: metadata, payload: payload),
+                    stageGate: stageGate
+                )
             case .absent:
                 return capability.publish(task.statusPayload, replacing: nil, stageGate: stageGate)
             case .unsafe:
@@ -157,6 +172,7 @@ fileprivate final class StatusDirectoryCapability {
     fileprivate enum ReadResult {
         case absent
         case existing(UInt64, String, stat, String)
+        case shippedV4Inactive(UUID, stat, String)
         case unsafe
         case io
         case indeterminate
@@ -284,7 +300,12 @@ fileprivate final class StatusDirectoryCapability {
         guard sameMetadata(initial, final) else { return .indeterminate }
         guard let raw = String(bytes: bytes, encoding: .utf8),
               let projection = parseProjection(raw)
-        else { return .unsafe }
+        else {
+            guard let raw = String(bytes: bytes, encoding: .utf8),
+                  let sessionID = parseShippedV4Inactive(raw)
+            else { return .unsafe }
+            return .shippedV4Inactive(sessionID, initial, raw)
+        }
         return .existing(projection.generation, projection.authority, initial, raw)
     }
 
@@ -540,6 +561,27 @@ fileprivate final class StatusDirectoryCapability {
             guard let session = fields["session"], session == session.lowercased(), UUID(uuidString: session) != nil else { return nil }
         }
         return (generation, authority)
+    }
+
+    /// Exact public diagnostic emitted by helper v4.  This is classification
+    /// only; replacement still requires a root-private terminal migration task
+    /// for this exact UUID in `writeOutcome` above.
+    private func parseShippedV4Inactive(_ raw: String) -> UUID? {
+        guard raw.hasSuffix("\n"), !raw.hasSuffix("\n\n") else { return nil }
+        let lines = raw.dropLast().split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard lines.count == 4,
+              lines[0] == "state=inactive",
+              lines[1].range(of: "^reason=[a-z0-9-]{1,96}$", options: .regularExpression) != nil,
+              lines[2].hasPrefix("session="),
+              lines[3].hasPrefix("updated=")
+        else { return nil }
+        let sessionRaw = String(lines[2].dropFirst("session=".count))
+        let updatedRaw = String(lines[3].dropFirst("updated=".count))
+        guard let sessionID = UUID(uuidString: sessionRaw),
+              sessionID.uuidString.lowercased() == sessionRaw,
+              let updated = UInt64(updatedRaw), String(updated) == updatedRaw
+        else { return nil }
+        return sessionID
     }
 
     private func writeExactly(_ bytes: [UInt8], to descriptor: Int32) -> Bool {

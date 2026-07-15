@@ -649,12 +649,33 @@ final class LegacyMigrationFixtureTests: XCTestCase {
         )
         try fixture.installLegacyStatus(state: "inactive", session: terminal)
 
-        XCTAssertEqual(fixture.store.provision(), .ready)
+        XCTAssertEqual(
+            fixture.provisionAndRecover(),
+            .terminalIdle(terminal, "legacy-migration")
+        )
         XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.terminalBasename), [terminal])
         XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
         XCTAssertEqual(
             fixture.store.proof(),
             RecoveryProof(kind: .terminal, sessionID: terminal, reason: "legacy-migration")
+        )
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting(timeout: 2))
+        XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .absent)
+        let projected = try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(projected.contains("state=terminal\n"))
+        XCTAssertTrue(projected.contains("reason=legacy-migration\n"))
+        XCTAssertTrue(projected.contains("session=\(terminal.uuidString.lowercased())\n"))
+        XCTAssertTrue(projected.contains("projection_generation=1\n"))
+        let beforeStartup = projected
+        XCTAssertEqual(
+            fixture.coordinator.recover(intent: .startup, allowReconnect: true),
+            .terminalIdle(terminal, "legacy-migration")
+        )
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting(timeout: 2))
+        XCTAssertEqual(
+            try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8),
+            beforeStartup,
+            "daemon startup must observe the administrator projection without rewriting it"
         )
         XCTAssertEqual(fixture.power.setCalls, [])
     }
