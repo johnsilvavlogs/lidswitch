@@ -594,7 +594,7 @@ enum SecureHelperInstaller {
         current=\(q(AppPaths.rootCurrentDirectory))
         previous=\(q(AppPaths.rootPreviousDirectory))
         plist=\(q(AppPaths.launchDaemonPath))
-        status=\(q(AppPaths.rootHelperStatusPath))
+        status_path=\(q(AppPaths.rootHelperStatusPath))
         helper_source=\(q(enrollment.transfer.sourcePath))
         receipt=\(q(receiptPath))
         stage=\(q(stage))
@@ -941,7 +941,7 @@ enum SecureHelperInstaller {
             # dynamic installation residue. Remove only this public leaf;
             # private ledgers, proof, locks, and administrator receipts remain
             # intact for audit and future fail-closed recovery.
-            /bin/rm -f "$status" "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
+            /bin/rm -f "$status_path" "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
             /bin/rm -rf "$current" "$previous"
             /bin/sync
             """

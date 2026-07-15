@@ -4507,7 +4507,7 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertLessThan(publishCurrent.lowerBound, bootstrap.lowerBound)
 
         let uninstallRecovery = try XCTUnwrap(uninstall.range(of: "recovery_payload="))
-        let uninstallStatusRemoval = try XCTUnwrap(uninstall.range(of: "/bin/rm -f \"$status\" \"$plist\"", options: .backwards))
+        let uninstallStatusRemoval = try XCTUnwrap(uninstall.range(of: "/bin/rm -f \"$status_path\" \"$plist\"", options: .backwards))
         XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallStatusRemoval.lowerBound)
         XCTAssertEqual(
             AppPaths.legacyV4RootHelperVersionPath,
@@ -4519,7 +4519,7 @@ final class SessionSafetyTests: XCTestCase {
             AppPaths.legacyV4RootHelperVersionPath
         ].map { "'\($0)'" }.joined(separator: " ")
         let installLegacyCleanup = "/bin/rm -f \(legacyArtifacts)"
-        let uninstallLegacyCleanup = "/bin/rm -f \"$status\" \"$plist\" \(legacyArtifacts)"
+        let uninstallLegacyCleanup = "/bin/rm -f \"$status_path\" \"$plist\" \(legacyArtifacts)"
         let installLegacyMarkerDeletion = try XCTUnwrap(install.range(of: installLegacyCleanup))
         let uninstallLegacyMarkerDeletion = try XCTUnwrap(uninstall.range(of: uninstallLegacyCleanup))
         XCTAssertLessThan(bootstrap.lowerBound, installLegacyMarkerDeletion.lowerBound)

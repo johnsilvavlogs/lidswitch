@@ -348,6 +348,7 @@ final class AdministratorRecoveryIntegrationTests: XCTestCase {
         let source = PrivilegedHelperManager.diagnosticRestoreScript()
         let uninstall = PrivilegedHelperManager.diagnosticUninstallScript()
         for script in [source, uninstall] {
+            XCTAssertFalse(script.contains("\nstatus="), "zsh reserves the status parameter as read-only")
             XCTAssertFalse(script.contains("lidswitch_parse_applied_state"))
             XCTAssertFalse(script.contains("lidswitch_read_sleep_disabled"))
             XCTAssertFalse(script.contains("/usr/bin/pmset"))
@@ -364,8 +365,8 @@ final class AdministratorRecoveryIntegrationTests: XCTestCase {
         XCTAssertFalse(uninstall.contains("recovery-reservations"))
         XCTAssertFalse(uninstall.contains("recovery-proof"))
         XCTAssertFalse(uninstall.contains("root-state.lock"))
-        XCTAssertTrue(uninstall.contains("status='\(AppPaths.rootHelperStatusPath)'"))
-        XCTAssertTrue(uninstall.contains("/bin/rm -f \"$status\" \"$plist\""))
+        XCTAssertTrue(uninstall.contains("status_path='\(AppPaths.rootHelperStatusPath)'"))
+        XCTAssertTrue(uninstall.contains("/bin/rm -f \"$status_path\" \"$plist\""))
         XCTAssertTrue(uninstall.contains("administrator-transaction-"))
         XCTAssertTrue(source.contains(".LidSwitch-administrator-"))
         XCTAssertFalse(source.contains("root + \"/.administrator-\""))
