@@ -301,12 +301,15 @@ def test_dmg_source_binding_proof() -> None:
     require(not any(token in source for token in forbidden), "DMG refusal must have no executable or mutation route")
 
 
-def test_distribution_blocked_candidate_truth() -> None:
+def test_distribution_release_truth() -> None:
     source = (SCRIPT_DIR.parent / "docs" / "DISTRIBUTION.md").read_text(encoding="utf-8")
-    require("blocked release candidate" in source and "held build receipt, emitted immutable manifest, benchmark evidence, and native canary" in source, "distribution docs must state the release blocker")
-    require("intended future tier" in source and "not a claim that an artifact is currently shipped" in source, "distribution docs must distinguish intended tier from shipment")
-    forbidden = ("is distributed as", "full-release", "checks are green", "Publish `dist/", "Packaging commands:", "./script/build_dmg.sh", "./script/validate_dmg.sh")
-    require(not any(token in source for token in forbidden), "distribution docs must not retain shipped, green, or legacy packaging claims")
+    require("current public manual release" in source and "v0.2.11" in source, "distribution docs must state the current release")
+    require("c2ab38170b2ae42fd46b234ba83cbe974a983d85" in source, "distribution docs must bind the release tag to its exact source")
+    require("ecfb76230b92636018375997af6e14a61a1a3b28cf4fe5d272ddf75e6fcfa7ce" in source, "distribution docs must bind the release asset digest")
+    require("peer-process-invalid" in source and "SleepDisabled=0" in source and "no automatic rearm" in source, "distribution docs must state native canary acceptance")
+    require("ad-hoc signing" in source and "no Developer ID" in source and "no notarization" in source, "distribution docs must retain the manual trust boundary")
+    forbidden = ("blocked release candidate", "not a built, distributed", "intended future tier", "full-release", "checks are green", "Publish `dist/", "Packaging commands:", "./script/build_dmg.sh", "./script/validate_dmg.sh")
+    require(not any(token in source for token in forbidden), "distribution docs must not retain blocked, green, or legacy packaging claims")
 
 
 def test_path_redaction() -> None:
@@ -333,7 +336,7 @@ def main() -> int:
     test_finding_caps_whitespace_and_safe_paths()
     test_path_redaction()
     test_dmg_source_binding_proof()
-    test_distribution_blocked_candidate_truth()
+    test_distribution_release_truth()
     print("public secret scanner regression ok")
     return 0
 
