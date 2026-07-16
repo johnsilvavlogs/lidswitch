@@ -881,8 +881,18 @@ final class SessionDiagnosticStore: @unchecked Sendable {
     }
 
     private func evictOne(from entries: inout [SessionDiagnosticEntry]) {
-        if let renewal = entries.firstIndex(where: { $0.event == "renew-summary" }) {
-            entries.remove(at: renewal)
+        // Migration-era schema-1 `renew` rows are obsolete per-renewal noise.
+        // Retire them before compact summaries so a cap-full legacy history
+        // cannot immediately discard the first v0.2.10 summary. If no legacy
+        // raw renewal remains, summaries are still the next eviction class.
+        // Thus renewal-only histories retire raw rows then summaries; whenever
+        // either renewal class exists, structural start/degraded/end evidence
+        // is protected. With no renewal candidate, structural-only histories
+        // retain the preexisting FIFO bound.
+        if let legacyRenewal = entries.firstIndex(where: { $0.schema == 1 && $0.event == "renew" }) {
+            entries.remove(at: legacyRenewal)
+        } else if let summary = entries.firstIndex(where: { $0.event == "renew-summary" }) {
+            entries.remove(at: summary)
         } else {
             entries.removeFirst()
         }
