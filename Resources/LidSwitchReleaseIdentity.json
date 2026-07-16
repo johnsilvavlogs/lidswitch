@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "appVersion": "0.2.12",
-  "appBuild": 4,
+  "appBuild": 5,
   "helperVersion": 5,
   "xpcProtocolVersion": 2,
   "enrollmentPolicyProtocolVersion": 1,

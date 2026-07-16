@@ -203,6 +203,33 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
+    func testOnlyTerminalOperationsUseTheExtendedWireTimeout() {
+        let ordinary: [UInt32] = [
+            UInt32(LS_OPERATION_BEGIN.rawValue),
+            UInt32(LS_OPERATION_RENEW.rawValue),
+            UInt32(LS_OPERATION_RECONNECT.rawValue),
+            UInt32(LS_OPERATION_SNAPSHOT.rawValue),
+        ]
+        for operation in ordinary {
+            XCTAssertEqual(
+                RawHelperControlClient.timeoutSecondsForTesting(operation: operation),
+                5
+            )
+        }
+        XCTAssertEqual(
+            RawHelperControlClient.timeoutSecondsForTesting(
+                operation: UInt32(LS_OPERATION_END.rawValue)
+            ),
+            10
+        )
+        XCTAssertEqual(
+            RawHelperControlClient.timeoutSecondsForTesting(
+                operation: UInt32(LS_OPERATION_RESTORE.rawValue)
+            ),
+            10
+        )
+    }
+
     func testTerminalReconnectProofConsumesNoAdditionalTerminalEffect() {
         let sessionID = UUID()
         let terminal = reply(
