@@ -43,7 +43,7 @@ The following old components must remain disabled/unloaded until removed:
 /Library/Application Support/LidSwitch/lidswitch-helper
 ```
 
-Version `0.2.10` removes them during preparation. Do not re-enable them.
+Version `0.2.11` removes them during preparation. Do not re-enable them.
 
 Preparation first creates/verifies only the fixed root lock. It does not treat
 that as migration authorization. The administrator transaction must boot out

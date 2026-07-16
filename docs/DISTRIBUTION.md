@@ -2,7 +2,7 @@
 
 ## Candidate status
 
-LidSwitch `0.2.10` build `2` is a blocked release candidate, not a distributed or release-qualified artifact. A local immutable candidate path now exists, but it remains blocked until its held build receipt, emitted immutable manifest, benchmark evidence, and native canary are reviewed together.
+LidSwitch `0.2.11` build `3` is a blocked source candidate, not a built, distributed, or release-qualified artifact. Its immutable candidate must still be produced through the held build and packaging path below, then reviewed with the emitted manifest, benchmark evidence, and native canary before release.
 
 The intended future tier is a public manual DMG with ad-hoc signing, no Developer ID signature, and no notarization; recipients would use Gatekeeper’s **Open Anyway** flow. This is an intended delivery boundary, not a claim that an artifact is currently shipped. Do not claim App Store distribution, Apple notarization, automatic background protection, battery support, or compatibility beyond qualified build `25F84`.
 

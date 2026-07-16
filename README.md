@@ -2,7 +2,7 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.10` build `2` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, authenticated-session/status loss, corruption, or explicit setting drift still fails closed.
+Version `0.2.11` build `3` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, authenticated-session/status loss, corruption, or explicit setting drift still fails closed.
 
 ## Safety model
 
