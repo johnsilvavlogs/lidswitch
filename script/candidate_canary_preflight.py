@@ -33,6 +33,7 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 CDHASH = re.compile(r"[0-9a-f]{40}\Z")
 SESSION = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
 SAFE_INACTIVE_REASONS = frozenset(("legacy-migration", "legacy-migration-superseded", "pristine"))
+SAFE_TERMINAL_REASONS = frozenset(("legacy-migration", "peer-restore"))
 PEER_DEATH_REASON = "peer-process-invalid"
 LID_OPEN_HUMAN = "human-confirmed"
 LID_OPEN_IOREG = "programmatic-ioreg"
@@ -253,7 +254,7 @@ def _safe_idle_status(state, reason, session):
         return True
     return (
         state == "terminal"
-        and reason == "legacy-migration"
+        and reason in SAFE_TERMINAL_REASONS
         and session == session.lower()
         and SESSION.fullmatch(session) is not None
     )

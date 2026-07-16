@@ -581,8 +581,9 @@ the supplied bundle identifier must equal `manifest.app.identifier`, the observe
 equal `manifest.app.cdhash`, and the observed helper SHA-256/CDHash must equal the manifest helper.
 
 The preflight is observation-only apart from its create-once receipt: it verifies the bound app and
-helper identities, no running LidSwitch process, the exact public no-session state (`inactive` with
-reason `legacy-migration` or `legacy-migration-superseded`), AC power, `SleepDisabled=0`, the current
+helper identities, no running LidSwitch process, an exact public safe-idle state (`inactive` with
+an approved no-session reason, or a normalized session-bound `terminal` `legacy-migration` or
+`peer-restore` record), AC power, `SleepDisabled=0`, the current
 AC and battery sleep settings, and one explicit lid-open observation. The preferred autonomous mode
 is `--lid-open-observed programmatic-ioreg`: it runs only
 `/usr/sbin/ioreg -r -k AppleClamshellState -d 4`, requires exactly one unambiguous
