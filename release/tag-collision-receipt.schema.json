@@ -11,7 +11,7 @@
   ],
   "properties": {
     "releaseTag": {
-      "const": "v0.2.11"
+      "const": "v0.2.12"
     },
     "repository": {
       "const": "johnsilvavlogs/lidswitch"

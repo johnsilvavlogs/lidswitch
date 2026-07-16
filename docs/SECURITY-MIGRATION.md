@@ -2,7 +2,7 @@
 
 ## Shipping boundary
 
-In version 0.2.11, version 0.2.9's file lease is not a privileged authorization mechanism. The production helper entry point accepts work only through the `com.johnsilva.lidswitch.helper.control` raw libxpc Mach service. The legacy activation-lease file can remain as inert diagnostic evidence during migration, but the LaunchDaemon has no `WatchPaths` entry and neither the helper nor its listener reads the file.
+In version 0.2.12, version 0.2.9's file lease is not a privileged authorization mechanism. The production helper entry point accepts work only through the `com.johnsilva.lidswitch.helper.control` raw libxpc Mach service. The legacy activation-lease file can remain as inert diagnostic evidence during migration, but the LaunchDaemon has no `WatchPaths` entry and neither the helper nor its listener reads the file.
 
 The C bridge calls `SecCodeCreateWithXPCMessage` on each received request object before reading any request key. It checks strict code validity, the enrolled effective UID, identifier, and exact CDHash. The app applies the same message-derived check to the helper's received reply before reading reply fields. A rejected identity is never passed to Swift. The allowlisted protocol is version 2 and has a fixed primitive schema whose logical maximum is less than 1024 bytes.
 
