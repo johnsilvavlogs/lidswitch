@@ -1,10 +1,18 @@
 # Distribution
 
-## Candidate status
+## Release status
 
-LidSwitch `0.2.11` build `3` is a blocked release candidate, not a built, distributed, or release-qualified artifact. Its immutable candidate must still be produced through the held build and packaging path below; the held build receipt, emitted immutable manifest, benchmark evidence, and native canary must then be reviewed together before release.
+LidSwitch `0.2.11` build `3` is the current public manual release. Tag
+[`v0.2.11`](https://github.com/johnsilvavlogs/lidswitch/releases/tag/v0.2.11)
+points to source commit `c2ab38170b2ae42fd46b234ba83cbe974a983d85`. The published
+`LidSwitch.dmg` SHA-256 is
+`ecfb76230b92636018375997af6e14a61a1a3b28cf4fe5d272ddf75e6fcfa7ce`.
 
-The intended future tier is a public manual DMG with ad-hoc signing, no Developer ID signature, and no notarization; recipients would use Gatekeeper’s **Open Anyway** flow. This is an intended delivery boundary, not a claim that an artifact is currently shipped. Do not claim App Store distribution, Apple notarization, automatic background protection, battery support, or compatibility beyond qualified build `25F84`.
+The release tier is a public manual DMG with ad-hoc signing, no Developer ID
+signature, and no notarization; recipients use Gatekeeper’s **Open Anyway**
+flow. Do not claim App Store distribution, Apple notarization, automatic
+background protection, battery support, or compatibility beyond qualified
+build `25F84`.
 
 ## Local zero-cost immutable candidate path
 
@@ -41,7 +49,14 @@ pre-signed), makes one DMG, extracts it, and invokes the immutable build/package
 publishers plus their descriptor validation. Legacy `build_dmg.sh` and
 `validate_dmg.sh` are intentionally still fail-closed.
 
-## Current validation boundary
+## Validation boundary
+
+The published release was produced through the held build and immutable
+packaging path above, installed transactionally, and accepted only after the
+controlled native canary proved active ownership, peer-process-invalid
+rollback, `SleepDisabled=0`, and no automatic rearm. The release asset and the
+`releases/latest/download/LidSwitch.dmg` response were downloaded independently
+and matched the published digest above.
 
 Public hygiene is available only as an **observational source scan**:
 
