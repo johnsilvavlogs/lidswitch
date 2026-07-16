@@ -85,6 +85,20 @@ def _canonical_json(payload: bytes):
         fail("receipt-noncanonical")
 
 
+def _stable_stat_identity(value):
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_uid,
+        value.st_gid,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 def _read_regular(path: str, maximum=262144) -> bytes:
     if not os.path.isabs(path):
         fail("path-not-absolute")
@@ -103,7 +117,8 @@ def _read_regular(path: str, maximum=262144) -> bytes:
                 fail("receipt-eof")
             chunks.append(chunk)
             left -= len(chunk)
-        if os.read(fd, 1) or os.fstat(fd) != before:
+        after = os.fstat(fd)
+        if os.read(fd, 1) or _stable_stat_identity(after) != _stable_stat_identity(before):
             fail("receipt-identity-drift")
         return b"".join(chunks)
     finally:

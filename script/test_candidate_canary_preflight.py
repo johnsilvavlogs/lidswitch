@@ -7,7 +7,9 @@ import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import candidate_canary_preflight as preflight
@@ -69,6 +71,43 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
     def tearDown(self):
         preflight.validate_manifest = self.original_validate
         self.temp.cleanup()
+
+    def test_regular_receipt_read_ignores_atime_only_drift(self):
+        self.receipt.write_bytes(b"receipt\n")
+        descriptor = os.open(self.receipt, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            observed = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        fields = {
+            name: getattr(observed, name)
+            for name in ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        }
+        before = types.SimpleNamespace(**fields, st_atime_ns=observed.st_atime_ns)
+        after = types.SimpleNamespace(**fields, st_atime_ns=observed.st_atime_ns + 60_000_000_000)
+        with mock.patch.object(preflight.os, "fstat", side_effect=(before, after)):
+            self.assertEqual(preflight._read_regular(str(self.receipt)), b"receipt\n")
+
+    def test_regular_receipt_read_rejects_mtime_drift(self):
+        self.receipt.write_bytes(b"receipt\n")
+        descriptor = os.open(self.receipt, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            observed = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        fields = {
+            name: getattr(observed, name)
+            for name in ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        }
+        after_fields = dict(fields)
+        after_fields["st_mtime_ns"] += 60_000_000_000
+        with mock.patch.object(
+            preflight.os,
+            "fstat",
+            side_effect=(types.SimpleNamespace(**fields), types.SimpleNamespace(**after_fields)),
+        ):
+            with self.assertRaisesRegex(preflight.PreflightError, "receipt-identity-drift"):
+                preflight._read_regular(str(self.receipt))
 
     def runner(self, argv):
         self.commands.append(argv)
