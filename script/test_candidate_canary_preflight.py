@@ -250,6 +250,7 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
             ("inactive", "legacy-migration", "none"),
             ("inactive", "legacy-migration-superseded", "none"),
             ("terminal", "legacy-migration", "12345678-1234-1234-9234-123456789abc"),
+            ("terminal", "peer-restore", "12345678-1234-1234-9234-123456789abc"),
         )
         for state_name, reason, session in accepted:
             with self.subTest(accepted=(state_name, reason, session)):
@@ -267,7 +268,10 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
             ("terminal", "legacy-migration", "none"),
             ("terminal", "legacy-migration-superseded", "12345678-1234-1234-9234-123456789abc"),
             ("terminal", "legacy-migration", "12345678-1234-1234-9234-123456789ABC"),
+            ("terminal", "peer-restore", "none"),
+            ("terminal", "peer-restore", "12345678-1234-1234-9234-123456789ABC"),
             ("terminal", "peer-process-invalid", "none"),
+            ("terminal", "peer-process-invalid", "12345678-1234-1234-9234-123456789abc"),
         )
         for state_name, reason, session in rejected:
             with self.subTest(rejected=(state_name, reason, session)):
