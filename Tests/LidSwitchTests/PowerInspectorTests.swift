@@ -3164,6 +3164,65 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertLessThan(1.0 / 38.0, 0.03)
     }
 
+    func testSessionDiagnosticsRetireLegacyRenewalsBeforeCompactSummariesAtEntryCap() throws {
+        let legacyRoot = try TestSandbox.makeDirectory(label: "diagnostic-legacy-cap").url
+        let legacyFile = legacyRoot.appendingPathComponent("history.json")
+        let sessionID = UUID()
+        let legacyEntries = (0..<200).map { index in
+            SessionDiagnosticEntry(
+                schema: 1,
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                sessionID: sessionID.uuidString.lowercased(),
+                event: "renew",
+                reason: "legacy-renewal",
+                appVersion: AppPaths.appVersion,
+                appBuild: AppPaths.appBuild,
+                renewalCount: nil
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(legacyEntries).write(to: legacyFile)
+        XCTAssertEqual(chmod(legacyFile.path, 0o600), 0)
+
+        let legacyStore = SessionDiagnosticStore(file: legacyFile)
+        legacyStore.recordRenewal(reason: "safety-probes-valid", sessionID: sessionID)
+        XCTAssertTrue(legacyStore.flushForTesting())
+
+        let compactedLegacyEntries = legacyStore.entries()
+        XCTAssertEqual(compactedLegacyEntries.count, 200)
+        XCTAssertEqual(compactedLegacyEntries.filter { $0.schema == 1 && $0.event == "renew" }.count, 199)
+        XCTAssertFalse(compactedLegacyEntries.contains {
+            $0.schema == 1 && $0.event == "renew" && $0.timestamp == Date(timeIntervalSince1970: 0)
+        })
+        XCTAssertEqual(compactedLegacyEntries.filter { $0.event == "renew-summary" }.map(\.renewalCount), [1])
+
+        let structuralRoot = try TestSandbox.makeDirectory(label: "diagnostic-structural-cap").url
+        let structuralFile = structuralRoot.appendingPathComponent("history.json")
+        let structuralEntries = (0..<200).map { index in
+            SessionDiagnosticEntry(
+                schema: 1,
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                sessionID: sessionID.uuidString.lowercased(),
+                event: "start",
+                reason: "lease-issued",
+                appVersion: AppPaths.appVersion,
+                appBuild: AppPaths.appBuild,
+                renewalCount: nil
+            )
+        }
+        try encoder.encode(structuralEntries).write(to: structuralFile)
+        XCTAssertEqual(chmod(structuralFile.path, 0o600), 0)
+
+        let structuralStore = SessionDiagnosticStore(file: structuralFile)
+        structuralStore.recordRenewal(reason: "safety-probes-valid", sessionID: sessionID)
+        XCTAssertTrue(structuralStore.flushForTesting())
+
+        let compactedStructuralEntries = structuralStore.entries()
+        XCTAssertEqual(compactedStructuralEntries.count, 200)
+        XCTAssertTrue(compactedStructuralEntries.allSatisfy { $0.event == "start" })
+    }
+
     func testSessionDiagnosticsPublishOwnerOnlyUnderPermissiveUmask() throws {
         let root = try temporaryDirectory()
         let file = root.appendingPathComponent("history.json")
