@@ -2,7 +2,7 @@
 
 ## Release status
 
-LidSwitch `0.2.12` build `4` is an app-only hotfix candidate, not yet a public
+LidSwitch `0.2.12` build `5` is an app-only hotfix candidate, not yet a public
 release. It must pass the held build, immutable package, transactional install,
 and real menu-bar start/restore/start proof before tag `v0.2.12` or its exact DMG
 may be published. LidSwitch `0.2.11` tag `v0.2.11` remains the current public manual release until that proof is accepted.

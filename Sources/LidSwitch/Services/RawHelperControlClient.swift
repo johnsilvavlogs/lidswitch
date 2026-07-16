@@ -476,8 +476,14 @@ final class RawHelperControlClient: @unchecked Sendable {
     ) throws -> HelperControlExchangeOutcome {
         let client = try connectedClient()
         var rawReply: OpaquePointer?
-        let status = ls_xpc_client_send(client, operation, UUID().uuidString.lowercased(),
-                                        sessionID.uuidString.lowercased(), 5, &rawReply)
+        let status = ls_xpc_client_send(
+            client,
+            operation,
+            UUID().uuidString.lowercased(),
+            sessionID.uuidString.lowercased(),
+            Self.timeoutSeconds(for: operation),
+            &rawReply
+        )
         guard status == 0, let rawReply else {
             invalidateClientLocked()
             if ls_xpc_status_is_indeterminate(status) {
@@ -593,6 +599,25 @@ final class RawHelperControlClient: @unchecked Sendable {
             return false
         }
     }
+
+    /// END and RESTORE synchronously persist terminal truth and may run two
+    /// bounded power restorations before replying. Give only those terminal
+    /// operations the bridge's ten-second maximum; every liveness-sensitive
+    /// operation keeps the existing five-second bound.
+    private static func timeoutSeconds(for operation: UInt32) -> Double {
+        switch operation {
+        case UInt32(LS_OPERATION_END.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue):
+            return 10
+        default:
+            return 5
+        }
+    }
+
+#if DEBUG
+    static func timeoutSecondsForTesting(operation: UInt32) -> Double {
+        timeoutSeconds(for: operation)
+    }
+#endif
 
     private func invalidateClientLocked() {
         if let rawClient {
