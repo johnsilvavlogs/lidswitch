@@ -81,13 +81,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("6b7b749a8d6390cfaa7a04906cd92e382b8452f655eb56e614fe8e616410462b", 59694),
+    "script/live_state_envelope.sh": ("b7f0e2c5f18bf50182d18cb3c6cad00655aa858114a1e6822fd932d5fedbfa70", 59707),
     "script/swift_sandbox_common.sh": ("30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985", 68188),
     "script/swift_test_sandbox.sb.in": ("851794f1b655898dd2618ee880c8f9e393687b5362a3a9e81f79ef99f69e23c7", 10822),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("8de5fa9fe2aec056c879ff03a2a46b02b0e2c60df6b3b05ba0e09abece67ebe9", 3578),
+    "script/source_snapshot_manifest.jsonl": ("8fb756389d939553dadb2006b18c4f883408f25524a49218f0cddc20f95cfc5f", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1626,6 +1626,12 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn('[[ "$LIVE_PLIST_CONTRACT" == "legacy-watchpaths"', envelope)
         self.assertIn('live_envelope_legacy_idle_status_is_not_future', envelope)
         self.assertIn('live_envelope_durable_terminal_status_is_not_future', envelope)
+        terminal_reasons = envelope[
+            envelope.index('LIDSWITCH_CANDIDATE_TERMINAL_SESSION_REASONS=') :
+            envelope.index('LIDSWITCH_CANDIDATE_RECOVERY_SESSION_REASONS=')
+        ]
+        self.assertIn(' peer-restore ', terminal_reasons)
+        self.assertNotIn(' peer-process-invalid-peer-restore ', terminal_reasons)
         durable_terminal = envelope[
             envelope.index('live_envelope_durable_terminal_status_is_not_future()') :
             envelope.index('live_envelope_override_evidence_is_exact()')
