@@ -16,7 +16,7 @@ enum GeneratedReleaseHelperTrustAnchor {
         helperIdentifier: "__LIDSWITCH_HELPER_IDENTIFIER__",
         helperCDHash: Data(base64Encoded: "__LIDSWITCH_HELPER_CDHASH_BASE64__")!,
         releaseIdentityResourceName: "LidSwitchReleaseIdentity.json",
-        releaseIdentityVersion: "0.2.11",
+        releaseIdentityVersion: "0.2.12",
         releaseIdentitySHA256: Data(base64Encoded: "__LIDSWITCH_RELEASE_IDENTITY_SHA256_BASE64__")!
     )
 }

@@ -2491,6 +2491,8 @@ final class SessionSafetyTests: XCTestCase {
             controller.errorMessage?.contains("could not verify a complete rollback") == true,
             "unexpected error: \(controller.errorMessage ?? "nil")"
         )
+        XCTAssertEqual(controller.operationPhase, .recoveryRequired)
+        XCTAssertEqual(controller.primaryAction, .restoreSleep)
     }
 
     @MainActor

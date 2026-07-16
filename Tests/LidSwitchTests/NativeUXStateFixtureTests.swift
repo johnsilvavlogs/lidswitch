@@ -1343,6 +1343,11 @@ final class NativeUXStateFixtureTests: XCTestCase {
         let sessionID = UUID()
         let otherSessionID = UUID()
         let now = Date()
+        guard let currentBootID = BootIdentity.current() else {
+            XCTFail("current boot identity must be available")
+            return
+        }
+        let currentMonotonic = MonotonicClock.seconds()
         let exactTerminal = HelperStatusRecord(
             state: "terminal",
             reason: "fixture",
@@ -1367,6 +1372,44 @@ final class NativeUXStateFixtureTests: XCTestCase {
                 updatedAt: now.addingTimeInterval(-30)
             ), checkedAt: now)
         ), "stale status cannot clear cleanup")
+        XCTAssertTrue(PowerController.cleanupProofForTesting(
+            sessionID: sessionID,
+            originalACIdleSleepMinutes: 5,
+            snapshot: makeSnapshot(status: HelperStatusRecord(
+                state: "terminal", reason: "peer-restore", sessionID: sessionID,
+                updatedAt: now.addingTimeInterval(-3_600),
+                bootID: currentBootID,
+                updatedMonotonic: currentMonotonic - 3_600
+            ), checkedAt: now)
+        ), "an exact durable peer-restore must survive a long battery interval")
+        XCTAssertFalse(PowerController.cleanupProofForTesting(
+            sessionID: sessionID,
+            originalACIdleSleepMinutes: 5,
+            snapshot: makeSnapshot(status: HelperStatusRecord(
+                state: "terminal", reason: "peer-restore", sessionID: sessionID,
+                updatedAt: now.addingTimeInterval(-3_600)
+            ), checkedAt: now)
+        ), "a stale peer-restore without a projection tuple cannot cross a reboot boundary")
+        XCTAssertFalse(PowerController.cleanupProofForTesting(
+            sessionID: sessionID,
+            originalACIdleSleepMinutes: 5,
+            snapshot: makeSnapshot(status: HelperStatusRecord(
+                state: "terminal", reason: "peer-restore", sessionID: sessionID,
+                updatedAt: now.addingTimeInterval(-3_600),
+                bootID: UUID().uuidString.lowercased(),
+                updatedMonotonic: currentMonotonic - 3_600
+            ), checkedAt: now)
+        ), "a stale peer-restore from another boot cannot clear cleanup")
+        XCTAssertFalse(PowerController.cleanupProofForTesting(
+            sessionID: sessionID,
+            originalACIdleSleepMinutes: 5,
+            snapshot: makeSnapshot(status: HelperStatusRecord(
+                state: "terminal", reason: "peer-restore", sessionID: sessionID,
+                updatedAt: now.addingTimeInterval(-3_600),
+                bootID: currentBootID,
+                updatedMonotonic: currentMonotonic + 1
+            ), checkedAt: now)
+        ), "a future monotonic projection cannot clear cleanup")
         XCTAssertFalse(PowerController.cleanupProofForTesting(
             sessionID: sessionID,
             originalACIdleSleepMinutes: 5,

@@ -827,18 +827,31 @@ private final class RemoteAuthorityCleanupOwnership: @unchecked Sendable {
     }
 
     /// A root status is projection-only, but it can prove post-terminal power
-    /// convergence when it is fresh and names this exact generation. A nil,
-    /// stale, unrelated, active, or recovery-required record is intentionally
-    /// not a cleanup release signal.
+    /// convergence when it names this exact generation. Ordinary inactive or
+    /// terminal observations must be fresh. An exact-session `peer-restore`
+    /// terminal is durable across a long battery interval only when its
+    /// projection tuple proves it was written during the current boot. A nil,
+    /// unrelated, active, prior-boot, malformed-monotonic, or
+    /// recovery-required record is intentionally not a cleanup release signal.
     func provesFullRollback(_ snapshot: PowerSnapshot) -> Bool {
+        guard let status = snapshot.helperStatus else { return false }
+        let currentBootID = BootIdentity.current()
+        let currentMonotonic = MonotonicClock.seconds()
+        let terminalPeerRestore = status.state == "terminal"
+            && status.reason == "peer-restore"
+            && currentBootID != nil
+            && status.bootID == currentBootID
+            && status.updatedMonotonic?.isFinite == true
+            && status.updatedMonotonic.map { $0 >= 0 && $0 <= currentMonotonic } == true
+        let statusIsCurrent = status.isFresh(at: snapshot.checkedAt)
+            || terminalPeerRestore
         guard snapshot.ownedSessionID == nil,
               snapshot.source.isAC,
               snapshot.sleepDisabledVerified,
               !snapshot.sleepDisabled,
               snapshot.acIdleSleepMinutes == originalACIdleSleepMinutes,
-              let status = snapshot.helperStatus,
               status.sessionID == sessionID,
-              status.isFresh(at: snapshot.checkedAt),
+              statusIsCurrent,
               status.state == "inactive" || status.state == "terminal",
               !snapshot.helperRecoveryRequired
         else { return false }
@@ -2127,11 +2140,15 @@ final class PowerController: ObservableObject {
                     self.releaseCleanupOwnership(expectedOwner, afterSafeSnapshot: next)
                     self.alert = nil
                     self.announce("Protection off. System sleep has been restored.")
+                    self.operationPhase = .idle
                 } else {
                     self.alert = .rollbackVerificationFailure(reason: reason)
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
+                    // Keep the primary action aligned with the retained cleanup
+                    // owner. Publishing Start here creates a silent no-op because
+                    // startSession must reject while cleanup ownership remains.
+                    self.operationPhase = .recoveryRequired
                 }
-                self.operationPhase = .idle
                 self.isBusy = false
                 if next.installationInventoryPending { self.refresh() }
             }
