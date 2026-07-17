@@ -279,7 +279,10 @@ final class RawHelperControlClient: @unchecked Sendable {
         exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
     ) -> HelperGenerationTerminationResolution {
         lock.lock(); defer { lock.unlock() }
-        let resolution = Self.terminateGeneration(sessionID: sessionID, intent: intent, exchange: exchange)
+        let resolution = Self.terminateGeneration(sessionID: sessionID, intent: intent) {
+            operation, requestedSessionID, _ in
+            try exchange(operation, requestedSessionID)
+        }
         clearTransportBindingIfTerminal(resolution, sessionID: sessionID)
         return resolution
     }
@@ -294,8 +297,9 @@ final class RawHelperControlClient: @unchecked Sendable {
         intent: HelperGenerationTerminationIntent
     ) -> HelperGenerationTerminationResolution {
         lock.lock(); defer { lock.unlock() }
-        let resolution = Self.terminateGeneration(sessionID: sessionID, intent: intent) { operation, requestedSessionID in
-            try self.exchangeLocked(operation, sessionID: requestedSessionID)
+        let resolution = Self.terminateGeneration(sessionID: sessionID, intent: intent) {
+            operation, requestedSessionID, timeout in
+            try self.exchangeLocked(operation, sessionID: requestedSessionID, timeout: timeout)
         }
         clearTransportBindingIfTerminal(resolution, sessionID: sessionID)
         return resolution
@@ -354,11 +358,12 @@ final class RawHelperControlClient: @unchecked Sendable {
     private static func terminateGeneration(
         sessionID: UUID,
         intent: HelperGenerationTerminationIntent,
-        exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
+        exchange: (UInt32, UUID, Double) throws -> HelperControlExchangeOutcome
     ) -> HelperGenerationTerminationResolution {
         let rebound: HelperControlExchangeOutcome
         do {
-            rebound = try exchange(UInt32(LS_OPERATION_RECONNECT.rawValue), sessionID)
+            let operation = UInt32(LS_OPERATION_RECONNECT.rawValue)
+            rebound = try exchange(operation, sessionID, timeoutSeconds(for: operation, terminalContext: true))
         } catch {
             return .authorityMayRemain(describe(error))
         }
@@ -389,7 +394,7 @@ final class RawHelperControlClient: @unchecked Sendable {
         }
         do {
             return classifyTerminalOutcome(
-                try exchange(operation, requestedSessionID),
+                try exchange(operation, requestedSessionID, timeoutSeconds(for: operation, terminalContext: true)),
                 expectedSessionID: sessionID
             )
         } catch {
@@ -457,6 +462,16 @@ final class RawHelperControlClient: @unchecked Sendable {
         intent: HelperGenerationTerminationIntent,
         exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
     ) -> HelperGenerationTerminationResolution {
+        terminateGeneration(sessionID: sessionID, intent: intent) { operation, requestedSessionID, _ in
+            try exchange(operation, requestedSessionID)
+        }
+    }
+
+    static func terminateGenerationWithTimeoutsForTesting(
+        sessionID: UUID,
+        intent: HelperGenerationTerminationIntent,
+        exchange: (UInt32, UUID, Double) throws -> HelperControlExchangeOutcome
+    ) -> HelperGenerationTerminationResolution {
         terminateGeneration(sessionID: sessionID, intent: intent, exchange: exchange)
     }
 #endif
@@ -472,7 +487,8 @@ final class RawHelperControlClient: @unchecked Sendable {
 
     private func exchangeLocked(
         _ operation: UInt32,
-        sessionID: UUID
+        sessionID: UUID,
+        timeout: Double? = nil
     ) throws -> HelperControlExchangeOutcome {
         let client = try connectedClient()
         var rawReply: OpaquePointer?
@@ -481,7 +497,7 @@ final class RawHelperControlClient: @unchecked Sendable {
             operation,
             UUID().uuidString.lowercased(),
             sessionID.uuidString.lowercased(),
-            Self.timeoutSeconds(for: operation),
+            timeout ?? Self.timeoutSeconds(for: operation),
             &rawReply
         )
         guard status == 0, let rawReply else {
@@ -600,13 +616,14 @@ final class RawHelperControlClient: @unchecked Sendable {
         }
     }
 
-    /// END and RESTORE synchronously persist terminal truth and may run two
-    /// bounded power restorations before replying. Give only those terminal
-    /// operations the bridge's ten-second maximum; every liveness-sensitive
-    /// operation keeps the existing five-second bound.
-    private static func timeoutSeconds(for operation: UInt32) -> Double {
+    /// A terminal generation must first RECONNECT its exact process before its
+    /// one END/RESTORE effect. Give that prerequisite rebind the same bounded
+    /// terminal budget without widening normal heartbeat reconnects.
+    private static func timeoutSeconds(for operation: UInt32, terminalContext: Bool = false) -> Double {
         switch operation {
         case UInt32(LS_OPERATION_END.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue):
+            return 10
+        case UInt32(LS_OPERATION_RECONNECT.rawValue) where terminalContext:
             return 10
         default:
             return 5
@@ -614,8 +631,8 @@ final class RawHelperControlClient: @unchecked Sendable {
     }
 
 #if DEBUG
-    static func timeoutSecondsForTesting(operation: UInt32) -> Double {
-        timeoutSeconds(for: operation)
+    static func timeoutSecondsForTesting(operation: UInt32, terminalContext: Bool = false) -> Double {
+        timeoutSeconds(for: operation, terminalContext: terminalContext)
     }
 #endif
 

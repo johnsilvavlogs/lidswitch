@@ -2,12 +2,12 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.12` build `5` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. Explicit END/RESTORE exchanges alone receive the bridge's bounded ten-second terminal budget so their synchronous rollback and durable publication can finish under load; liveness-sensitive operations retain the five-second bound and terminal effects are never retried after an indeterminate reply. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, authenticated-session/status loss, corruption, or explicit setting drift still fails closed.
+Version `0.2.12` build `6` reads power source and power-policy truth through IOKit and macOS's native power-preference domain. Active reconciliation no longer launches competing `pmset` readers, so a stalled command cannot starve helper acknowledgements and falsely end a healthy session. The exact-process RECONNECT that precedes an explicit END/RESTORE now receives the same bounded ten-second terminal budget as the terminal effect; ordinary heartbeat reconnects retain the five-second bound, and terminal effects are never retried after an indeterminate reply. The serial heartbeat remains the sole authority for an owned active generation; actual disconnect, authenticated-session/status loss, corruption, or explicit setting drift still fails closed.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `5` into the root-owned `Current` release directory and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `6` into the root-owned `Current` release directory and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app begins one authenticated process-bound raw-XPC session. The helper chooses its same-boot monotonic deadline, capped at 30 seconds, and the app renews every 8 seconds.
 - The compiled helper validates the enrolled caller identity, exact live process tuple, session UUID, private recovery authority, power source, build, and native power-preference state.

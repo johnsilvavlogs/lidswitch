@@ -3,8 +3,8 @@
 
 /* Generated from release/identity.json by scripts/render-release-identity.mjs. */
 #define LS_RELEASE_APP_VERSION "0.2.12"
-#define LS_RELEASE_APP_BUILD 5u
-#define LS_RELEASE_HELPER_VERSION 5u
+#define LS_RELEASE_APP_BUILD 6u
+#define LS_RELEASE_HELPER_VERSION 6u
 #define LS_XPC_PROTOCOL_VERSION 2u
 #define LS_ENROLLMENT_POLICY_PROTOCOL_VERSION 1u
 #define LS_RELEASE_TAG "v0.2.12"

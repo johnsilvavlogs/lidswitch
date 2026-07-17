@@ -9,7 +9,7 @@ LidSwitch `0.2.12` is a SwiftPM menu bar app with four targets:
 
 ## Session flow
 
-1. The user prepares helper version `5` in the root-owned `Current` directory; legacy login and shell-helper artifacts are removed while protection remains off.
+1. The user prepares helper version `6` in the root-owned `Current` directory; legacy login and shell-helper artifacts are removed while protection remains off.
 2. The user confirms **Start Plugged-In Session** on AC power.
 3. The app begins an authenticated raw-XPC session. The legacy user-owned activation lease is inert diagnostic/migration state only; it cannot authorize the helper.
 4. launchd exposes one authenticated Mach service. It has no `WatchPaths` or `StartInterval` trigger.
@@ -149,6 +149,6 @@ claim is made.
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.12`, `CFBundleVersion=5`, and helper version `5` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.12`, `CFBundleVersion=6`, and helper version `6` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.
