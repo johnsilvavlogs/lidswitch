@@ -203,7 +203,7 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
-    func testOnlyTerminalOperationsUseTheExtendedWireTimeout() {
+    func testOnlyTerminalSequenceUsesTheExtendedWireTimeout() {
         let ordinary: [UInt32] = [
             UInt32(LS_OPERATION_BEGIN.rawValue),
             UInt32(LS_OPERATION_RENEW.rawValue),
@@ -228,6 +228,44 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             ),
             10
         )
+        XCTAssertEqual(
+            RawHelperControlClient.timeoutSecondsForTesting(
+                operation: UInt32(LS_OPERATION_RECONNECT.rawValue),
+                terminalContext: true
+            ),
+            10
+        )
+    }
+
+    func testTerminalCallsiteBudgetsReconnectAndOneTerminalEffectWithoutRetry() {
+        let sessionID = UUID()
+        let active = reply(reason: "reconnected", sessionID: sessionID, expiryMonotonic: 20, state: .active)
+        for (intent, terminalOperation, reason) in [
+            (HelperGenerationTerminationIntent.end, UInt32(LS_OPERATION_END.rawValue), "user-end"),
+            (HelperGenerationTerminationIntent.restore, UInt32(LS_OPERATION_RESTORE.rawValue), "peer-restore"),
+        ] {
+            let terminal = reply(reason: reason, sessionID: sessionID, expiryMonotonic: 0, state: .terminal)
+            var exchanges: [(UInt32, Double)] = []
+
+            let resolution = RawHelperControlClient.terminateGenerationWithTimeoutsForTesting(
+                sessionID: sessionID,
+                intent: intent
+            ) { operation, _, timeout in
+                exchanges.append((operation, timeout))
+                if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
+                    XCTAssertGreaterThan(timeout, 5)
+                    return .accepted(active)
+                }
+                return .accepted(terminal)
+            }
+
+            XCTAssertEqual(resolution, .terminated(terminal))
+            XCTAssertEqual(exchanges.map(\.0), [
+                UInt32(LS_OPERATION_RECONNECT.rawValue),
+                terminalOperation,
+            ])
+            XCTAssertEqual(exchanges.map(\.1), [10, 10])
+        }
     }
 
     func testTerminalReconnectProofConsumesNoAdditionalTerminalEffect() {

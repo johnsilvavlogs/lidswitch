@@ -59,10 +59,10 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
             "app": {"installed_path": "/Applications/LidSwitch.app", "bundle_identifier": "com.johnsilva.LidSwitch", "executable_relative_path": "Contents/MacOS/LidSwitch", "executable_sha256": "b" * 64, "executable_cdhash": "c" * 40},
             "helper": {"installed_path": "/Library/Application Support/LidSwitch/Current/LidSwitchHelper", "sha256": "d" * 64, "cdhash": "e" * 40},
             "qualified_system_build": "25F84",
-            "helper_version": "5",
+            "helper_version": "6",
         }
         self.binding.write_bytes(canonical(self.binding_value))
-        self.version.write_text("5\n", encoding="utf-8")
+        self.version.write_text("6\n", encoding="utf-8")
         self.status.write_text(status("inactive", "legacy-migration", "none"), encoding="utf-8")
         self.commands = []
         self.original_validate = preflight.validate_manifest
