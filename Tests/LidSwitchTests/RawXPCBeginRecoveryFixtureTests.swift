@@ -162,14 +162,8 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RECONNECT.rawValue) }.count, 1)
     }
 
-    func testFreshConnectionRebindsBeforeItsSingleTerminalRestoreEffect() {
+    func testFreshConnectionIssuesOneAtomicTerminalRestoreEffect() {
         let sessionID = UUID()
-        let active = reply(
-            reason: "reconnected",
-            sessionID: sessionID,
-            expiryMonotonic: 900,
-            state: .active
-        )
         let terminal = reply(
             reason: "peer-restore",
             sessionID: sessionID,
@@ -177,29 +171,19 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             state: .terminal
         )
         var operations: [UInt32] = []
-        var rebound = false
 
         let resolution = RawHelperControlClient.terminateGenerationForTesting(
             sessionID: sessionID,
             intent: .restore
         ) { operation, requestedSessionID in
             operations.append(operation)
-            if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
-                XCTAssertEqual(requestedSessionID, sessionID)
-                rebound = true
-                return .accepted(active)
-            }
-            XCTAssertTrue(rebound, "a fresh RESTORE cannot cross before exact-session rebind")
             XCTAssertEqual(operation, UInt32(LS_OPERATION_RESTORE.rawValue))
             XCTAssertEqual(requestedSessionID, Self.zeroUUID)
             return .accepted(terminal)
         }
 
         XCTAssertEqual(resolution, .terminated(terminal))
-        XCTAssertEqual(
-            operations,
-            [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue)]
-        )
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
@@ -228,18 +212,10 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             ),
             10
         )
-        XCTAssertEqual(
-            RawHelperControlClient.timeoutSecondsForTesting(
-                operation: UInt32(LS_OPERATION_RECONNECT.rawValue),
-                terminalContext: true
-            ),
-            10
-        )
     }
 
-    func testTerminalCallsiteBudgetsReconnectAndOneTerminalEffectWithoutRetry() {
+    func testTerminalCallsiteBudgetsOneAtomicEffectWithoutRetry() {
         let sessionID = UUID()
-        let active = reply(reason: "reconnected", sessionID: sessionID, expiryMonotonic: 20, state: .active)
         for (intent, terminalOperation, reason) in [
             (HelperGenerationTerminationIntent.end, UInt32(LS_OPERATION_END.rawValue), "user-end"),
             (HelperGenerationTerminationIntent.restore, UInt32(LS_OPERATION_RESTORE.rawValue), "peer-restore"),
@@ -252,23 +228,16 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
                 intent: intent
             ) { operation, _, timeout in
                 exchanges.append((operation, timeout))
-                if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
-                    XCTAssertGreaterThan(timeout, 5)
-                    return .accepted(active)
-                }
                 return .accepted(terminal)
             }
 
             XCTAssertEqual(resolution, .terminated(terminal))
-            XCTAssertEqual(exchanges.map(\.0), [
-                UInt32(LS_OPERATION_RECONNECT.rawValue),
-                terminalOperation,
-            ])
-            XCTAssertEqual(exchanges.map(\.1), [10, 10])
+            XCTAssertEqual(exchanges.map(\.0), [terminalOperation])
+            XCTAssertEqual(exchanges.map(\.1), [10])
         }
     }
 
-    func testTerminalReconnectProofConsumesNoAdditionalTerminalEffect() {
+    func testTerminalProofConsumesOneTerminalEffect() {
         let sessionID = UUID()
         let terminal = reply(
             reason: "expired",
@@ -287,12 +256,11 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         }
 
         XCTAssertEqual(resolution, .alreadyTerminal(terminal))
-        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RECONNECT.rawValue)])
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
     }
 
-    func testAcceptedWrongSessionRestoreRemainsAuthorityMayRemainAfterOneReconnect() {
+    func testAcceptedWrongSessionRestoreRemainsAuthorityMayRemainAfterOneEffect() {
         let sessionID = UUID()
-        let active = reply(reason: "reconnected", sessionID: sessionID, expiryMonotonic: 900, state: .active)
         let unrelatedTerminal = reply(reason: "other", sessionID: UUID(), expiryMonotonic: 0, state: .terminal)
         var operations: [UInt32] = []
 
@@ -301,19 +269,16 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             intent: .restore
         ) { operation, _ in
             operations.append(operation)
-            return operation == UInt32(LS_OPERATION_RECONNECT.rawValue)
-                ? .accepted(active)
-                : .accepted(unrelatedTerminal)
+            return .accepted(unrelatedTerminal)
         }
 
         XCTAssertEqual(resolution, .authorityMayRemain("terminal-reply-session-mismatch"))
-        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue)])
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
-    func testRejectedWrongSessionRestoreRemainsAuthorityMayRemainAfterOneReconnect() {
+    func testRejectedWrongSessionRestoreRemainsAuthorityMayRemainAfterOneEffect() {
         let sessionID = UUID()
-        let active = reply(reason: "reconnected", sessionID: sessionID, expiryMonotonic: 900, state: .active)
         let unrelatedIdle = reply(reason: "other", sessionID: UUID(), expiryMonotonic: 0, state: .idle)
         var operations: [UInt32] = []
 
@@ -322,19 +287,16 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             intent: .restore
         ) { operation, _ in
             operations.append(operation)
-            return operation == UInt32(LS_OPERATION_RECONNECT.rawValue)
-                ? .accepted(active)
-                : .rejected(unrelatedIdle)
+            return .rejected(unrelatedIdle)
         }
 
         XCTAssertEqual(resolution, .authorityMayRemain("terminal-reply-session-mismatch"))
-        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue)])
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
-    func testZeroSessionRestoreReplyRemainsAuthorityMayRemainAfterOneReconnect() {
+    func testZeroSessionRestoreReplyRemainsAuthorityMayRemainAfterOneEffect() {
         let sessionID = UUID()
-        let active = reply(reason: "reconnected", sessionID: sessionID, expiryMonotonic: 900, state: .active)
         let zeroTerminal = reply(reason: "zero", sessionID: Self.zeroUUID, expiryMonotonic: 0, state: .terminal)
         var operations: [UInt32] = []
 
@@ -343,17 +305,15 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             intent: .restore
         ) { operation, _ in
             operations.append(operation)
-            return operation == UInt32(LS_OPERATION_RECONNECT.rawValue)
-                ? .accepted(active)
-                : .accepted(zeroTerminal)
+            return .accepted(zeroTerminal)
         }
 
         XCTAssertEqual(resolution, .authorityMayRemain("terminal-reply-session-mismatch"))
-        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue)])
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
-    func testRejectedWrongSessionReconnectRemainsAuthorityMayRemainWithoutTerminalEffect() {
+    func testRejectedWrongSessionTerminalReplyRemainsAuthorityMayRemainAfterOneEffect() {
         let sessionID = UUID()
         let unrelatedTerminal = reply(reason: "other", sessionID: UUID(), expiryMonotonic: 0, state: .terminal)
         var operations: [UInt32] = []
@@ -366,14 +326,12 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             return .rejected(unrelatedTerminal)
         }
 
-        XCTAssertEqual(resolution, .authorityMayRemain("terminal-reconnect-session-mismatch"))
-        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RECONNECT.rawValue)])
-        XCTAssertFalse(operations.contains(UInt32(LS_OPERATION_RESTORE.rawValue)))
+        XCTAssertEqual(resolution, .authorityMayRemain("terminal-reply-session-mismatch"))
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
     }
 
     func testRejectedExactSessionRestoreRetainsTypedTerminalResult() {
         let sessionID = UUID()
-        let active = reply(reason: "reconnected", sessionID: sessionID, expiryMonotonic: 900, state: .active)
         let terminal = reply(reason: "expired", sessionID: sessionID, expiryMonotonic: 0, state: .terminal)
         var operations: [UInt32] = []
 
@@ -382,24 +340,16 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             intent: .restore
         ) { operation, _ in
             operations.append(operation)
-            return operation == UInt32(LS_OPERATION_RECONNECT.rawValue)
-                ? .accepted(active)
-                : .rejected(terminal)
+            return .rejected(terminal)
         }
 
         XCTAssertEqual(resolution, .alreadyTerminal(terminal))
-        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue)])
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
 
     func testIndeterminateTerminalReplyNeverRetriesOrRenews() {
         let sessionID = UUID()
-        let active = reply(
-            reason: "reconnected",
-            sessionID: sessionID,
-            expiryMonotonic: 900,
-            state: .active
-        )
         var operations: [UInt32] = []
 
         let resolution = RawHelperControlClient.terminateGenerationForTesting(
@@ -407,19 +357,13 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             intent: .restore
         ) { operation, _ in
             operations.append(operation)
-            if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
-                return .accepted(active)
-            }
             throw HelperControlError.indeterminateTransport(60)
         }
 
         guard case .authorityMayRemain = resolution else {
             return XCTFail("a lost terminal reply must remain unresolved")
         }
-        XCTAssertEqual(
-            operations,
-            [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue)]
-        )
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
         XCTAssertFalse(operations.contains(UInt32(LS_OPERATION_RENEW.rawValue)))
         XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RESTORE.rawValue) }.count, 1)
     }
