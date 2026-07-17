@@ -4,8 +4,8 @@ import Foundation
 // Do not edit this tracked mirror; the renderer's --check mode rejects drift.
 public enum ReleaseIdentity {
     public static let appVersion = "0.2.12"
-    public static let appBuild = "6"
-    public static let helperVersion = "6"
+    public static let appBuild = "7"
+    public static let helperVersion = "7"
     public static let xpcProtocolVersion: UInt32 = 2
     public static let enrollmentPolicyProtocolVersion: UInt32 = 1
     public static let releaseTag = "v0.2.12"

@@ -306,18 +306,15 @@ final class HeartbeatLivenessFixtureTests: XCTestCase {
         var terminalA: [UInt32] = []
         let terminalResolution = client.terminateGenerationWithTransportStateForTesting(sessionID: sessionA, intent: .end) { operation, requested in
             terminalA.append(operation)
-            if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
-                XCTAssertEqual(requested, sessionA)
-                return .accepted(heartbeatRawReply(reason: "reconnected", sessionID: sessionA))
-            }
             XCTAssertEqual(operation, UInt32(LS_OPERATION_END.rawValue))
+            XCTAssertEqual(requested, sessionA)
             return .accepted(heartbeatRawReply(reason: "user-end", sessionID: sessionA, expiry: 0, state: .terminal))
         }
         XCTAssertEqual(
             terminalResolution,
             .terminated(heartbeatRawReply(reason: "user-end", sessionID: sessionA, expiry: 0, state: .terminal))
         )
-        XCTAssertEqual(terminalA, [UInt32(LS_OPERATION_RECONNECT.rawValue), UInt32(LS_OPERATION_END.rawValue)])
+        XCTAssertEqual(terminalA, [UInt32(LS_OPERATION_END.rawValue)])
 
         var afterTerminalB: [UInt32] = []
         _ = try client.renewDirectForTesting(sessionID: sessionB) { operation, requested in

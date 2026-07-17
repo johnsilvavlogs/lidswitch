@@ -287,16 +287,17 @@ final class RawHelperControlClient: @unchecked Sendable {
         return resolution
     }
     #endif
-    /// Claims one bounded terminal exchange for an existing generation. Every
-    /// caller first exact-session RECONNECTs, even if it believes its current
-    /// transport is still bound. This closes the reply-lost/invalidation race:
-    /// a fresh RESTORE alone would be rejected as a second connection, whereas
-    /// rebind-then-END/RESTORE remains exact-process and never extends expiry.
+    /// Claims one bounded terminal exchange for an existing generation. Drop
+    /// the heartbeat transport first so END/RESTORE always arrives on a fresh
+    /// authenticated connection. The helper accepts that strictly newer exact
+    /// peer and restores in the same transaction; there is no preliminary
+    /// RECONNECT reply to lose and no terminal retry after uncertainty.
     func terminateGeneration(
         sessionID: UUID,
         intent: HelperGenerationTerminationIntent
     ) -> HelperGenerationTerminationResolution {
         lock.lock(); defer { lock.unlock() }
+        invalidateClientLocked()
         let resolution = Self.terminateGeneration(sessionID: sessionID, intent: intent) {
             operation, requestedSessionID, timeout in
             try self.exchangeLocked(operation, sessionID: requestedSessionID, timeout: timeout)
@@ -360,28 +361,6 @@ final class RawHelperControlClient: @unchecked Sendable {
         intent: HelperGenerationTerminationIntent,
         exchange: (UInt32, UUID, Double) throws -> HelperControlExchangeOutcome
     ) -> HelperGenerationTerminationResolution {
-        let rebound: HelperControlExchangeOutcome
-        do {
-            let operation = UInt32(LS_OPERATION_RECONNECT.rawValue)
-            rebound = try exchange(operation, sessionID, timeoutSeconds(for: operation, terminalContext: true))
-        } catch {
-            return .authorityMayRemain(describe(error))
-        }
-        switch rebound {
-        case let .rejected(reply):
-            guard isExactOwnerReply(reply, expectedSessionID: sessionID) else {
-                return .authorityMayRemain("terminal-reconnect-session-mismatch")
-            }
-            switch reply.state {
-            case .idle: return .alreadyIdle(reply)
-            case .terminal: return .alreadyTerminal(reply)
-            case .active, .recoveryRequired:
-                return .authorityMayRemain(reply.reason)
-            }
-        case .accepted:
-            break
-        }
-
         let operation: UInt32
         let requestedSessionID: UUID
         switch intent {
@@ -394,7 +373,7 @@ final class RawHelperControlClient: @unchecked Sendable {
         }
         do {
             return classifyTerminalOutcome(
-                try exchange(operation, requestedSessionID, timeoutSeconds(for: operation, terminalContext: true)),
+                try exchange(operation, requestedSessionID, timeoutSeconds(for: operation)),
                 expectedSessionID: sessionID
             )
         } catch {
@@ -403,9 +382,9 @@ final class RawHelperControlClient: @unchecked Sendable {
     }
 
     /// RESTORE is addressed on the wire with the zero UUID, but it still
-    /// resolves only the generation that performed the prior exact-session
-    /// RECONNECT. Never let the wire routing value turn another session's
-    /// terminal-looking reply into this owner's cleanup proof.
+    /// resolves only the exact generation terminalized atomically by the
+    /// authenticated helper. Never let the wire routing value turn another
+    /// session's terminal-looking reply into this owner's cleanup proof.
     private static func classifyTerminalOutcome(
         _ outcome: HelperControlExchangeOutcome,
         expectedSessionID: UUID
@@ -616,14 +595,12 @@ final class RawHelperControlClient: @unchecked Sendable {
         }
     }
 
-    /// A terminal generation must first RECONNECT its exact process before its
-    /// one END/RESTORE effect. Give that prerequisite rebind the same bounded
-    /// terminal budget without widening normal heartbeat reconnects.
-    private static func timeoutSeconds(for operation: UInt32, terminalContext: Bool = false) -> Double {
+    /// Terminal operations receive one bounded wire budget. They atomically
+    /// authenticate a current-or-newer exact-peer connection and restore in
+    /// the helper, so no preliminary RECONNECT or terminal retry is permitted.
+    private static func timeoutSeconds(for operation: UInt32) -> Double {
         switch operation {
         case UInt32(LS_OPERATION_END.rawValue), UInt32(LS_OPERATION_RESTORE.rawValue):
-            return 10
-        case UInt32(LS_OPERATION_RECONNECT.rawValue) where terminalContext:
             return 10
         default:
             return 5
@@ -631,8 +608,8 @@ final class RawHelperControlClient: @unchecked Sendable {
     }
 
 #if DEBUG
-    static func timeoutSecondsForTesting(operation: UInt32, terminalContext: Bool = false) -> Double {
-        timeoutSeconds(for: operation, terminalContext: terminalContext)
+    static func timeoutSecondsForTesting(operation: UInt32) -> Double {
+        timeoutSeconds(for: operation)
     }
 #endif
 

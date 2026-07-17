@@ -8,6 +8,7 @@ import XCTest
 
 final class RawXPCSecurityTests: XCTestCase {
     private static let fixtureBootID = "00000000-0000-4000-8000-000000000001"
+    private static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
     func testAuthorityFixtureBootIdentityIsNormalizedSchemaTwoUUID() {
         XCTAssertEqual(BootIdentity.normalizeBootSessionUUID(Self.fixtureBootID), Self.fixtureBootID)
@@ -313,6 +314,154 @@ final class RawXPCSecurityTests: XCTestCase {
         for connection in UInt64(3)...UInt64(12) {
             XCTAssertEqual(authority.handle(connection: connection, peer: peer, operation: UInt32(LS_OPERATION_RECONNECT.rawValue), sessionID: session).result, 0)
         }
+    }
+
+    func testFreshExactPeerEndAtomicallyTerminalizesWithoutReconnect() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: fixture.recoveryStoreFactory,
+            statusProjectionWriter: fixture.statusProjectionWriter,
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.fixtureBootID }
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let session = UUID()
+        XCTAssertEqual(
+            authority.handle(
+                connection: 1,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+                sessionID: session
+            ).result,
+            0
+        )
+
+        XCTAssertNotEqual(
+            authority.handle(
+                connection: 2,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_END.rawValue),
+                sessionID: UUID()
+            ).result,
+            0
+        )
+        XCTAssertEqual(
+            authority.handle(
+                connection: 1,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_RENEW.rawValue),
+                sessionID: session
+            ).result,
+            0,
+            "a wrong-session END must not mutate active authority"
+        )
+
+        // Production invalidates the heartbeat client before opening the
+        // strictly newer terminal connection. The helper may enter reconnect
+        // grace here, but the one fresh END must still terminalize atomically.
+        authority.connectionInvalidated(1)
+        let terminal = authority.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_END.rawValue),
+            sessionID: session
+        )
+        XCTAssertEqual(terminal.result, 0)
+        XCTAssertEqual(terminal.reason, "user-end")
+        XCTAssertEqual(terminal.sessionID, session)
+        XCTAssertEqual(terminal.state, 2)
+        XCTAssertEqual(fixture.power.setCalls.filter { $0 == "sleep=0" }.count, 1)
+        XCTAssertEqual(fixture.power.setCalls.filter { $0 == "ac=10" }.count, 1)
+
+        // Model a lost reply: invalidating the request connection after the
+        // helper committed cannot create reconnect grace or rewrite terminal
+        // truth, and no second power effect is issued.
+        authority.connectionInvalidated(2)
+        let proof = authority.handle(
+            connection: 3,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_SNAPSHOT.rawValue),
+            sessionID: session
+        )
+        XCTAssertEqual(proof.state, 2)
+        XCTAssertEqual(proof.reason, "user-end")
+        XCTAssertEqual(fixture.power.setCalls.filter { $0 == "sleep=0" }.count, 1)
+        XCTAssertEqual(fixture.power.setCalls.filter { $0 == "ac=10" }.count, 1)
+    }
+
+    func testFreshExactPeerRestoreAtomicallyTerminalizesAndRejectsFalseOwners() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: fixture.recoveryStoreFactory,
+            statusProjectionWriter: fixture.statusProjectionWriter,
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.fixtureBootID }
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let session = UUID()
+        XCTAssertEqual(
+            authority.handle(
+                connection: 5,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+                sessionID: session
+            ).result,
+            0
+        )
+
+        var otherPeer = peer
+        otherPeer.pid += 1
+        XCTAssertNotEqual(
+            authority.handle(
+                connection: 6,
+                peer: otherPeer,
+                operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+                sessionID: Self.zeroUUID
+            ).result,
+            0
+        )
+        XCTAssertNotEqual(
+            authority.handle(
+                connection: 4,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+                sessionID: Self.zeroUUID
+            ).result,
+            0
+        )
+        XCTAssertEqual(
+            authority.handle(
+                connection: 5,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_RENEW.rawValue),
+                sessionID: session
+            ).result,
+            0,
+            "rejected terminal attempts must not mutate active authority"
+        )
+
+        let terminal = authority.handle(
+            connection: 6,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: Self.zeroUUID
+        )
+        XCTAssertEqual(terminal.result, 0)
+        XCTAssertEqual(terminal.reason, "peer-restore")
+        XCTAssertEqual(terminal.sessionID, session)
+        XCTAssertEqual(terminal.state, 2)
+        XCTAssertEqual(fixture.power.setCalls.filter { $0 == "sleep=0" }.count, 1)
+        XCTAssertEqual(fixture.power.setCalls.filter { $0 == "ac=10" }.count, 1)
     }
 
     func testChangedTupleAndSessionAreRejectOnlyNotTerminalization() throws {

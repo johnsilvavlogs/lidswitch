@@ -488,10 +488,12 @@ final class HelperSessionAuthority: @unchecked Sendable {
             }
             return snapshot(result: 0, reason: "verified", requested: sessionID)
         case UInt32(LS_OPERATION_RESTORE.rawValue):
-            guard activeSession == nil || (activeConnection == connection && activePeer == peer) else {
-                return snapshot(result: 77, reason: "second-connection", requested: sessionID)
-            }
-            return restoreActive(reason: "peer-restore", store: store, transaction: transaction)
+            return restore(
+                connection: connection,
+                peer: peer,
+                store: store,
+                transaction: transaction
+            )
         default:
             return snapshot(result: 64, reason: "unknown-operation", requested: sessionID)
         }
@@ -710,9 +712,30 @@ final class HelperSessionAuthority: @unchecked Sendable {
         store: RecoveryAuthorityStore,
         transaction: VerifiedRootStateDirectory.Transaction
     ) -> AuthorityReply {
-        guard activeConnection == connection, activePeer == peer else { return snapshot(result: 77, reason: "second-connection", requested: sessionID) }
         guard activeSession == sessionID else { return snapshot(result: 78, reason: "protocol-session-mismatch", requested: sessionID) }
+        guard activePeer == peer else { return snapshot(result: 77, reason: "terminal-peer-mismatch", requested: sessionID) }
+        guard activeConnection == connection || connection > connectionHighWatermark else {
+            return snapshot(result: 77, reason: "terminal-connection-replay", requested: sessionID)
+        }
         return restoreActive(reason: reason, store: store, transaction: transaction)
+    }
+
+    private func restore(
+        connection: UInt64,
+        peer: Peer,
+        store: RecoveryAuthorityStore,
+        transaction: VerifiedRootStateDirectory.Transaction
+    ) -> AuthorityReply {
+        guard let activeSession else {
+            return restoreActive(reason: "peer-restore", store: store, transaction: transaction)
+        }
+        guard activePeer == peer else {
+            return snapshot(result: 77, reason: "terminal-peer-mismatch", requested: activeSession)
+        }
+        guard activeConnection == connection || connection > connectionHighWatermark else {
+            return snapshot(result: 77, reason: "terminal-connection-replay", requested: activeSession)
+        }
+        return restoreActive(reason: "peer-restore", store: store, transaction: transaction)
     }
 
     private func tick() {
