@@ -2,13 +2,12 @@
 
 ## Release status
 
-LidSwitch `0.2.12` build `7` is a helper-and-app hotfix candidate, not yet a public
-release. It must pass the held build, immutable package, transactional install,
-and real menu-bar start/restore/start proof before tag `v0.2.12` or its exact DMG
-may be published. LidSwitch `0.2.11` tag `v0.2.11` remains the current public manual release until that proof is accepted.
-That public tag points to source commit `c2ab38170b2ae42fd46b234ba83cbe974a983d85`;
-its published `LidSwitch.dmg` SHA-256 is
-`ecfb76230b92636018375997af6e14a61a1a3b28cf4fe5d272ddf75e6fcfa7ce`.
+LidSwitch `0.2.12` build `7` is the current public manual release. It passed the
+held build, immutable package, transactional install, real menu-bar start/stop,
+and controlled app-death rollback gates before publication. Tag `v0.2.12`
+points to source commit `57d44b5bd566fd768a12705f2778fbb2d2f45375`;
+its only published asset is `LidSwitch.dmg`, whose SHA-256 is
+`0c2d03cafc88ee8d947b4f3551e72e046ce50955fb2946eb56bc8b344669dc00`.
 
 The release tier is a public manual DMG with ad-hoc signing, no Developer ID
 signature, and no notarization; recipients use Gatekeeper’s **Open Anyway**

@@ -8,8 +8,10 @@
 
 ## Install the manual build
 
-1. Download `LidSwitch.dmg` and `LidSwitch.dmg.sha256` from GitHub Releases.
-2. Verify the checksum with `shasum -a 256 -c LidSwitch.dmg.sha256`.
+1. Download `LidSwitch.dmg` from GitHub Releases.
+2. Run `shasum -a 256 LidSwitch.dmg` and verify that it equals the published
+   `0c2d03cafc88ee8d947b4f3551e72e046ce50955fb2946eb56bc8b344669dc00`
+   digest recorded in `docs/DISTRIBUTION.md`.
 3. Open the DMG and copy `LidSwitch.app` to `/Applications`.
 4. This build is ad-hoc signed and not notarized. If Gatekeeper blocks it, use **Open Anyway** in System Settings > Privacy & Security.
 5. Open LidSwitch. Protection is off.
