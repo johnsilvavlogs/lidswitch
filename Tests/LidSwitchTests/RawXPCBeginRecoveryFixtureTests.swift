@@ -90,11 +90,188 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         )
     }
 
-    func testBeginNotDeliveredReconnectIdleProofDoesNotCreateAuthority() throws {
+    func testExactIdleReconnectProofRetriesOneFreshBeginAndIssues() throws {
         let sessionID = UUID()
         let idle = reply(
-            reason: "idle",
+            reason: "reconnect-peer-mismatch",
             sessionID: sessionID,
+            expiryMonotonic: 0,
+            state: .idle
+        )
+        let issued = reply(
+            reason: "verified",
+            sessionID: sessionID,
+            expiryMonotonic: 1_234,
+            state: .active
+        )
+        var operations: [UInt32] = []
+
+        let resolution = try RawHelperControlClient.resolveBeginForTesting(
+            sessionID: sessionID
+        ) { operation, requestedSessionID in
+            XCTAssertEqual(requestedSessionID, sessionID)
+            operations.append(operation)
+            if operation == UInt32(LS_OPERATION_BEGIN.rawValue) {
+                if operations.filter({ $0 == UInt32(LS_OPERATION_BEGIN.rawValue) }).count == 1 {
+                    throw HelperControlError.indeterminateTransport(60)
+                }
+                return .accepted(issued)
+            }
+            XCTAssertEqual(operation, UInt32(LS_OPERATION_RECONNECT.rawValue))
+            return .rejected(idle)
+        }
+
+        XCTAssertEqual(resolution, .issued(issued))
+        XCTAssertEqual(
+            operations,
+            [
+                UInt32(LS_OPERATION_BEGIN.rawValue),
+                UInt32(LS_OPERATION_RECONNECT.rawValue),
+                UInt32(LS_OPERATION_BEGIN.rawValue),
+            ]
+        )
+        XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_BEGIN.rawValue) }.count, 2)
+        XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RECONNECT.rawValue) }.count, 1)
+    }
+
+    func testExactIdleReconnectProofRetryUncertaintyDoesNotLoop() throws {
+        let sessionID = UUID()
+        let idle = reply(
+            reason: "reconnect-peer-mismatch",
+            sessionID: sessionID,
+            expiryMonotonic: 0,
+            state: .idle
+        )
+        var operations: [UInt32] = []
+
+        let resolution = try RawHelperControlClient.resolveBeginForTesting(
+            sessionID: sessionID
+        ) { operation, requestedSessionID in
+            XCTAssertEqual(requestedSessionID, sessionID)
+            operations.append(operation)
+            if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
+                return .rejected(idle)
+            }
+            throw HelperControlError.indeterminateTransport(60)
+        }
+
+        guard case let .authorityMayRemain(reason) = resolution else {
+            return XCTFail("an uncertain retry BEGIN must remain unresolved")
+        }
+        XCTAssertTrue(reason.contains("indeterminate-transport"))
+        XCTAssertEqual(
+            operations,
+            [
+                UInt32(LS_OPERATION_BEGIN.rawValue),
+                UInt32(LS_OPERATION_RECONNECT.rawValue),
+                UInt32(LS_OPERATION_BEGIN.rawValue),
+            ]
+        )
+        XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_BEGIN.rawValue) }.count, 2)
+        XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RECONNECT.rawValue) }.count, 1)
+    }
+
+    func testExactIdleReconnectProofRetryUnsafeResponseDoesNotLoop() throws {
+        let sessionID = UUID()
+        let idle = reply(
+            reason: "reconnect-peer-mismatch",
+            sessionID: sessionID,
+            expiryMonotonic: 0,
+            state: .idle
+        )
+        let recoveryRequired = reply(
+            reason: "recovery-required",
+            sessionID: sessionID,
+            expiryMonotonic: 0,
+            state: .recoveryRequired
+        )
+        var operations: [UInt32] = []
+
+        let resolution = try RawHelperControlClient.resolveBeginForTesting(
+            sessionID: sessionID
+        ) { operation, _ in
+            operations.append(operation)
+            if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) {
+                return .rejected(idle)
+            }
+            if operations.filter({ $0 == UInt32(LS_OPERATION_BEGIN.rawValue) }).count == 1 {
+                throw HelperControlError.indeterminateTransport(60)
+            }
+            return .rejected(recoveryRequired)
+        }
+
+        XCTAssertEqual(resolution, .authorityMayRemain("recovery-required"))
+        XCTAssertEqual(
+            operations,
+            [
+                UInt32(LS_OPERATION_BEGIN.rawValue),
+                UInt32(LS_OPERATION_RECONNECT.rawValue),
+                UInt32(LS_OPERATION_BEGIN.rawValue),
+            ]
+        )
+        XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_BEGIN.rawValue) }.count, 2)
+        XCTAssertEqual(operations.filter { $0 == UInt32(LS_OPERATION_RECONNECT.rawValue) }.count, 1)
+    }
+
+    func testReconnectPeerMismatchActiveEvidenceDoesNotRetryBegin() throws {
+        let sessionID = UUID()
+        let active = reply(
+            reason: "reconnect-peer-mismatch",
+            sessionID: sessionID,
+            expiryMonotonic: 1_234,
+            state: .active
+        )
+        var operations: [UInt32] = []
+
+        let resolution = try RawHelperControlClient.resolveBeginForTesting(
+            sessionID: sessionID
+        ) { operation, _ in
+            operations.append(operation)
+            if operation == UInt32(LS_OPERATION_BEGIN.rawValue) {
+                throw HelperControlError.indeterminateTransport(60)
+            }
+            return .rejected(active)
+        }
+
+        XCTAssertEqual(resolution, .authorityMayRemain("reconnect-peer-mismatch"))
+        XCTAssertEqual(
+            operations,
+            [UInt32(LS_OPERATION_BEGIN.rawValue), UInt32(LS_OPERATION_RECONNECT.rawValue)]
+        )
+    }
+
+    func testReconnectRecoveryRequiredEvidenceDoesNotRetryBegin() throws {
+        let sessionID = UUID()
+        let recoveryRequired = reply(
+            reason: "recovery-required",
+            sessionID: sessionID,
+            expiryMonotonic: 0,
+            state: .recoveryRequired
+        )
+        var operations: [UInt32] = []
+
+        let resolution = try RawHelperControlClient.resolveBeginForTesting(
+            sessionID: sessionID
+        ) { operation, _ in
+            operations.append(operation)
+            if operation == UInt32(LS_OPERATION_BEGIN.rawValue) {
+                throw HelperControlError.indeterminateTransport(60)
+            }
+            return .rejected(recoveryRequired)
+        }
+
+        XCTAssertEqual(resolution, .authorityMayRemain("recovery-required"))
+        XCTAssertEqual(
+            operations,
+            [UInt32(LS_OPERATION_BEGIN.rawValue), UInt32(LS_OPERATION_RECONNECT.rawValue)]
+        )
+    }
+
+    func testReconnectPeerMismatchForeignEvidenceDoesNotRetryBegin() throws {
+        let sessionID = UUID()
+        let foreignIdle = reply(
+            reason: "reconnect-peer-mismatch",
+            sessionID: UUID(),
             expiryMonotonic: 0,
             state: .idle
         )
@@ -107,10 +284,10 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
             if operation == UInt32(LS_OPERATION_BEGIN.rawValue) {
                 throw HelperControlError.indeterminateTransport(60)
             }
-            return .rejected(idle)
+            return .rejected(foreignIdle)
         }
 
-        XCTAssertEqual(resolution, .idle(idle))
+        XCTAssertEqual(resolution, .authorityMayRemain("begin-reply-session-mismatch"))
         XCTAssertEqual(
             operations,
             [UInt32(LS_OPERATION_BEGIN.rawValue), UInt32(LS_OPERATION_RECONNECT.rawValue)]
