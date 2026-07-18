@@ -1845,13 +1845,16 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(refreshCalls.value, 2)
     }
 
-    func testV5RawXPCReleaseValidationRequiresImmutableCandidateAndRejectsWatchPaths() throws {
+    func testRawXPCReleaseValidationRequiresImmutableCandidateAndRejectsWatchPaths() throws {
         let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let release = try String(contentsOf: root.appendingPathComponent("script/release.env"), encoding: .utf8)
+        let identityData = try Data(contentsOf: root.appendingPathComponent("Resources/LidSwitchReleaseIdentity.json"))
+        let identity = try XCTUnwrap(JSONSerialization.jsonObject(with: identityData) as? [String: Any])
+        let helperVersion = try XCTUnwrap(identity["helperVersion"] as? Int)
         let bundleValidator = try String(contentsOf: root.appendingPathComponent("script/validate_bundle.sh"), encoding: .utf8)
         let liveValidator = try String(contentsOf: root.appendingPathComponent("script/validate_live_state.sh"), encoding: .utf8)
 
-        XCTAssertTrue(release.contains("LIDSWITCH_HELPER_VERSION=\"5\""))
+        XCTAssertTrue(release.contains("LIDSWITCH_HELPER_VERSION=\"\(helperVersion)\""))
         XCTAssertTrue(bundleValidator.contains("immutable-candidate-required"))
         XCTAssertTrue(bundleValidator.contains("legacy-validator-retired"))
         XCTAssertTrue(bundleValidator.contains("exit 65"))

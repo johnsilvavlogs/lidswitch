@@ -106,9 +106,9 @@ final class RawHelperControlClient: @unchecked Sendable {
     }
 
     /// Resolves the single indeterminate-BEGIN window with exactly one
-    /// same-session RECONNECT on a newly authenticated connection. RECONNECT
-    /// can only recover the original generation and its original expiry; it
-    /// never retries BEGIN, grants authority, renews, or loops.
+    /// same-session RECONNECT on a newly authenticated connection. A
+    /// RECONNECT proof that this exact generation is idle permits one fresh
+    /// BEGIN; every other reconnect result remains terminal for this resolver.
     func resolveBegin(sessionID: UUID) throws -> HelperLeaseBeginResolution {
         lock.lock(); defer { lock.unlock() }
         let resolution = try Self.resolveBegin(sessionID: sessionID) { operation, requestedSessionID in
@@ -321,11 +321,28 @@ final class RawHelperControlClient: @unchecked Sendable {
             // so this one recovery exchange necessarily authenticates a fresh
             // connection. Any second uncertainty is terminal for this resolver.
             do {
-                return classifyBeginOutcome(
+                let reconnectResolution = classifyBeginOutcome(
                     try exchange(UInt32(LS_OPERATION_RECONNECT.rawValue), sessionID),
                     expectedSessionID: sessionID,
                     acceptedCase: HelperLeaseBeginResolution.reconnected
                 )
+                guard case .idle = reconnectResolution else {
+                    return reconnectResolution
+                }
+
+                // The authenticated helper proved this exact requested
+                // generation never gained authority. Spend the one remaining
+                // bounded operation on a fresh BEGIN; do not reconnect or
+                // retry again if that BEGIN is uncertain or rejected.
+                do {
+                    return classifyBeginOutcome(
+                        try exchange(UInt32(LS_OPERATION_BEGIN.rawValue), sessionID),
+                        expectedSessionID: sessionID,
+                        acceptedCase: HelperLeaseBeginResolution.issued
+                    )
+                } catch {
+                    return .authorityMayRemain(describe(error))
+                }
             } catch {
                 return .authorityMayRemain(describe(error))
             }

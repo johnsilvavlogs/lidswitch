@@ -10,7 +10,7 @@ The helper reads local power state through IOKit and macOS's local power-prefere
 
 ## Battery
 
-Version `0.2.12` has no battery keep-awake mode. Unplugging ends the session and restoring power does not restart it.
+Version `0.2.13` has no battery keep-awake mode. Unplugging ends the session and restoring power does not restart it.
 
 ## Website and GitHub
 

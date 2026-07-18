@@ -3,12 +3,12 @@ import Foundation
 // Generated from release/identity.json by scripts/render-release-identity.mjs.
 // Do not edit this tracked mirror; the renderer's --check mode rejects drift.
 public enum ReleaseIdentity {
-    public static let appVersion = "0.2.12"
-    public static let appBuild = "7"
-    public static let helperVersion = "7"
+    public static let appVersion = "0.2.13"
+    public static let appBuild = "8"
+    public static let helperVersion = "8"
     public static let xpcProtocolVersion: UInt32 = 2
     public static let enrollmentPolicyProtocolVersion: UInt32 = 1
-    public static let releaseTag = "v0.2.12"
+    public static let releaseTag = "v0.2.13"
     public static let appBundleIdentifier = "com.johnsilva.LidSwitch"
     public static let helperLabel = "com.johnsilva.lidswitch.helper"
     public static let machService = "com.johnsilva.lidswitch.helper.control"
