@@ -54,13 +54,13 @@ final class ContainedProcessRunnerFixtureTests: XCTestCase {
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: termIssued, owner: owner, now: 60, observation: .liveExact), .signalKILL)
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: claimed, owner: owner, now: 60, observation: .memberReusedOrUnknown), .retainFence)
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: claimed, owner: owner, now: 60, observation: .groupOrSessionMismatch), .retainFence)
-        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: claimed, owner: owner, now: 60, observation: .leaderReapedAndExtinct), .retainFence)
+        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: claimed, owner: owner, now: 60, observation: .leaderReapedAndExtinct), .extinguished)
         XCTAssertNil(claimed.claimed(by: UUID(), until: 70), "second owner cannot claim a live receipt")
         let killing = try XCTUnwrap(termIssued.advancing(to: .kill, owner: owner, deadline: 60))
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: killing, owner: owner, now: 61, observation: .liveExact), .signalKILL)
         let killIssued = try XCTUnwrap(killing.markingKillSignalIssued(owner: owner, deadline: 60))
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: killIssued, owner: owner, now: 61, observation: .liveExact), .reapLeader)
-        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: killIssued, owner: owner, now: 61, observation: .leaderReapedAndExtinct), .retainFence)
+        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: killIssued, owner: owner, now: 61, observation: .leaderReapedAndExtinct), .extinguished)
         let reaped = try XCTUnwrap(killIssued.markingLeaderReaped(owner: owner, deadline: 60))
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: reaped, owner: owner, now: 61, observation: .leaderReapedAndExtinct), .extinguished)
         let resumed = try XCTUnwrap(killing.reclaimed(by: UUID(), now: 61, until: 90))
@@ -105,10 +105,10 @@ final class ContainedProcessRunnerFixtureTests: XCTestCase {
         XCTAssertEqual(ContainedProcessRunner.reapLeaderOutcome(receipt, maximumInterrupts: 2) { _ in (-1, EINTR) }, .interruptedLimit)
     }
 
-    /// This is the same receipt transition used by the coordinator's queued
-    /// production cleanup path: ECHILD consumes a durable attempt, expiry
-    /// turns it into one retained ambiguity, and it cannot become removal.
-    func testExpiredUnprovenLeaderReapFencesExactlyOnce() throws {
+    /// ECHILD alone remains non-authoritative. After the old owner lease
+    /// expires, a new owner may reclaim an ambiguous receipt only for a stable
+    /// exact-kernel-absence proof; it never regains signal authority.
+    func testExpiredUnprovenLeaderReapRecoversOnlyAfterExactKernelExtinction() throws {
         let owner = UUID()
         let leader = ContainedProcessIdentity(pid: 41, startSeconds: 100, startMicroseconds: 7)
         let member = ContainedProcessMember(identity: leader, executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef")
@@ -119,11 +119,38 @@ final class ContainedProcessRunnerFixtureTests: XCTestCase {
         let issued = try XCTUnwrap(claimed.markingTermSignalIssued(owner: owner, deadline: 50))
         let attempted = try XCTUnwrap(issued.recordingReapAttempt(owner: owner, deadline: 50))
         XCTAssertEqual(ContainedProcessRunner.reapLeaderOutcome(attempted) { _ in (-1, ECHILD) }, .echild)
-        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: attempted, owner: owner, now: 49, observation: .leaderReapedAndExtinct), .reapLeader)
-        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: attempted, owner: owner, now: 50, observation: .leaderReapedAndExtinct), .retainFence)
+        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: attempted, owner: owner, now: 49, observation: .liveExact), .reapLeader)
+        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: attempted, owner: owner, now: 50, observation: .incompleteInventory), .retainFence)
         let ambiguous = try XCTUnwrap(attempted.advancing(to: .ambiguous, owner: owner, deadline: 50))
         XCTAssertFalse(ambiguous.leaderReaped)
-        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: ambiguous, owner: owner, now: 51, observation: .leaderReapedAndExtinct), .retainFence)
+        XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: ambiguous, owner: owner, now: 51, observation: .leaderReapedAndExtinct), .extinguished)
+        let recoveryOwner = UUID()
+        let reclaimed = try XCTUnwrap(
+            ambiguous.reclaimedAmbiguousForExtinctionProof(by: recoveryOwner, now: 51, until: 80)
+        )
+        XCTAssertEqual(
+            ContainedProcessCleanupMachine.next(
+                receipt: reclaimed,
+                owner: recoveryOwner,
+                now: 51,
+                observation: .liveExact
+            ),
+            .retainFence,
+            "an ambiguous receipt never regains signal authority"
+        )
+        XCTAssertEqual(
+            ContainedProcessCleanupMachine.next(
+                receipt: reclaimed,
+                owner: recoveryOwner,
+                now: 51,
+                observation: .leaderReapedAndExtinct
+            ),
+            .extinguished
+        )
+        let extinction = try XCTUnwrap(
+            reclaimed.markingKernelExtinctionVerified(owner: recoveryOwner, deadline: 80)
+        )
+        XCTAssertNotNil(extinction.advancing(to: .extinguished, owner: recoveryOwner, deadline: 80))
     }
 
     func testCoreRunnerFixtureDecisionNeverCompletesWithSurvivingDescendant() {
