@@ -167,6 +167,75 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             fixture.store.claimContainmentReceipt(token: issued.token, owner: owner, now: 31, until: 40, transaction)
         }))
         XCTAssertEqual(reclaimed.ownerDeadlineNanoseconds, 40)
+        let ambiguous = try XCTUnwrap(
+            reclaimed.advancing(to: .ambiguous, owner: owner, deadline: 40)
+        )
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.advanceContainmentReceipt(expected: reclaimed, next: ambiguous, $0)
+        }))
+        let extinctionOwner = UUID()
+        let observationOnly = try XCTUnwrap(try XCTUnwrap(fixture.store.withTransaction { transaction in
+            fixture.store.claimContainmentReceipt(
+                token: ambiguous.token,
+                owner: extinctionOwner,
+                now: 41,
+                until: 50,
+                transaction
+            )
+        }))
+        XCTAssertEqual(observationOnly.phase, .ambiguous)
+        XCTAssertEqual(observationOnly.cleanupOwnerToken, extinctionOwner)
+        XCTAssertEqual(
+            ContainedProcessCleanupMachine.next(
+                receipt: observationOnly,
+                owner: extinctionOwner,
+                now: 41,
+                observation: .liveExact
+            ),
+            .retainFence
+        )
+    }
+
+    func testAdministratorOneShotSynchronouslyRetiresOnlyExactlyExtinctAmbiguousContainment() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let identity = ContainedProcessIdentity(
+            pid: Int32.max - 1,
+            startSeconds: 10,
+            startMicroseconds: 1
+        )
+        let base = ContainedProcessReceipt(
+            token: UUID(),
+            executable: "/usr/bin/pmset",
+            commandFingerprint: "0123456789abcdef",
+            leader: identity,
+            members: [
+                .init(
+                    identity: identity,
+                    executable: "/usr/bin/pmset",
+                    commandFingerprint: "0123456789abcdef"
+                ),
+            ],
+            processGroupID: identity.pid,
+            sessionID: Int32.max - 2,
+            rootDeadlineNanoseconds: 10,
+            cleanupDeadlineNanoseconds: 20
+        )
+        let priorOwner = UUID()
+        let claimed = try XCTUnwrap(base.claimed(by: priorOwner, until: 30))
+        let ambiguous = try XCTUnwrap(
+            claimed.advancing(to: .ambiguous, owner: priorOwner, deadline: 30)
+        )
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.publishInitialContainmentReceipt(ambiguous, $0)
+        }))
+
+        XCTAssertEqual(
+            fixture.coordinator.recover(intent: .install, allowReconnect: false),
+            .pristineIdle
+        )
+        XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
+        XCTAssertEqual(fixture.power.setCalls, [])
     }
 
     /// Exercises the production connected timer entrypoint.  It deliberately

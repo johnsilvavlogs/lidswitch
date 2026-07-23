@@ -62,7 +62,7 @@ try: sys.argv=[p]+sys.argv[3:]; exec(code,{"__name__":"__main__","__file__":p,"_
 except BaseException:
  if isinstance(sys.exc_info()[1],SystemExit) and sys.exc_info()[1].code==74: raise
  raise SystemExit(74)
-' script/test_safe_envelope.py da2fd56836c07024d8b26385f43b82f0fe70856f23fb179ae1b70846ada68510
+' script/test_safe_envelope.py e069241a3859bcbea622f92a116ba83047f868c6e249dc9a3ff0d503de8636e2
 ```
 
 Do not substitute bare `python3`, `/usr/bin/env python`, an Anaconda/interpreter
