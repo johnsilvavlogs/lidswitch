@@ -44,10 +44,10 @@ jobs:
           test "${GITHUB_EVENT_NAME:?}" = workflow_dispatch
           test "$(/usr/bin/git rev-parse HEAD)" = "${GITHUB_SHA:?}"
           test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 85db64677e8e522d4ffa4d5aeba3a4db61aa7def13cc32561d26f5cfe8b98d17
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 1a4d31bca0f964fe135d9661e8531294f96dcd91d88fd20f1cbf076162b7b226
           test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = cadfbe8f227900cdc505f256729d73f6269e4b946717609feeb3c1420fc1012c
           test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 739914bd98f28b595caafde05d2e17563f5c49c1db7e4836fa7ae2c44e3e9964
-          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 918ff8fd4dd800a0f93fb607a32f12856bfb08c08c3039d9aedc2fffc66e96aa
+          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = d5a9812ee23860bc488e5d52d67a65df71adca27636398a95b4d922d4b4db2be
           /usr/bin/python3 -m py_compile orchestration/hosted_held_bootstrap.py orchestration/collect_hosted_candidate_evidence.py
       - name: Create runner-specific held authority after exact source verification
         shell: /bin/bash -euo pipefail {0}

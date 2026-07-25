@@ -83,6 +83,8 @@ def main() -> int:
         require(contract["roles"][role]["sha256"] == files["packaging/" + name]["sha256"], "packaging closure cross-binding mismatch")
     require(context["policy_sha256"] == files["orchestration/policy.json"]["sha256"] and context["workflow_sha256"] and context["workflow_ref"] and context["run_id"] and context["image_version"] == policy["runner"]["image_version"], "workflow context mismatch")
     require(prepare["ledger"]["sha256"] == files["authority/ledger.json"]["sha256"] and build["ledger"]["sha256"] == files["authority/ledger.json"]["sha256"], "prepare/build authority mismatch")
+    for name, relative in (("live-state-retained.receipt", "authority/live-state-retained.receipt"), ("preflight-state.snapshot", "authority/preflight-state.snapshot"), ("postflight-state.snapshot", "authority/postflight-state.snapshot"), ("hosted-live-envelope.json", "authority/live-envelope.json")):
+        require(build["retained"][name]["sha256"] == files[relative]["sha256"] and build["retained"][name]["size"] == files[relative]["size"], "held build retained binding mismatch")
     receipt = (root / "authority/live-state-retained.receipt").read_text("utf-8")
     fields = dict(line.split("=", 1) for line in receipt.splitlines() if "=" in line)
     require(fields.get("child_command_exit") == "0" and fields.get("wrapper_exit") == "0" and fields.get("outcome") == "preserved", "terminal receipt invalid")

@@ -469,9 +469,13 @@ def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, 
     release_output = run.stdout.strip()
     if not release_output.startswith("/private/tmp/lidswitch-swift.") or "/release-output" not in release_output:
         deny("held-release-output-path-invalid")
+    # Recheck the candidate after the wrapper and bind the actual retained
+    # host-state proof into the build receipt rather than a hash-only claim.
+    prepare_recheck(source, authority, policy_path)
+    retained = {name: descriptor(authority / name, maximum=65536) for name in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "hosted-live-envelope.json")}
     print(canonical({"schema": "lidswitch-hosted-build-v2", "source": ledger["source"], "generated": generated,
                      "ledger": descriptor(ledger_path), "entry": descriptor(entry), "contract": descriptor(contract),
-                     "release_output": release_output}).decode(), end="")
+                     "retained": retained, "release_output": release_output}).decode(), end="")
     return {"release_output": release_output}
 
 
