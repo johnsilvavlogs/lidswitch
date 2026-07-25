@@ -21,6 +21,13 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertIn("DEVELOPER_DIR=/Library/Developer/CommandLineTools", self.workflow)
         self.assertNotIn("xcode-select -p", self.workflow)
 
+    def test_workflow_accepts_only_the_exact_policy_image(self):
+        policy = json.loads((ROOT / "orchestration/hosted-runner-policy.json").read_text())
+        image = policy["runner"]["image_version"]
+        self.assertEqual(image, "20260715.0248.1")
+        self.assertIn('test "${ImageVersion:?missing ImageVersion}" = ' + image, self.workflow)
+        self.assertNotIn("20260720.0258.1", self.workflow)
+
     def test_swift_frontend_bound_covers_current_clt_without_becoming_unbounded(self):
         self.assertIn('maximum=512 * 1024 * 1024', self.bootstrap)
         self.assertNotIn('maximum=128 * 1024 * 1024', self.bootstrap)
