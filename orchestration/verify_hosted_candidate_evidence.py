@@ -26,6 +26,7 @@ PACKAGING_ROLES = {
     "validate_candidate": "validate_immutable_candidate.py",
     "validate_dmg": "validate_immutable_dmg.py",
 }
+CAPTURE_NAMES = ("app-bin-path", "app-build", "helper-bin-path", "helper-build", "helper-identity", "helper-sign", "helper-verify")
 FIXED_BINDINGS = {
     "source_manifest": "source/source_snapshot_manifest.jsonl",
     "authority_ledger": "authority/ledger.json",
@@ -166,6 +167,23 @@ def parse_kv(path: Path, label: str) -> tuple[tuple[str, ...], dict[str, str]]:
         return tuple(order), rows
     except (UnicodeDecodeError, ValueError):
         raise ValueError(label + " invalid")
+
+
+def receipt_captures(value: object) -> dict[str, str]:
+    deny(isinstance(value, str), "terminal receipt captures invalid")
+    fields = value.split(",")
+    deny(len(fields) == len(CAPTURE_NAMES), "terminal receipt captures invalid")
+    result: dict[str, str] = {}
+    for name, field in zip(CAPTURE_NAMES, fields):
+        prefix = name + ":"
+        deny(field.startswith(prefix), "terminal receipt captures invalid")
+        capture = field[len(prefix):]
+        parts = capture.split(":")
+        deny(len(parts) == 2, "terminal receipt captures invalid")
+        hexdigest(parts[0], "terminal receipt capture")
+        hexdigest(parts[1], "terminal receipt capture")
+        result[name] = capture
+    return result
 
 
 def release_output_seal(files: dict[str, object]) -> str:
@@ -376,7 +394,8 @@ def main() -> int:
         observed = descriptor_matches(build["retained"][name], files[relative], "retained binding")
         absolute_child(observed["path"], authority_path, name, "retained " + name)
     receipt_order, fields = parse_kv(root / "authority/live-state-retained.receipt", "terminal receipt")
-    deny(receipt_order == ("schema", "nonce", "outcome", "child_command_exit", "wrapper_exit", "preflight_sha256", "postflight_sha256", "host_preserved", "benchmark_published", "error", "capture_identifiers", "control_root", "execution_root") and fields["schema"] == "3" and fields["nonce"] and fields["child_command_exit"] == "0" and fields["wrapper_exit"] == "0" and fields["outcome"] == "preserved" and fields["host_preserved"] == "true" and fields["benchmark_published"] in ("true", "false") and fields["control_root"].startswith("/private/tmp/lidswitch-envelope.") and fields["execution_root"].startswith("/private/tmp/lidswitch-swift.") and fields["preflight_sha256"] == files["authority/preflight-state.snapshot"]["sha256"] and fields["postflight_sha256"] == files["authority/postflight-state.snapshot"]["sha256"], "terminal receipt invalid")
+    deny(receipt_order == ("schema", "nonce", "outcome", "child_command_exit", "wrapper_exit", "preflight_sha256", "postflight_sha256", "host_preserved", "benchmark_published", "error", "capture_identifiers", "control_root", "execution_root") and fields["schema"] == "3" and fields["nonce"] and fields["child_command_exit"] == "0" and fields["wrapper_exit"] == "0" and fields["outcome"] == "preserved" and fields["host_preserved"] == "true" and fields["benchmark_published"] in ("true", "false") and fields["error"] == "none" and fields["control_root"].startswith("/private/tmp/lidswitch-envelope.") and fields["execution_root"].startswith("/private/tmp/lidswitch-swift.") and fields["preflight_sha256"] == files["authority/preflight-state.snapshot"]["sha256"] and fields["postflight_sha256"] == files["authority/postflight-state.snapshot"]["sha256"], "terminal receipt invalid")
+    terminal_captures = receipt_captures(fields["capture_identifiers"])
     for snapshot in ("preflight", "postflight"):
         _order, values = parse_kv(root / ("authority/" + snapshot + "-state.snapshot"), "snapshot")
         deny(values.get("host_class") == "idle-uninstalled" and values.get("kernel_build") == policy["runner"]["kernel"], "snapshot terminal state invalid")
@@ -406,7 +425,7 @@ def main() -> int:
     release_receipt = load(root / "release-output/build-receipt.json")
     check_release_receipt(release_receipt, files)
     build_release_output = release_output_path(build["release_output"], "build release output")
-    deny(context_release_output == build_release_output and release["build_receipt_sha256"] == files["release-output/build-receipt.json"]["sha256"] and release["anchor_sha256"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["sha256"] and release["anchor_size"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["size"] and release["source_manifest_sha256"] == policy["source_manifest_sha256"] and release["app"] == release_receipt["artifacts"]["app"] and release["helper"] == release_receipt["artifacts"]["helper"] and release["release_identity_sha256"] == release_receipt["inputs"]["releaseIdentitySHA256"] == release_identity["sha256"] == files["packaging/LidSwitchReleaseIdentity.json"]["sha256"] and release["seal_sha256"] == release_output_seal(files), "release output binding mismatch")
+    deny(context_release_output == build_release_output and Path(fields["execution_root"]) == build_release_output.parent and terminal_captures == release_receipt["captures"] and release["build_receipt_sha256"] == files["release-output/build-receipt.json"]["sha256"] and release["anchor_sha256"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["sha256"] and release["anchor_size"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["size"] and release["source_manifest_sha256"] == policy["source_manifest_sha256"] and release["app"] == release_receipt["artifacts"]["app"] and release["helper"] == release_receipt["artifacts"]["helper"] and release["release_identity_sha256"] == release_receipt["inputs"]["releaseIdentitySHA256"] == release_identity["sha256"] == files["packaging/LidSwitchReleaseIdentity.json"]["sha256"] and release["seal_sha256"] == release_output_seal(files), "release output binding mismatch")
     for key in ("anchor_sha256", "build_receipt_sha256", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"):
         hexdigest(release[key], "release digest")
 

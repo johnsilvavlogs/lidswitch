@@ -46,12 +46,12 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
-        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
+        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
             self.assertIn(token, self.bootstrap)
 
     def test_verifier_closes_the_complete_evidence_inventory(self):
         verifier = (ROOT / "orchestration/verify_hosted_candidate_evidence.py").read_text()
-        for token in ("missing or extra declared evidence leaf", "package/build-envelope.json", "candidate/package-manifest.json", "release-output/build-receipt.json", "lidswitch-hosted-live-envelope-v2", "release_output_seal", "LidSwitchReleaseIdentity.json"):
+        for token in ("missing or extra declared evidence leaf", "package/build-envelope.json", "candidate/package-manifest.json", "release-output/build-receipt.json", "lidswitch-hosted-live-envelope-v2", "receipt_captures", "execution_root", "release_output_seal", "LidSwitchReleaseIdentity.json"):
             self.assertIn(token, verifier)
 
     def test_workflow_pins_match_current_authority_files(self):
@@ -250,3 +250,6 @@ class HeldPackagingClosureTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["cwd"], "/")
         self.assertEqual(run.call_args.kwargs["env"], self.bootstrap.PACKAGING_ENV)
         self.assertNotIn("PYTHONPATH", run.call_args.kwargs["env"])
+
+    def test_generated_held_entry_is_parseable(self):
+        compile(self.bootstrap.ENTRY, "held-entry.py", "exec")

@@ -105,13 +105,16 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         authority_meta = meta(root / "authority/ledger.json")
         pre = b"host_class=idle-uninstalled\nkernel_build=25E246\n"
         write(root / "authority/preflight-state.snapshot", pre, 0o400); write(root / "authority/postflight-state.snapshot", pre, 0o400)
-        receipt = ("schema=3\nnonce=fixture-nonce\noutcome=preserved\nchild_command_exit=0\nwrapper_exit=0\npreflight_sha256=" + meta(root / "authority/preflight-state.snapshot")["sha256"] + "\npostflight_sha256=" + meta(root / "authority/postflight-state.snapshot")["sha256"] + "\nhost_preserved=true\nbenchmark_published=false\nerror=none\ncapture_identifiers=none\ncontrol_root=/private/tmp/lidswitch-envelope.fixture\nexecution_root=/private/tmp/lidswitch-swift.fixture\n").encode()
+        capture_names = ("app-bin-path", "app-build", "helper-bin-path", "helper-build", "helper-identity", "helper-sign", "helper-verify")
+        fixture_captures = {name: f"{index:064x}:{index + 16:064x}" for index, name in enumerate(capture_names, 1)}
+        release_output_path = "/private/tmp/lidswitch-swift.fixture/release-output"
+        receipt_captures = ",".join(name + ":" + fixture_captures[name] for name in capture_names)
+        receipt = ("schema=3\nnonce=fixture-nonce\noutcome=preserved\nchild_command_exit=0\nwrapper_exit=0\npreflight_sha256=" + meta(root / "authority/preflight-state.snapshot")["sha256"] + "\npostflight_sha256=" + meta(root / "authority/postflight-state.snapshot")["sha256"] + "\nhost_preserved=true\nbenchmark_published=false\nerror=none\ncapture_identifiers=" + receipt_captures + "\ncontrol_root=/private/tmp/lidswitch-envelope.fixture\nexecution_root=" + str(Path(release_output_path).parent) + "\n").encode()
         write(root / "authority/live-state-retained.receipt", receipt, 0o400)
         write(root / "authority/live-envelope.json", {"schema": "lidswitch-hosted-live-envelope-v2", "receipt_sha256": meta(root / "authority/live-state-retained.receipt")["sha256"], "preflight_sha256": meta(root / "authority/preflight-state.snapshot")["sha256"], "postflight_sha256": meta(root / "authority/postflight-state.snapshot")["sha256"], "wrapper_exit": 0}, 0o400)
         prepare = {"schema": "lidswitch-hosted-prepare-v2", "authority": str(root / "authority"), "ledger": descriptor(root / "authority/ledger.json", str(root / "authority/hosted-authority-ledger.json")), "entry": descriptor(root / "authority/entry.py", str(root / "authority/hosted-held-entry.py")), "contract": descriptor(root / "authority/contract.json", str(root / "authority/hosted-held-contract.json")), "source_manifest_sha256": meta(root / "source/source_snapshot_manifest.jsonl")["sha256"]}
         write(root / "receipts/prepare.json", prepare, 0o400)
         retained = {name: descriptor(root / relative, str(root / "authority" / name)) for name, relative in {"live-state-retained.receipt": "authority/live-state-retained.receipt", "preflight-state.snapshot": "authority/preflight-state.snapshot", "postflight-state.snapshot": "authority/postflight-state.snapshot", "hosted-live-envelope.json": "authority/live-envelope.json"}.items()}
-        release_output_path = "/private/tmp/lidswitch-swift.fixture/release-output"
         build = {"schema": "lidswitch-hosted-build-v2", "source": authority["source"], "generated": authority["generated"], "ledger": prepare["ledger"], "entry": prepare["entry"], "contract": prepare["contract"], "retained": retained, "release_output": release_output_path}
         write(root / "receipts/build.json", build, 0o400)
         write(root / "release-output/LidSwitch", b"app-binary", 0o555)
@@ -119,7 +122,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         write(root / "release-output/GeneratedReleaseHelperTrustAnchor.generated.swift", b"anchor", 0o444)
         app, helper, anchor = (meta(root / "release-output/LidSwitch"), meta(root / "release-output/LidSwitchHelper"), meta(root / "release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"))
         inputs = {"appSourceSeal": "3" * 64, "baseManifestSHA256": meta(root / "source/source_snapshot_manifest.jsonl")["sha256"], "generatedAnchorSHA256": anchor["sha256"], "helperSourceSeal": "4" * 64, "releaseIdentitySHA256": meta(root / "packaging/LidSwitchReleaseIdentity.json")["sha256"], "trustAnchorTemplateSHA256": "6" * 64}
-        release_receipt = {"schema": "lidswitch-held-release-build-v1", "artifacts": {"app": {"identifier": "com.johnsilva.LidSwitch", "sha256": app["sha256"], "size": app["size"]}, "helper": {"cdhash": "a" * 40, "identifier": "com.johnsilva.lidswitch.helper", "sha256": helper["sha256"], "signature": "adhoc", "size": helper["size"], "teamIdentifier": None, "timestamp": None}}, "build": {"configuration": "release", "network": False, "paidLicenses": [], "releaseCandidateDefine": True, "signing": "manual-ad-hoc", "stages": ["helper", "app"]}, "captures": {name: "7" * 64 + ":" + "8" * 64 for name in ("app-bin-path", "app-build", "helper-bin-path", "helper-build", "helper-identity", "helper-sign", "helper-verify")}, "inputs": inputs, "toolchain": {"componentSealSHA256": "9" * 64, "driverIdentity": "1:swift-frontend", "profileSHA256": "a" * 64, "root": "/Library/Developer/CommandLineTools", "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"}}
+        release_receipt = {"schema": "lidswitch-held-release-build-v1", "artifacts": {"app": {"identifier": "com.johnsilva.LidSwitch", "sha256": app["sha256"], "size": app["size"]}, "helper": {"cdhash": "a" * 40, "identifier": "com.johnsilva.lidswitch.helper", "sha256": helper["sha256"], "signature": "adhoc", "size": helper["size"], "teamIdentifier": None, "timestamp": None}}, "build": {"configuration": "release", "network": False, "paidLicenses": [], "releaseCandidateDefine": True, "signing": "manual-ad-hoc", "stages": ["helper", "app"]}, "captures": fixture_captures, "inputs": inputs, "toolchain": {"componentSealSHA256": "9" * 64, "driverIdentity": "1:swift-frontend", "profileSHA256": "a" * 64, "root": "/Library/Developer/CommandLineTools", "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"}}
         write(root / "release-output/build-receipt.json", release_receipt, 0o444)
         release_leaves = {"GeneratedReleaseHelperTrustAnchor.generated.swift": anchor, "LidSwitch": app, "LidSwitchHelper": helper, "build-receipt.json": meta(root / "release-output/build-receipt.json")}
         seal = digest(b"".join((f"{name}|{release_leaves[name]['size']}|{release_leaves[name]['sha256']}\n").encode("ascii") for name in sorted(release_leaves)))
@@ -172,6 +175,50 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         result = self.verify(root)
         temp.cleanup()
         self.assertNotEqual(result.returncode, 0)
+
+    def rewrite_terminal_receipt(self, root, transform):
+        receipt_path = root / "authority/live-state-retained.receipt"
+        write(receipt_path, transform(receipt_path.read_bytes()), 0o400)
+        live_path = root / "authority/live-envelope.json"
+        live = json.loads(live_path.read_text())
+        live["receipt_sha256"] = meta(receipt_path)["sha256"]
+        write(live_path, live, 0o400)
+        build_path = root / "receipts/build.json"
+        build = json.loads(build_path.read_text())
+        for name, relative in {"live-state-retained.receipt": "authority/live-state-retained.receipt", "hosted-live-envelope.json": "authority/live-envelope.json"}.items():
+            build["retained"][name] = descriptor(root / relative, build["retained"][name]["path"])
+        write(build_path, build, 0o400)
+        ledger_path = root / "evidence-tree.json"
+        ledger = json.loads(ledger_path.read_text())
+        for relative in ("authority/live-state-retained.receipt", "authority/live-envelope.json", "receipts/build.json"):
+            ledger["files"][relative] = meta(root / relative)
+        write(ledger_path, ledger, 0o400)
+
+    def test_terminal_capture_and_execution_bindings_are_rejected_after_reledgering(self):
+        def capture_parts(payload):
+            line = next(line for line in payload.splitlines() if line.startswith(b"capture_identifiers="))
+            return line, line.split(b"=", 1)[1].split(b",")
+        def reorder(payload):
+            line, values = capture_parts(payload); values[0], values[1] = values[1], values[0]
+            return payload.replace(line, b"capture_identifiers=" + b",".join(values))
+        def mismatch(payload):
+            line, values = capture_parts(payload); values[0] = values[0].split(b":", 1)[0] + b":" + values[1].split(b":", 1)[1]
+            return payload.replace(line, b"capture_identifiers=" + b",".join(values))
+        cases = {
+            "error": lambda payload: payload.replace(b"error=none", b"error=not-none"),
+            "none": lambda payload: payload.replace(capture_parts(payload)[0], b"capture_identifiers=none"),
+            "arbitrary": lambda payload: payload.replace(capture_parts(payload)[1][0], b"app-bin-path:" + b"0" * 64 + b":" + b"1" * 64),
+            "order": reorder,
+            "capture-mismatch": mismatch,
+            "execution-root": lambda payload: payload.replace(b"execution_root=/private/tmp/lidswitch-swift.fixture", b"execution_root=/private/tmp/lidswitch-swift.other"),
+        }
+        for label, transform in cases.items():
+            with self.subTest(label=label):
+                temp, root = self.make_fixture()
+                self.rewrite_terminal_receipt(root, transform)
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertNotEqual(result.returncode, 0)
 
     def test_complete_v3_fixture_is_accepted(self):
         temp, root = self.make_fixture(); result = self.verify(root); temp.cleanup(); self.assertEqual(result.returncode, 0, result.stderr)

@@ -396,7 +396,12 @@ def main():
    k,v=line.split("=",1)
    if not k or k in rows: die()
    rows[k]=v
-  if set(rows)!={"schema","nonce","outcome","child_command_exit","wrapper_exit","preflight_sha256","postflight_sha256","host_preserved","benchmark_published","error","capture_identifiers","control_root","execution_root"} or rows.get("schema")!="3" or not rows.get("nonce") or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rows.get("host_preserved")!="true" or rows.get("benchmark_published") not in ("true","false") or rows.get("control_root")!=control or rows.get("execution_root")!=execution or any(len(rows.get(name,""))!=64 or any(ch not in "0123456789abcdef" for ch in rows[name]) for name in ("preflight_sha256","postflight_sha256")) or rc!=0: die()
+  capture_names=("app-bin-path","app-build","helper-bin-path","helper-build","helper-identity","helper-sign","helper-verify")
+  capture_values=rows.get("capture_identifiers","").split(",")
+  if set(rows)!={"schema","nonce","outcome","child_command_exit","wrapper_exit","preflight_sha256","postflight_sha256","host_preserved","benchmark_published","error","capture_identifiers","control_root","execution_root"} or rows.get("schema")!="3" or not rows.get("nonce") or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rows.get("host_preserved")!="true" or rows.get("benchmark_published") not in ("true","false") or rows.get("error")!="none" or rows.get("control_root")!=control or rows.get("execution_root")!=execution or any(len(rows.get(name,""))!=64 or any(ch not in "0123456789abcdef" for ch in rows[name]) for name in ("preflight_sha256","postflight_sha256")) or len(capture_values)!=len(capture_names) or any(not value.startswith(name+":") or len(value)!=len(name)+130 or any(ch not in "0123456789abcdef:" for ch in value[len(name)+1:]) or value[len(name)+65]!=":" for name,value in zip(capture_names,capture_values)) or rc!=0: die()
+  release_raw=read(os.open(os.path.join(execution,"release-output","build-receipt.json"),os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC),262144)
+  release=json.loads(release_raw.decode("utf-8"))
+  if json.dumps(release,sort_keys=True,separators=(",",":")).encode()+b"\\n"!=release_raw or tuple(release.get("captures",{}))!=capture_names or any(capture_values[index]!=name+":"+release["captures"][name] for index,name in enumerate(capture_names)): die()
   def snap(names,want):
    for name in names:
     try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
