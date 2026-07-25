@@ -324,7 +324,7 @@ def main():
    k,v=line.split("=",1)
    if not k or k in rows: die()
    rows[k]=v
-  if rows.get("schema")!="3" or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rc!=0: die()
+  if rows.get("schema")!="3" or rows.get("terminal")!="idle-uninstalled" or rows.get("kernel")!="25E246" or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rc!=0: die()
   def snap(names,want):
    for name in names:
     try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
@@ -509,9 +509,15 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
 
 def _copy_verified(source: Path, relative: str, expected: dict[str, object], target: Path) -> None:
     """Copy a descriptor-verified source leaf into private held packaging."""
-    if descriptor(source / relative, maximum=256 * 1024 * 1024) != expected:
-        deny("packaging-role-drift: " + relative)
-    data = (source / relative).read_bytes()
+    fd = os.open(source / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        data = read_fd(fd, 256 * 1024 * 1024)
+        actual = {"path": relative, "dev": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "nlink": info.st_nlink, "size": info.st_size, "sha256": sha256(data)}
+        if actual != expected:
+            deny("packaging-role-drift: " + relative)
+    finally:
+        os.close(fd)
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o500)
     try:
@@ -525,7 +531,13 @@ def _copy_verified(source: Path, relative: str, expected: dict[str, object], tar
 
 def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
     prepared = prepare_recheck(source, authority, policy_path)
-    contract = json.loads((authority / "hosted-held-contract.json").read_text("utf-8"))
+    contract_path = authority / "hosted-held-contract.json"
+    if descriptor(contract_path) != prepared["ledger"]["generated"]["contract"]:
+        deny("packaging-contract-authority-drift")
+    raw_contract = contract_path.read_bytes()
+    contract = json.loads(raw_contract.decode("utf-8"))
+    if canonical(contract) != raw_contract or contract.get("source_manifest") != prepared["ledger"]["source"]["manifest_descriptor"]["sha256"]:
+        deny("packaging-contract-invalid")
     held = package_parent / "held-packaging"
     if held.exists() or held.is_symlink() or package_parent.is_symlink():
         deny("unsafe-held-packaging-root")

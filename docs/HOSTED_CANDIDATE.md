@@ -10,17 +10,23 @@ The workflow is manual only, has `contents: read`, uses no repository secrets
 or caches, and fails before authority creation unless the runner is arm64,
 `kern.osversion` is `25E246`, `ImageVersion` is `20260720.0258.1`, and the
 Command Line Tools / macOS SDK locations match the reviewed policy.  The only
-release build invocation is the descriptor-held wrapper whose source-manifest
-digest is `7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260`.
+release build invocation is the descriptor-held wrapper whose byte digest is
+`7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260`.
+The independently checked source-manifest byte digest is
+`fae6f7abdd354b97fd7886f2d506d293433e904040db61e14b255b731fc1cbfb`.
 
 The workflow uses only full-SHA official actions:
 
 - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0` (v7.0.0)
 - `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02` (v4.6.2)
 
-`workflow_dispatch` is evaluated from the repository default branch.  Review
-and merge the orchestration revision before dispatching it; do not bootstrap a
-candidate by executing orchestration bytes from the candidate checkout.
+Two-phase governance is mandatory. First merge this manual-only workflow to
+`main`; then independently review the exact resulting 40-hex main commit SHA.
+Dispatch with `--ref main` and that SHA as `reviewed_orchestration_sha`. The
+run rejects a non-main ref, another repository, a mismatched head/input, or a
+non-clean orchestration checkout. This feature branch is not dispatchable.
+The wrapper SHA-256 is `7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260`;
+the source-manifest SHA-256 is `fae6f7abdd354b97fd7886f2d506d293433e904040db61e14b255b731fc1cbfb`.
 
 It uploads exactly one evidence tree.  That tree contains the source identity
 and manifest, runner policy/context, system/role descriptors, generated held
