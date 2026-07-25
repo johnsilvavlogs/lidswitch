@@ -46,7 +46,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         write(root/"release-output/build-receipt.json",{"artifacts":{"app":{"sha256":app["sha256"]},"helper":{"sha256":helper["sha256"]}}})
         release={"build_receipt_sha256":meta(root/"release-output/build-receipt.json")["sha256"],"anchor_sha256":anchor["sha256"],"app":{"sha256":app["sha256"],"size":app["size"]},"helper":{"sha256":helper["sha256"],"size":helper["size"],"cdhash":"0"*40}}
         write(root/"package/build-envelope.json",{"schema_version":"lidswitch-verified-envelope-rev19","source_commit":"c","wrapper_sha256":"w","release_output":release}); env=meta(root/"package/build-envelope.json")
-        manifest={"schema_version":"lidswitch-immutable-candidate-v3","source":{"commit":"c"},"envelope":{"sha256":env["sha256"]}}; write(root/"candidate/candidate-manifest.json",manifest); write(root/"candidate/package-manifest.json",manifest)
+        manifest={"schema_version":"lidswitch-immutable-candidate-v3","source":{"commit":"c"},"envelope":{"receipt_sha256":env["sha256"]}}; write(root/"candidate/candidate-manifest.json",manifest); write(root/"candidate/package-manifest.json",manifest)
         write(root/"candidate/LidSwitch.dmg.sha256",meta(root/"candidate/LidSwitch.dmg")["sha256"]+"  LidSwitch.dmg\n")
         write(root/"receipts/prepare.json",{"ledger":{"sha256":authority_meta["sha256"]}})
         retained={n:meta(root/"authority"/("live-envelope.json" if n=="hosted-live-envelope.json" else n)) for n in ("live-state-retained.receipt","preflight-state.snapshot","postflight-state.snapshot","hosted-live-envelope.json")}; write(root/"receipts/build.json",{"ledger":{"sha256":authority_meta["sha256"]},"retained":retained})
