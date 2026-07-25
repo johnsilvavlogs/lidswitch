@@ -482,7 +482,7 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
     try:
         bash = descriptor(Path("/bin/bash"), system=True, maximum=16 * 1024 * 1024)
         python = descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024)
-        swift = descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=128 * 1024 * 1024)
+        swift = descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=512 * 1024 * 1024)
         sdk = checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
     except Denied as error:
         deny("prepare-system-toolchain:" + str(error))
@@ -593,7 +593,7 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
         deny("bash-drift-before-build")
     if descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024) != ledger["system"]["python"]:
         deny("python-drift-before-build")
-    if descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=128 * 1024 * 1024) != ledger["system"]["swift_frontend"]:
+    if descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=512 * 1024 * 1024) != ledger["system"]["swift_frontend"]:
         deny("swift-frontend-drift-before-build")
     if checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")) != ledger["system"]["sdk_root"]:
         deny("sdk-root-drift-before-build")
