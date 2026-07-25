@@ -368,7 +368,14 @@ def main() -> int:
     descriptor(system["python"], path="/usr/bin/python3", label="authority python")
     descriptor(system["bash"], path="/bin/bash", label="authority bash")
     swift = descriptor(system["swift_frontend"], path="/Library/Developer/CommandLineTools/usr/bin/swift-frontend", label="authority swift")
-    deny(exact(system["sdk_root"], ("dev", "gid", "inode", "mode", "nlink", "uid"), "authority sdk root")["nlink"] >= 2 and system["developer_dir"] == policy["toolchain"]["developer_dir"], "authority toolchain mismatch")
+    sdk = exact(system["sdk_root"], ("parent", "selector", "target"), "authority sdk root")
+    sdk_parent = exact(sdk["parent"], ("dev", "gid", "inode", "mode", "nlink", "path", "uid"), "authority sdk parent")
+    sdk_selector = exact(sdk["selector"], ("dev", "gid", "inode", "mode", "nlink", "path", "size", "target", "type", "uid"), "authority sdk selector")
+    sdk_target = exact(sdk["target"], ("dev", "gid", "inode", "mode", "nlink", "path", "uid"), "authority sdk target")
+    deny(sdk_parent["path"] == "/Library/Developer/CommandLineTools/SDKs" and sdk_parent["uid"] == 0 and sdk_parent["gid"] == 0 and sdk_parent["nlink"] >= 2 and not sdk_parent["mode"] & 0o022, "authority sdk parent mismatch")
+    deny(sdk_selector["path"] == sdk_parent["path"] + "/MacOSX.sdk" and sdk_selector["uid"] == 0 and sdk_selector["gid"] == 0 and isinstance(sdk_selector["mode"], int) and 0 <= sdk_selector["mode"] <= 0o777 and sdk_selector["nlink"] == 1 and sdk_selector["size"] > 0 and sdk_selector["type"] == "symlink", "authority sdk selector mismatch")
+    deny(isinstance(sdk_selector["target"], str) and sdk_selector["target"] not in {"", ".", ".."} and "/" not in sdk_selector["target"] and sdk_target["path"] == sdk_parent["path"] + "/" + sdk_selector["target"], "authority sdk selector target mismatch")
+    deny(sdk_target["uid"] == 0 and sdk_target["gid"] == 0 and sdk_target["nlink"] >= 2 and not sdk_target["mode"] & 0o022 and system["developer_dir"] == policy["toolchain"]["developer_dir"], "authority toolchain mismatch")
 
     prepare = load(root / "receipts/prepare.json")
     build = load(root / "receipts/build.json")
@@ -424,6 +431,7 @@ def main() -> int:
     release = exact(envelope["release_output"], ("anchor_sha256", "anchor_size", "app", "build_receipt_sha256", "helper", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"), "release output")
     release_receipt = load(root / "release-output/build-receipt.json")
     check_release_receipt(release_receipt, files)
+    deny(release_receipt["toolchain"]["sdk"] == sdk_target["path"], "release SDK authority binding mismatch")
     build_release_output = release_output_path(build["release_output"], "build release output")
     deny(context_release_output == build_release_output and Path(fields["execution_root"]) == build_release_output.parent and terminal_captures == release_receipt["captures"] and release["build_receipt_sha256"] == files["release-output/build-receipt.json"]["sha256"] and release["anchor_sha256"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["sha256"] and release["anchor_size"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["size"] and release["source_manifest_sha256"] == policy["source_manifest_sha256"] and release["app"] == release_receipt["artifacts"]["app"] and release["helper"] == release_receipt["artifacts"]["helper"] and release["release_identity_sha256"] == release_receipt["inputs"]["releaseIdentitySHA256"] == release_identity["sha256"] == files["packaging/LidSwitchReleaseIdentity.json"]["sha256"] and release["seal_sha256"] == release_output_seal(files), "release output binding mismatch")
     for key in ("anchor_sha256", "build_receipt_sha256", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"):
