@@ -34,6 +34,11 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn(payload, self.workflow)
         self.assertIn('case "$REVIEWED_ORCHESTRATION_SHA"', self.workflow)
 
+    def test_official_checkout_origin_without_dot_git_is_allowed(self):
+        self.assertIn('"https://github.com/${GITHUB_REPOSITORY}"', self.workflow)
+        self.assertIn('"https://github.com/${GITHUB_REPOSITORY}.git"', self.workflow)
+        self.assertIn('"git@github.com:${GITHUB_REPOSITORY}.git"', self.workflow)
+
     def test_build_requires_prepare_bound_expected_values(self):
         for name in ("ledger", "entry", "contract"):
             self.assertIn('"--expected-" + role + "-sha256"', self.bootstrap)

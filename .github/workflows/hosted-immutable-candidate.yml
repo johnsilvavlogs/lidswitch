@@ -56,7 +56,7 @@ jobs:
           test "$(/usr/bin/git rev-parse HEAD)" = "${GITHUB_SHA:?}"
           test "$(/usr/bin/git show -s --format=%T "$GITHUB_SHA")" = "$(/usr/bin/git rev-parse HEAD^{tree})"
           origin=$(/usr/bin/git config --get remote.origin.url)
-          test "$origin" = "https://github.com/${GITHUB_REPOSITORY}.git" -o "$origin" = "git@github.com:${GITHUB_REPOSITORY}.git"
+          test "$origin" = "https://github.com/${GITHUB_REPOSITORY}" -o "$origin" = "https://github.com/${GITHUB_REPOSITORY}.git" -o "$origin" = "git@github.com:${GITHUB_REPOSITORY}.git"
           test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
           test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 9de76caa1062bf0dc162287cb092cc4f3f3074b0774ea77dd9d7ad0bd5f1eb92
           test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = cadfbe8f227900cdc505f256729d73f6269e4b946717609feeb3c1420fc1012c
