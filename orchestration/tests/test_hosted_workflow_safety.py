@@ -19,6 +19,10 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertIn("DEVELOPER_DIR=/Library/Developer/CommandLineTools", self.workflow)
         self.assertNotIn("xcode-select -p", self.workflow)
 
+    def test_swift_frontend_bound_covers_current_clt_without_becoming_unbounded(self):
+        self.assertIn('maximum=512 * 1024 * 1024', self.bootstrap)
+        self.assertNotIn('maximum=128 * 1024 * 1024', self.bootstrap)
+
     def test_dispatch_is_fenced_to_reviewed_main_identity(self):
         for token in ("reviewed_orchestration_sha", "GITHUB_REPOSITORY", "johnsilvavlogs/lidswitch", "GITHUB_REF", "refs/heads/main", "GITHUB_SHA"):
             self.assertIn(token, self.workflow)
