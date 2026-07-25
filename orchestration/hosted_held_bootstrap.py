@@ -30,6 +30,7 @@ SOURCE_COMMIT = "6200836869591acb4bf65edb825eb62e84b56f87"
 SOURCE_TREE = "d86650eccfe3326fc968fc855a07a1e3d06aaf57"
 WRAPPER_SHA256 = "7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260"
 WRAPPER_PATH = "script/run_swift_build_safely.sh"
+REVIEWED_IMAGES = ["20260715.0248.1", "20260720.0258.1"]
 ROLES = {
     "wrapper": (30, WRAPPER_PATH),
     "common": (31, "script/swift_sandbox_common.sh"),
@@ -491,8 +492,14 @@ if __name__=="__main__":
 def policy(path: Path) -> dict[str, object]:
     raw = descriptor(path, maximum=1024 * 1024)
     value = json.loads(Path(path).read_text("utf-8"))
-    if canonical(value) != Path(path).read_bytes() or value.get("schema") != "lidswitch-hosted-runner-policy-v1":
+    if canonical(value) != Path(path).read_bytes() or set(value) != {"runner", "schema", "source", "source_manifest_sha256", "toolchain"} or value.get("schema") != "lidswitch-hosted-runner-policy-v2":
         deny("invalid-hosted-policy")
+    runner = value.get("runner")
+    toolchain = value.get("toolchain")
+    if runner != {"architecture": "arm64", "image_versions": REVIEWED_IMAGES, "kernel": "25E246", "label": "macos-26"}:
+        deny("policy-runner-binding-mismatch")
+    if toolchain != {"developer_dir": "/Library/Developer/CommandLineTools", "sdk_name": "macosx", "swift_driver": "/Library/Developer/CommandLineTools/usr/bin/swift"}:
+        deny("policy-toolchain-binding-mismatch")
     source = value.get("source")
     if source != {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "wrapper_sha256": WRAPPER_SHA256}:
         deny("policy-source-binding-mismatch")

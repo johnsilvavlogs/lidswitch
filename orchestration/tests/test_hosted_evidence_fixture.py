@@ -76,7 +76,7 @@ def core_module(payload):
 
 
 class HostedEvidenceFixtureTests(unittest.TestCase):
-    def make_fixture(self):
+    def make_fixture(self, image_version=None):
         required = sorted(__import__("runpy").run_path(str(VERIFY))["REQUIRED"])
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name)
@@ -166,7 +166,8 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         package_leaf = lambda role, name: {"role": role, "name": name, "sha256": meta(root / "candidate" / name)["sha256"], "size": meta(root / "candidate" / name)["size"], "mode": meta(root / "candidate" / name)["mode"], "uid": 1, "gid": 1, "tree_sha256": meta(root / "candidate" / name)["sha256"], "signature_receipt": "0" * 64}
         package = dict(candidate); package["candidate_id"] = "0" * 64; package["phase"] = "package-captured"; package["package"] = {"dmg": package_leaf("package", "LidSwitch.dmg"), "checksum": package_leaf("checksum", "LidSwitch.dmg.sha256"), "extraction_receipt": "0" * 64, "extracted_tree_sha256": app_artifact["tree_sha256"]}; package["receipts"] = receipts(package, 9); package["helper"]["signature_receipt"] = package["receipts"][0]["sha256"]; package["app"]["signature_receipt"] = package["receipts"][3]["sha256"]; package["package"]["extraction_receipt"] = package["receipts"][8]["sha256"]; package["candidate_id"] = digest(core.canonical({key: value for key, value in package.items() if key != "candidate_id"}))
         write(root / "candidate/candidate-manifest.json", candidate, 0o600); write(root / "candidate/package-manifest.json", package, 0o600)
-        context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": "d86650eccfe3326fc968fc855a07a1e3d06aaf57", "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": json.loads((root / "orchestration/policy.json").read_text())["runner"]["image_version"], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
+        policy_images = json.loads((root / "orchestration/policy.json").read_text())["runner"]["image_versions"]
+        context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": "d86650eccfe3326fc968fc855a07a1e3d06aaf57", "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": image_version or policy_images[0], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
         write(root / "workflow-context.json", context, 0o400)
         files = {relative: meta(root / relative) for relative in required}
         write(root / "evidence-tree.json", {"schema": "lidswitch-hosted-evidence-v2", "files": files, "inventory": sorted(files), "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}, 0o400)
@@ -238,6 +239,16 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
 
     def test_complete_v3_fixture_is_accepted(self):
         temp, root = self.make_fixture(); result = self.verify(root); temp.cleanup(); self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_each_exact_reviewed_image_fixture_is_accepted(self):
+        for image_version in ("20260715.0248.1", "20260720.0258.1"):
+            with self.subTest(image_version=image_version):
+                temp, root = self.make_fixture(image_version); result = self.verify(root); temp.cleanup(); self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unknown_image_context_is_rejected_after_reledgering(self):
+        for image_version in ("20260720.0258.1-extra", "prefix-20260715.0248.1", "20260721.0000.1"):
+            with self.subTest(image_version=image_version):
+                self.assert_denied_mutation("workflow-context.json", lambda value, image_version=image_version: value.update(image_version=image_version))
 
     def test_reledgered_sdk_authority_mismatch_is_rejected(self):
         temp, root = self.make_fixture()
