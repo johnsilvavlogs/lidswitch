@@ -12,6 +12,7 @@ only permitted release build wrapper through descriptor number 30.
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import hashlib
 import json
@@ -55,6 +56,58 @@ FD_MAP = {name: fd for name, (fd, _path) in ROLES.items()} | {
     "terminal_pipe": 40, "startup_gate": 41,
 }
 NAME = re.compile(r"[A-Za-z0-9._+-]{1,128}\Z")
+PACKAGING_SCRIPTS = {
+    "capture_package": "capture_immutable_build_envelope.py",
+    "assemble_package": "assemble_manual_adhoc_candidate.py",
+    "candidate_core": "immutable_candidate_core.py",
+    "build_manifest": "build_immutable_candidate.py",
+    "package_manifest": "package_immutable_candidate.py",
+    "validate_candidate": "validate_immutable_candidate.py",
+    "validate_dmg": "validate_immutable_dmg.py",
+    "source_manifest": "source_snapshot_manifest.jsonl",
+    "wrapper": "run_swift_build_safely.sh",
+}
+PACKAGING_RESOURCES = {
+    "release_identity": "LidSwitchReleaseIdentity.json",
+    "icon": "LidSwitch.icns",
+}
+PACKAGING_ENTRYPOINTS = {
+    "capture_immutable_build_envelope.py",
+    "assemble_manual_adhoc_candidate.py",
+    "run_swift_build_safely.sh",
+}
+PACKAGING_ENV = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+    "DEVELOPER_DIR": "/Library/Developer/CommandLineTools",
+}
+# The child starts in / and does not inherit PYTHONPATH.  This small launcher
+# installs only the sealed script directory and checks that every local module
+# imported by the packaging programs came from that directory.  The packaging
+# boundary is a bounded fresh-runner, same-UID threat model: inventories detect
+# pre/post-spawn replacement, not an adversary able to replace a leaf after the
+# final check while CPython is already importing it by pathname.
+PACKAGING_PYTHON_BOOTSTRAP = r'''import json, os, runpy, sys
+entry, script_root, allowed_json = sys.argv[1:4]
+allowed = set(json.loads(allowed_json))
+script_root = os.path.realpath(script_root)
+if os.getcwd() != "/" or not os.path.isabs(entry) or os.path.dirname(os.path.realpath(entry)) != script_root:
+    raise SystemExit(74)
+sys.path[:] = [script_root]
+exit_code = 0
+try:
+    runpy.run_path(entry, run_name="__main__")
+except SystemExit as error:
+    exit_code = error.code if isinstance(error.code, int) else (0 if error.code is None else 1)
+for module_name in allowed:
+    module = sys.modules.get(module_name)
+    if module is None:
+        continue
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, str) or os.path.dirname(os.path.realpath(module_file)) != script_root:
+        raise SystemExit(74)
+raise SystemExit(exit_code)
+'''
 
 
 class Denied(RuntimeError):
@@ -489,6 +542,10 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
         deny("invalid-authority-ledger")
     if ledger.get("source", {}).get("commit") != SOURCE_COMMIT or ledger.get("source", {}).get("tree") != SOURCE_TREE:
         deny("authority-source-binding-mismatch")
+    if checked_directory(source) != ledger["source"]["root"]:
+        deny("source-root-replacement-before-build")
+    if checked_directory(authority) != ledger["generated"]["root"]:
+        deny("authority-root-replacement-before-build")
     if git(source, "rev-parse", "HEAD").strip() != SOURCE_COMMIT or git(source, "rev-parse", "HEAD^{tree}").strip() != SOURCE_TREE:
         deny("source-drift-before-build")
     if git(source, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -507,9 +564,55 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
     return {"ledger": ledger}
 
 
-def _copy_verified(source: Path, relative: str, expected: dict[str, object], target: Path) -> None:
-    """Copy a descriptor-verified source leaf into private held packaging."""
-    fd = os.open(source / relative, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+def _open_child_directory(parent_fd: int, name: str) -> int:
+    if NAME.fullmatch(name) is None or name.startswith("."):
+        deny("unsafe-held-packaging-directory-name")
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        os.close(fd)
+        deny("unsafe-held-packaging-directory")
+    return fd
+
+
+def _mkdir_once(parent_fd: int, name: str, mode: int) -> int:
+    if NAME.fullmatch(name) is None or name.startswith("."):
+        deny("unsafe-held-packaging-directory-name")
+    os.mkdir(name, mode, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+    return _open_child_directory(parent_fd, name)
+
+
+def _open_relative_leaf(root_fd: int, relative: str) -> int:
+    parts = relative.split("/")
+    if not parts or any(NAME.fullmatch(part) is None or part.startswith(".") for part in parts):
+        deny("unsafe-packaging-source-path")
+    parent_fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            next_fd = _open_child_directory(parent_fd, part)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        return os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _write_once(parent_fd: int, name: str, data: bytes, mode: int) -> None:
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=parent_fd)
+    try:
+        offset = 0
+        while offset < len(data):
+            offset += os.write(fd, data[offset:])
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.fsync(parent_fd)
+
+
+def _copy_verified(source_root_fd: int, relative: str, expected: dict[str, object], target_parent_fd: int, target_name: str, target_mode: int) -> None:
+    """Verify and copy from one source descriptor; never reopen it by path."""
+    fd = _open_relative_leaf(source_root_fd, relative)
     try:
         info = os.fstat(fd)
         data = read_fd(fd, 256 * 1024 * 1024)
@@ -518,15 +621,33 @@ def _copy_verified(source: Path, relative: str, expected: dict[str, object], tar
             deny("packaging-role-drift: " + relative)
     finally:
         os.close(fd)
-    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o500)
+    _write_once(target_parent_fd, target_name, data, target_mode)
+
+
+def _private_directory_record(fd: int, *, mode: int) -> dict[str, object]:
+    info = os.fstat(fd)
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_gid != os.getgid() or
+            stat.S_IMODE(info.st_mode) != mode or info.st_mode & 0o022 or info.st_nlink < 2):
+        deny("unsafe-held-packaging-directory")
+    return {"dev": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "gid": info.st_gid,
+            "mode": stat.S_IMODE(info.st_mode), "nlink": info.st_nlink, "size": info.st_size}
+
+
+def _private_leaf_record(parent_fd: int, name: str, *, mode: int) -> dict[str, object]:
+    if NAME.fullmatch(name) is None or name.startswith("."):
+        deny("unsafe-held-packaging-leaf-name")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
     try:
-        os.write(fd, data)
-        os.fsync(fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_gid != os.getgid() or
+                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != mode or info.st_mode & 0o022):
+            deny("unsafe-held-packaging-leaf")
+        data = read_fd(fd, 256 * 1024 * 1024)
+        return {"dev": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode), "nlink": info.st_nlink, "size": info.st_size,
+                "sha256": sha256(data)}
     finally:
         os.close(fd)
-    if descriptor(target, maximum=256 * 1024 * 1024)["sha256"] != expected["sha256"]:
-        deny("held-packaging-copy-drift: " + relative)
 
 
 def _read_authority_descriptor(path: Path, expected: dict[str, object]) -> bytes:
@@ -542,29 +663,79 @@ def _read_authority_descriptor(path: Path, expected: dict[str, object]) -> bytes
         os.close(fd)
 
 
-def _sealed_package_closure(root: Path, names: dict[str, str]) -> dict[str, dict[str, object]]:
-    """Return the complete, exact import closure from its sealed private root.
-
-    The reviewed programs compute their sibling imports from ``__file__``. A
-    descriptor-only ``/dev/fd`` execution would deliberately break that
-    invariant, so this is the equivalent sealed-directory authority: exact
-    inventory, descriptor metadata and bytes are revalidated immediately
-    before and after each Python spawn, with PYTHONPATH limited to this root.
-    """
-    expected_scripts = set(names.values())
-    if set(os.listdir(root)) != {"script", "Resources"} or set(os.listdir(root / "script")) != expected_scripts or set(os.listdir(root / "Resources")) != {"LidSwitchReleaseIdentity.json", "LidSwitch.icns"}:
+def _exact_inventory(directory_fd: int, expected: set[str]) -> None:
+    observed = os.listdir(directory_fd)
+    if any(name.startswith(".") or NAME.fullmatch(name) is None for name in observed) or set(observed) != expected:
         deny("held-packaging-inventory-drift")
-    records: dict[str, dict[str, object]] = {}
-    for name in sorted(expected_scripts):
-        records["script/" + name] = descriptor(root / "script" / name, maximum=256 * 1024 * 1024)
-    for name in ("LidSwitchReleaseIdentity.json", "LidSwitch.icns"):
-        records["Resources/" + name] = descriptor(root / "Resources" / name, maximum=256 * 1024 * 1024)
-    return records
 
 
-def _require_sealed_package_closure(root: Path, names: dict[str, str], expected: dict[str, dict[str, object]]) -> None:
+def _sealed_package_closure(root: Path, names: dict[str, str] = PACKAGING_SCRIPTS) -> dict[str, dict[str, dict[str, object]]]:
+    """Return complete held-root, directory, and leaf closure metadata.
+
+    Every path below ``root`` is opened relative to a retained no-follow
+    directory descriptor.  The result deliberately includes directories,
+    leaves, ownership, modes, link counts, sizes, and content hashes so a
+    pre/post child check catches any observable closure replacement.
+    """
+    if set(names) != set(PACKAGING_SCRIPTS) or names != PACKAGING_SCRIPTS:
+        deny("held-packaging-role-inventory-drift")
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        root_record = _private_directory_record(root_fd, mode=0o500)
+        _exact_inventory(root_fd, {"script", "Resources"})
+        script_fd = _open_child_directory(root_fd, "script")
+        resources_fd = _open_child_directory(root_fd, "Resources")
+        try:
+            script_record = _private_directory_record(script_fd, mode=0o500)
+            resources_record = _private_directory_record(resources_fd, mode=0o500)
+            _exact_inventory(script_fd, set(PACKAGING_SCRIPTS.values()))
+            _exact_inventory(resources_fd, set(PACKAGING_RESOURCES.values()))
+            leaves: dict[str, dict[str, object]] = {}
+            for name in sorted(PACKAGING_SCRIPTS.values()):
+                leaves["script/" + name] = _private_leaf_record(
+                    script_fd, name, mode=0o500 if name in PACKAGING_ENTRYPOINTS else 0o400)
+            for name in sorted(PACKAGING_RESOURCES.values()):
+                leaves["Resources/" + name] = _private_leaf_record(resources_fd, name, mode=0o400)
+            return {"directories": {"root": root_record, "script": script_record, "Resources": resources_record},
+                    "leaves": leaves}
+        finally:
+            os.close(resources_fd)
+            os.close(script_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _require_sealed_package_closure(root: Path, names: dict[str, str], expected: dict[str, dict[str, dict[str, object]]]) -> None:
     if _sealed_package_closure(root, names) != expected:
         deny("held-packaging-closure-drift")
+
+
+def _audit_packaging_modules(root: Path) -> list[str]:
+    """Reject a local import that is outside the held script closure."""
+    allowed = {name[:-3] for name in PACKAGING_SCRIPTS.values() if name.endswith(".py")}
+    observed: set[str] = set()
+    for filename in allowed:
+        source = (root / "script" / (filename + ".py")).read_text("utf-8")
+        for node in ast.walk(ast.parse(source, filename=filename)):
+            module = None
+            if isinstance(node, ast.Import):
+                for item in node.names:
+                    module = item.name.split(".", 1)[0]
+                    if module in allowed:
+                        observed.add(module)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                module = node.module.split(".", 1)[0]
+                if module in allowed:
+                    observed.add(module)
+    return sorted(observed)
+
+
+def _run_sealed_packaging(entry: Path, held: Path, allowed_modules: list[str], arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["/usr/bin/python3", "-I", "-S", "-B", "-c", PACKAGING_PYTHON_BOOTSTRAP,
+         str(entry), str(held / "script"), json.dumps(allowed_modules, sort_keys=True), *arguments],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=PACKAGING_ENV, cwd="/", check=False)
 
 
 def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
@@ -577,29 +748,51 @@ def package(source: Path, authority: Path, policy_path: Path, release_output: Pa
     held = package_parent / "held-packaging"
     if held.exists() or held.is_symlink() or package_parent.is_symlink():
         deny("unsafe-held-packaging-root")
-    held.mkdir(mode=0o700)
-    names = {"capture_package": "capture_immutable_build_envelope.py", "assemble_package": "assemble_manual_adhoc_candidate.py", "candidate_core": "immutable_candidate_core.py", "build_manifest": "build_immutable_candidate.py", "package_manifest": "package_immutable_candidate.py", "validate_candidate": "validate_immutable_candidate.py", "validate_dmg": "validate_immutable_dmg.py", "source_manifest": "source_snapshot_manifest.jsonl", "wrapper": "run_swift_build_safely.sh"}
-    for role, name in names.items():
-        _copy_verified(source, contract["roles"][role]["path"], contract["roles"][role], held / "script" / name)
-    for role, name in (("release_identity", "LidSwitchReleaseIdentity.json"), ("icon", "LidSwitch.icns")):
-        _copy_verified(source, contract["roles"][role]["path"], contract["roles"][role], held / "Resources" / name)
+    package_parent_fd = os.open(package_parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        held_fd = _mkdir_once(package_parent_fd, "held-packaging", 0o700)
+        try:
+            script_fd = _mkdir_once(held_fd, "script", 0o700)
+            resources_fd = _mkdir_once(held_fd, "Resources", 0o700)
+            try:
+                for role, name in PACKAGING_SCRIPTS.items():
+                    _copy_verified(source_fd, contract["roles"][role]["path"], contract["roles"][role], script_fd, name,
+                                   0o500 if name in PACKAGING_ENTRYPOINTS else 0o400)
+                for role, name in PACKAGING_RESOURCES.items():
+                    _copy_verified(source_fd, contract["roles"][role]["path"], contract["roles"][role], resources_fd, name, 0o400)
+                os.fchmod(script_fd, 0o500)
+                os.fchmod(resources_fd, 0o500)
+                os.fsync(script_fd)
+                os.fsync(resources_fd)
+            finally:
+                os.close(resources_fd)
+                os.close(script_fd)
+            os.fchmod(held_fd, 0o500)
+            os.fsync(held_fd)
+        finally:
+            os.close(held_fd)
+    finally:
+        os.close(source_fd)
+        os.close(package_parent_fd)
+    names = PACKAGING_SCRIPTS
+    allowed_modules = _audit_packaging_modules(held)
     closure = _sealed_package_closure(held, names)
     envelope = package_parent / "build-envelope.json"
     command = ["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/capture_immutable_build_envelope.py"), "--source-commit", SOURCE_COMMIT, "--source-manifest", str(held / "script/source_snapshot_manifest.jsonl"), "--held-build-wrapper", str(held / "script/run_swift_build_safely.sh"), "--swift", "/Library/Developer/CommandLineTools/usr/bin/swift", "--release-output", str(release_output), "--output", str(envelope)]
-    package_env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "PYTHONPATH": str(held / "script")}
     _require_sealed_package_closure(held, names, closure)
-    first = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=package_env, check=False)
+    first = _run_sealed_packaging(held / "script/capture_immutable_build_envelope.py", held, allowed_modules, command[5:])
     if first.returncode:
         sys.stderr.write(first.stderr); deny("held-packaging-capture-failed")
     _require_sealed_package_closure(held, names, closure)
     candidate = package_parent / "candidate"
     _require_sealed_package_closure(held, names, closure)
-    second = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/assemble_manual_adhoc_candidate.py"), "--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--icon", str(held / "Resources/LidSwitch.icns"), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=package_env, check=False)
+    second = _run_sealed_packaging(held / "script/assemble_manual_adhoc_candidate.py", held, allowed_modules, ["--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--icon", str(held / "Resources/LidSwitch.icns"), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")])
     if second.returncode:
         sys.stderr.write(second.stderr); deny("held-packaging-assemble-failed")
     _require_sealed_package_closure(held, names, closure)
     prepare_recheck(source, authority, policy_path)
-    return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate), "envelope": descriptor(envelope), "held_packaging": {name: descriptor(held / "script" / name) for name in names.values()}}
+    return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate), "envelope": descriptor(envelope), "held_packaging": closure}
 
 
 def main(argv: list[str] | None = None) -> int:
