@@ -44,6 +44,10 @@ def directory_descriptor():
     return {"dev": 1, "inode": 1, "uid": 1, "gid": 1, "mode": 0o755, "nlink": 2}
 
 
+def authority_root_descriptor():
+    return {"dev": 1, "inode": 1, "uid": 1, "gid": 1, "mode": 0o700}
+
+
 def system_descriptor(path, sha256):
     return {"path": path, "dev": 1, "inode": 1, "uid": 0, "gid": 0, "mode": 0o555,
             "nlink": 1, "size": 1, "sha256": sha256}
@@ -112,7 +116,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
                                 "manifest_descriptor": descriptor(root / "source/source_snapshot_manifest.jsonl", str(root / "source/script/source_snapshot_manifest.jsonl"))},
                      "system": {"python": system_descriptor("/usr/bin/python3", "1" * 64), "bash": system_descriptor("/bin/bash", "2" * 64), "swift_frontend": system_descriptor("/Library/Developer/CommandLineTools/usr/bin/swift-frontend", "c" * 64), "sdk_root": sdk_descriptor(), "developer_dir": "/Library/Developer/CommandLineTools"},
                      "wrapper_sha256": roles["wrapper"]["sha256"],
-                     "generated": {"entry": descriptor(root / "authority/entry.py", str(root / "authority/hosted-held-entry.py")), "contract": descriptor(root / "authority/contract.json", str(root / "authority/hosted-held-contract.json")), "root": directory_descriptor()}}
+                     "generated": {"entry": descriptor(root / "authority/entry.py", str(root / "authority/hosted-held-entry.py")), "contract": descriptor(root / "authority/contract.json", str(root / "authority/hosted-held-contract.json")), "root": authority_root_descriptor()}}
         write(root / "authority/ledger.json", authority, 0o400)
         authority_meta = meta(root / "authority/ledger.json")
         pre = b"host_class=idle-uninstalled\nkernel_build=25E246\n"

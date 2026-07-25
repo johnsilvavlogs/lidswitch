@@ -348,6 +348,8 @@ def main() -> int:
     deny(manifest_path.is_absolute() and manifest_path.name == "source_snapshot_manifest.jsonl" and manifest_path.parent.name == "script", "source manifest path mismatch")
     source_root = manifest_path.parent.parent
     generated = exact(authority["generated"], ("contract", "entry", "root"), "authority generated")
+    generated_root = exact(generated["root"], ("dev", "gid", "inode", "mode", "uid"), "authority generated root")
+    deny(all(isinstance(generated_root[key], int) and generated_root[key] >= 0 for key in ("dev", "gid", "inode", "uid")) and generated_root["inode"] > 0 and generated_root["mode"] == 0o700, "authority generated root mismatch")
     generated_entry = descriptor_matches(generated["entry"], files["authority/entry.py"], "authority entry")
     generated_contract = descriptor_matches(generated["contract"], files["authority/contract.json"], "authority contract")
     contract = load(root / "authority/contract.json")
