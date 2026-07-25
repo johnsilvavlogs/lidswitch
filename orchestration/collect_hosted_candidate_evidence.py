@@ -87,6 +87,10 @@ def main() -> int:
     ]
     for relative in ("capture_immutable_build_envelope.py", "assemble_manual_adhoc_candidate.py", "immutable_candidate_core.py", "build_immutable_candidate.py", "package_immutable_candidate.py", "validate_immutable_candidate.py", "validate_immutable_dmg.py"):
         wanted.append((args.package_parent / "held-packaging/script" / relative, "packaging/" + relative))
+    # The release identity is consumed by the held assembler.  Retain its
+    # exact copied leaf so the verifier can bind the release-output identity
+    # claim to the descriptor that authorized it.
+    wanted.append((args.package_parent / "held-packaging/Resources/LidSwitchReleaseIdentity.json", "packaging/LidSwitchReleaseIdentity.json"))
     for name in ("candidate-manifest.json", "package-manifest.json", "LidSwitch.dmg", "LidSwitch.dmg.sha256", "LidSwitchHelper"):
         wanted.append((args.candidate_root / name, "candidate/" + name))
     for name in ("LidSwitch", "LidSwitchHelper", "build-receipt.json", "GeneratedReleaseHelperTrustAnchor.generated.swift"):

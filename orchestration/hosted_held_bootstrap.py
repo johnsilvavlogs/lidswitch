@@ -87,13 +87,32 @@ PACKAGING_ENV = {
 # boundary is a bounded fresh-runner, same-UID threat model: inventories detect
 # pre/post-spawn replacement, not an adversary able to replace a leaf after the
 # final check while CPython is already importing it by pathname.
-PACKAGING_PYTHON_BOOTSTRAP = r'''import json, os, runpy, sys
+PACKAGING_PYTHON_BOOTSTRAP = r'''import json, os, runpy, sys, sysconfig
 entry, script_root, allowed_json = sys.argv[1:4]
+entry_args = sys.argv[4:]
 allowed = set(json.loads(allowed_json))
 script_root = os.path.realpath(script_root)
 if os.getcwd() != "/" or not os.path.isabs(entry) or os.path.dirname(os.path.realpath(entry)) != script_root:
     raise SystemExit(74)
-sys.path[:] = [script_root]
+stdlib = os.path.realpath(sysconfig.get_path("stdlib"))
+workspace = os.path.realpath(os.environ.get("GITHUB_WORKSPACE", "/__no_workspace__"))
+def trusted_stdlib(path):
+    if not isinstance(path, str) or not path:
+        return False
+    resolved = os.path.realpath(path)
+    parts = set(resolved.split(os.sep))
+    return (os.path.isabs(path) and resolved != os.path.realpath(os.getcwd())
+            and "site-packages" not in parts and "dist-packages" not in parts
+            and not (resolved == workspace or resolved.startswith(workspace + os.sep))
+            and (resolved == stdlib or resolved.startswith(stdlib + os.sep)))
+stdlib_paths = []
+for candidate in sys.path:
+    if trusted_stdlib(candidate) and candidate not in stdlib_paths:
+        stdlib_paths.append(candidate)
+if not stdlib_paths:
+    raise SystemExit(74)
+sys.path[:] = [script_root, *stdlib_paths]
+sys.argv[:] = [entry, *entry_args]
 exit_code = 0
 try:
     runpy.run_path(entry, run_name="__main__")
@@ -377,7 +396,7 @@ def main():
    k,v=line.split("=",1)
    if not k or k in rows: die()
    rows[k]=v
-  if rows.get("schema")!="3" or rows.get("terminal")!="idle-uninstalled" or rows.get("kernel")!="25E246" or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rc!=0: die()
+  if set(rows)!={"schema","nonce","outcome","child_command_exit","wrapper_exit","preflight_sha256","postflight_sha256","host_preserved","benchmark_published","error","capture_identifiers","control_root","execution_root"} or rows.get("schema")!="3" or not rows.get("nonce") or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rows.get("host_preserved")!="true" or rows.get("benchmark_published") not in ("true","false") or rows.get("control_root")!=control or rows.get("execution_root")!=execution or any(len(rows.get(name,""))!=64 or any(ch not in "0123456789abcdef" for ch in rows[name]) for name in ("preflight_sha256","postflight_sha256")) or rc!=0: die()
   def snap(names,want):
    for name in names:
     try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)

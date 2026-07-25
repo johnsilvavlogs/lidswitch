@@ -48,6 +48,7 @@ REQUIRED = {
     "authority/postflight-state.snapshot", "workflow-context.json",
     "source/source_snapshot_manifest.jsonl", "source/release.env", "package/build-envelope.json",
     *("packaging/" + name for name in PACKAGING_ROLES.values()),
+    "packaging/LidSwitchReleaseIdentity.json",
     "candidate/candidate-manifest.json", "candidate/package-manifest.json", "candidate/LidSwitch.dmg",
     "candidate/LidSwitch.dmg.sha256", "candidate/LidSwitchHelper", "release-output/LidSwitch",
     "release-output/LidSwitchHelper", "release-output/build-receipt.json",
@@ -125,9 +126,59 @@ def descriptor(value: object, *, path: str | None = None, label: str) -> dict[st
     return item
 
 
-def descriptor_matches(item: object, meta: dict[str, object], path: str, label: str) -> None:
-    value = descriptor(item, path=path, label=label)
+def descriptor_matches(item: object, meta: dict[str, object], label: str) -> dict[str, object]:
+    value = descriptor(item, label=label)
     deny(value["sha256"] == meta["sha256"] and value["size"] == meta["size"] and value["mode"] == meta["mode"], label + " byte binding mismatch")
+    return value
+
+
+def same_descriptor(left: object, right: object, label: str, *, path: bool = True) -> None:
+    keys = ("dev", "gid", "inode", "mode", "nlink", "path", "sha256", "size", "uid") if path else ("dev", "gid", "inode", "mode", "nlink", "sha256", "size", "uid")
+    deny(isinstance(left, dict) and isinstance(right, dict) and all(left.get(key) == right.get(key) for key in keys), label + " descriptor drift")
+
+
+def absolute_child(value: object, parent: Path, suffix: str, label: str) -> Path:
+    deny(isinstance(value, str), label + " path invalid")
+    path = Path(value)
+    deny(path.is_absolute() and "." not in path.parts and ".." not in path.parts and path == parent / suffix, label + " path mismatch")
+    return path
+
+
+def path_under(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_kv(path: Path, label: str) -> tuple[tuple[str, ...], dict[str, str]]:
+    try:
+        raw = path.read_bytes()
+        deny(raw.endswith(b"\n") and raw and b"\r" not in raw, label + " invalid")
+        rows: dict[str, str] = {}
+        order: list[str] = []
+        for line in raw[:-1].decode("utf-8", "strict").split("\n"):
+            key, value = line.split("=", 1)
+            deny(key and key not in rows and "\x00" not in key and "\x00" not in value, label + " invalid")
+            rows[key] = value
+            order.append(key)
+        return tuple(order), rows
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError(label + " invalid")
+
+
+def release_output_seal(files: dict[str, object]) -> str:
+    names = ("GeneratedReleaseHelperTrustAnchor.generated.swift", "LidSwitch", "LidSwitchHelper", "build-receipt.json")
+    payload = b"".join((f"{name}|{files['release-output/' + name]['size']}|{files['release-output/' + name]['sha256']}\n").encode("ascii") for name in names)
+    return sha_bytes(payload)
+
+
+def release_output_path(value: object, label: str) -> Path:
+    deny(isinstance(value, str), label + " invalid")
+    path = Path(value)
+    deny(path.is_absolute() and "." not in path.parts and ".." not in path.parts and path.name == "release-output" and path.parent.parent == Path("/private/tmp") and path.parent.name.startswith("lidswitch-swift."), label + " invalid")
+    return path
 
 
 def leaf_meta(root: Path, relative: str, expected: object) -> dict[str, object]:
@@ -269,19 +320,30 @@ def main() -> int:
     authority = load(root / "authority/ledger.json")
     exact(authority, ("generated", "policy", "schema", "source", "system", "wrapper_sha256"), "authority ledger")
     deny(authority["schema"] == "lidswitch-hosted-authority-ledger-v1", "authority schema mismatch")
-    descriptor_matches(authority["policy"], files["orchestration/policy.json"], "hosted-runner-policy.json", "authority policy")
+    policy_descriptor = descriptor_matches(authority["policy"], files["orchestration/policy.json"], "authority policy")
+    policy_path = Path(policy_descriptor["path"])
+    deny(policy_path.is_absolute() and policy_path.name == "hosted-runner-policy.json" and policy_path.parent.name == "orchestration", "authority policy path mismatch")
     authority_source = exact(authority["source"], ("commit", "manifest_descriptor", "manifest_sha256", "root", "tree"), "authority source")
     deny(authority_source["commit"] == SOURCE_COMMIT and authority_source["tree"] == SOURCE_TREE and authority_source["manifest_sha256"] == policy["source_manifest_sha256"], "authority source mismatch")
-    descriptor_matches(authority_source["manifest_descriptor"], files["source/source_snapshot_manifest.jsonl"], "script/source_snapshot_manifest.jsonl", "source manifest descriptor")
+    manifest_descriptor = descriptor_matches(authority_source["manifest_descriptor"], files["source/source_snapshot_manifest.jsonl"], "source manifest descriptor")
+    manifest_path = Path(manifest_descriptor["path"])
+    deny(manifest_path.is_absolute() and manifest_path.name == "source_snapshot_manifest.jsonl" and manifest_path.parent.name == "script", "source manifest path mismatch")
+    source_root = manifest_path.parent.parent
     generated = exact(authority["generated"], ("contract", "entry", "root"), "authority generated")
-    descriptor_matches(generated["entry"], files["authority/entry.py"], "hosted-held-entry.py", "authority entry")
-    descriptor_matches(generated["contract"], files["authority/contract.json"], "hosted-held-contract.json", "authority contract")
+    generated_entry = descriptor_matches(generated["entry"], files["authority/entry.py"], "authority entry")
+    generated_contract = descriptor_matches(generated["contract"], files["authority/contract.json"], "authority contract")
     contract = load(root / "authority/contract.json")
     exact(contract, ("bash", "directories", "fd_map", "roles", "schema", "source_manifest"), "authority contract")
     deny(contract["schema"] == "lidswitch-hosted-held-contract-v1" and contract["source_manifest"] == policy["source_manifest_sha256"], "authority contract mismatch")
     deny(isinstance(contract["roles"], dict) and set(PACKAGING_ROLES) | {"wrapper", "common", "envelope", "profile", "safe_file", "supervisor", "source_manifest", "release_identity", "icon"} == set(contract["roles"]), "authority role set mismatch")
     for role, name in PACKAGING_ROLES.items():
-        descriptor_matches(contract["roles"][role], files["packaging/" + name], "script/" + name, "packaging closure")
+        value = descriptor_matches(contract["roles"][role], files["packaging/" + name], "packaging closure")
+        descriptor(value, path="script/" + name, label="packaging closure")
+    source_role = descriptor_matches(contract["roles"]["source_manifest"], files["source/source_snapshot_manifest.jsonl"], "contract source manifest")
+    descriptor(source_role, path="script/source_snapshot_manifest.jsonl", label="contract source manifest")
+    same_descriptor(source_role, manifest_descriptor, "contract/source manifest", path=False)
+    release_identity = descriptor_matches(contract["roles"]["release_identity"], files["packaging/LidSwitchReleaseIdentity.json"], "release identity")
+    descriptor(release_identity, path="Resources/LidSwitchReleaseIdentity.json", label="release identity")
     deny(contract["roles"]["wrapper"]["sha256"] == source["wrapper_sha256"], "wrapper cross-binding mismatch")
     deny(isinstance(authority["system"], dict) and set(authority["system"]) == {"python", "bash", "swift_frontend", "sdk_root", "developer_dir"}, "authority system mismatch")
     system = authority["system"]
@@ -294,30 +356,40 @@ def main() -> int:
     build = load(root / "receipts/build.json")
     exact(prepare, ("authority", "contract", "entry", "ledger", "schema", "source_manifest_sha256"), "prepare receipt")
     deny(prepare["schema"] == "lidswitch-hosted-prepare-v2" and prepare["source_manifest_sha256"] == policy["source_manifest_sha256"], "prepare receipt mismatch")
-    for name, relative, path in (("ledger", "authority/ledger.json", "hosted-authority-ledger.json"), ("entry", "authority/entry.py", "hosted-held-entry.py"), ("contract", "authority/contract.json", "hosted-held-contract.json")):
-        descriptor_matches(prepare[name], files[relative], path, "prepare binding")
+    authority_path = Path(prepare["authority"])
+    deny(authority_path.is_absolute() and "." not in authority_path.parts and ".." not in authority_path.parts and not path_under(authority_path, source_root) and not path_under(authority_path, policy_path.parent), "prepare authority path mismatch")
+    expected_authority_paths = {"ledger": ("authority/ledger.json", "hosted-authority-ledger.json"), "entry": ("authority/entry.py", "hosted-held-entry.py"), "contract": ("authority/contract.json", "hosted-held-contract.json")}
+    for name, (relative, suffix) in expected_authority_paths.items():
+        observed = descriptor_matches(prepare[name], files[relative], "prepare binding")
+        absolute_child(observed["path"], authority_path, suffix, "prepare " + name)
     exact(build, ("contract", "entry", "generated", "ledger", "release_output", "retained", "schema", "source"), "build receipt")
     deny(build["schema"] == "lidswitch-hosted-build-v2" and build["source"] == authority["source"] and build["generated"] == authority["generated"], "build authority mismatch")
-    for name, relative, path in (("ledger", "authority/ledger.json", "hosted-authority-ledger.json"), ("entry", "authority/entry.py", "hosted-held-entry.py"), ("contract", "authority/contract.json", "hosted-held-contract.json")):
-        descriptor_matches(build[name], files[relative], path, "build binding")
+    for name, (relative, suffix) in expected_authority_paths.items():
+        observed = descriptor_matches(build[name], files[relative], "build binding")
+        absolute_child(observed["path"], authority_path, suffix, "build " + name)
+        same_descriptor(observed, prepare[name], "prepare/build " + name)
+    same_descriptor(prepare["entry"], generated_entry, "prepare/generated entry")
+    same_descriptor(prepare["contract"], generated_contract, "prepare/generated contract")
     retained_map = {"live-state-retained.receipt": "authority/live-state-retained.receipt", "preflight-state.snapshot": "authority/preflight-state.snapshot", "postflight-state.snapshot": "authority/postflight-state.snapshot", "hosted-live-envelope.json": "authority/live-envelope.json"}
     deny(isinstance(build["retained"], dict) and set(build["retained"]) == set(retained_map), "build retained mismatch")
     for name, relative in retained_map.items():
-        descriptor_matches(build["retained"][name], files[relative], name, "retained binding")
-    fields = dict(line.split("=", 1) for line in (root / "authority/live-state-retained.receipt").read_text("utf-8").splitlines() if "=" in line)
-    deny(fields.get("terminal") == "idle-uninstalled" and fields.get("kernel") == policy["runner"]["kernel"] and fields.get("child_command_exit") == "0" and fields.get("wrapper_exit") == "0" and fields.get("outcome") == "preserved", "terminal receipt invalid")
+        observed = descriptor_matches(build["retained"][name], files[relative], "retained binding")
+        absolute_child(observed["path"], authority_path, name, "retained " + name)
+    receipt_order, fields = parse_kv(root / "authority/live-state-retained.receipt", "terminal receipt")
+    deny(receipt_order == ("schema", "nonce", "outcome", "child_command_exit", "wrapper_exit", "preflight_sha256", "postflight_sha256", "host_preserved", "benchmark_published", "error", "capture_identifiers", "control_root", "execution_root") and fields["schema"] == "3" and fields["nonce"] and fields["child_command_exit"] == "0" and fields["wrapper_exit"] == "0" and fields["outcome"] == "preserved" and fields["host_preserved"] == "true" and fields["benchmark_published"] in ("true", "false") and fields["control_root"].startswith("/private/tmp/lidswitch-envelope.") and fields["execution_root"].startswith("/private/tmp/lidswitch-swift.") and fields["preflight_sha256"] == files["authority/preflight-state.snapshot"]["sha256"] and fields["postflight_sha256"] == files["authority/postflight-state.snapshot"]["sha256"], "terminal receipt invalid")
     for snapshot in ("preflight", "postflight"):
-        values = dict(line.split("=", 1) for line in (root / ("authority/" + snapshot + "-state.snapshot")).read_text("utf-8").splitlines() if "=" in line)
+        _order, values = parse_kv(root / ("authority/" + snapshot + "-state.snapshot"), "snapshot")
         deny(values.get("host_class") == "idle-uninstalled" and values.get("kernel_build") == policy["runner"]["kernel"], "snapshot terminal state invalid")
     live = load(root / "authority/live-envelope.json")
-    exact(live, ("postflight_sha256", "preflight_sha256", "receipt_sha256"), "live envelope")
-    deny(live["receipt_sha256"] == files["authority/live-state-retained.receipt"]["sha256"] and live["preflight_sha256"] == fields.get("preflight_sha256") == files["authority/preflight-state.snapshot"]["sha256"] and live["postflight_sha256"] == fields.get("postflight_sha256") == files["authority/postflight-state.snapshot"]["sha256"], "live envelope binding mismatch")
+    exact(live, ("postflight_sha256", "preflight_sha256", "receipt_sha256", "schema", "wrapper_exit"), "live envelope")
+    deny(live["schema"] == "lidswitch-hosted-live-envelope-v2" and live["wrapper_exit"] == 0 and live["receipt_sha256"] == files["authority/live-state-retained.receipt"]["sha256"] and live["preflight_sha256"] == fields["preflight_sha256"] == files["authority/preflight-state.snapshot"]["sha256"] and live["postflight_sha256"] == fields["postflight_sha256"] == files["authority/postflight-state.snapshot"]["sha256"], "live envelope binding mismatch")
 
     context = load(root / "workflow-context.json")
     exact(context, ("candidate_root", "driver_sha256", "image_version", "orchestration_commit_sha", "package_parent", "policy_sha256", "release_output", "reviewed_orchestration_sha", "run_attempt", "run_id", "schema", "sdk_version", "source_commit", "source_tree", "workflow_file_sha256", "workflow_ref"), "workflow context")
     deny(context["schema"] == "lidswitch-hosted-workflow-context-v2" and context["source_commit"] == SOURCE_COMMIT and context["source_tree"] == SOURCE_TREE and context["workflow_ref"] == "refs/heads/main" and context["orchestration_commit_sha"] == context["reviewed_orchestration_sha"] and context["policy_sha256"] == files["orchestration/policy.json"]["sha256"] and context["workflow_file_sha256"] == files["orchestration/workflow.yml"]["sha256"] and context["image_version"] == policy["runner"]["image_version"], "workflow context mismatch")
     hexdigest(context["driver_sha256"], "workflow driver")
     deny(all(isinstance(context[key], str) and context[key] for key in ("run_id", "run_attempt", "release_output", "package_parent", "candidate_root", "sdk_version")), "workflow context invalid")
+    context_release_output = release_output_path(context["release_output"], "workflow release output")
     deny(swift["sha256"] == context["driver_sha256"], "authority/context toolchain mismatch")
 
     envelope = load(root / "package/build-envelope.json")
@@ -333,7 +405,8 @@ def main() -> int:
     release = exact(envelope["release_output"], ("anchor_sha256", "anchor_size", "app", "build_receipt_sha256", "helper", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"), "release output")
     release_receipt = load(root / "release-output/build-receipt.json")
     check_release_receipt(release_receipt, files)
-    deny(release["build_receipt_sha256"] == files["release-output/build-receipt.json"]["sha256"] and release["anchor_sha256"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["sha256"] and release["anchor_size"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["size"] and release["source_manifest_sha256"] == policy["source_manifest_sha256"] and release["app"] == release_receipt["artifacts"]["app"] and release["helper"] == release_receipt["artifacts"]["helper"] and release["release_identity_sha256"] == release_receipt["inputs"]["releaseIdentitySHA256"], "release output binding mismatch")
+    build_release_output = release_output_path(build["release_output"], "build release output")
+    deny(context_release_output == build_release_output and release["build_receipt_sha256"] == files["release-output/build-receipt.json"]["sha256"] and release["anchor_sha256"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["sha256"] and release["anchor_size"] == files["release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"]["size"] and release["source_manifest_sha256"] == policy["source_manifest_sha256"] and release["app"] == release_receipt["artifacts"]["app"] and release["helper"] == release_receipt["artifacts"]["helper"] and release["release_identity_sha256"] == release_receipt["inputs"]["releaseIdentitySHA256"] == release_identity["sha256"] == files["packaging/LidSwitchReleaseIdentity.json"]["sha256"] and release["seal_sha256"] == release_output_seal(files), "release output binding mismatch")
     for key in ("anchor_sha256", "build_receipt_sha256", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"):
         hexdigest(release[key], "release digest")
 

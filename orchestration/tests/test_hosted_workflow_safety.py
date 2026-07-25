@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import importlib.util
 import os
 import tempfile
@@ -45,13 +46,26 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
-        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("terminal")!="idle-uninstalled"', 'rows.get("kernel")!="25E246"', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
+        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
             self.assertIn(token, self.bootstrap)
 
     def test_verifier_closes_the_complete_evidence_inventory(self):
         verifier = (ROOT / "orchestration/verify_hosted_candidate_evidence.py").read_text()
-        for token in ("missing or extra declared evidence leaf", "package/build-envelope.json", "candidate/package-manifest.json", "release-output/build-receipt.json", 'fields.get("terminal") == "idle-uninstalled"', 'fields.get("kernel") == policy["runner"]["kernel"]'):
+        for token in ("missing or extra declared evidence leaf", "package/build-envelope.json", "candidate/package-manifest.json", "release-output/build-receipt.json", "lidswitch-hosted-live-envelope-v2", "release_output_seal", "LidSwitchReleaseIdentity.json"):
             self.assertIn(token, verifier)
+
+    def test_workflow_pins_match_current_authority_files(self):
+        expected = {
+            "hosted_held_bootstrap.py": ROOT / "orchestration/hosted_held_bootstrap.py",
+            "hosted-runner-policy.json": ROOT / "orchestration/hosted-runner-policy.json",
+            "collect_hosted_candidate_evidence.py": ROOT / "orchestration/collect_hosted_candidate_evidence.py",
+            "verify_hosted_candidate_evidence.py": ROOT / "orchestration/verify_hosted_candidate_evidence.py",
+        }
+        for name, path in expected.items():
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+            needle = 'orchestration/' + name + ' | /usr/bin/awk'
+            line = next(line for line in self.workflow.splitlines() if needle in line)
+            self.assertIn(actual, line, name)
 
     def test_workflow_never_executes_candidate_packaging_path(self):
         self.assertNotIn('$GITHUB_WORKSPACE/source/script/', self.workflow)
@@ -191,6 +205,42 @@ class HeldPackagingClosureTests(unittest.TestCase):
                 os.environ["PYTHONPATH"] = previous
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("PYTHONPATH", self.bootstrap.PACKAGING_ENV)
+
+    def test_sealed_launcher_keeps_stdlib_and_local_imports_with_real_argv(self):
+        temp, held = self.make_sealed_closure()
+        self.addCleanup(temp.cleanup)
+        script = held / "script"
+        entry = script / "capture_immutable_build_envelope.py"
+        poison = Path(temp.name) / "poison"
+        poison.mkdir()
+        (poison / "argparse.py").write_text("raise RuntimeError('poisoned argparse')\n")
+        os.chmod(script, 0o700)
+        os.chmod(entry, 0o700)
+        os.chmod(script / "immutable_candidate_core.py", 0o600)
+        (script / "immutable_candidate_core.py").write_text("SEALED = 'local'\n")
+        entry.write_text(
+            "import argparse, json, pathlib, sys\n"
+            "import immutable_candidate_core\n"
+            "assert immutable_candidate_core.SEALED == 'local'\n"
+            "assert pathlib.Path(immutable_candidate_core.__file__).resolve().parent == pathlib.Path(__file__).resolve().parent\n"
+            "assert pathlib.Path(argparse.__file__).resolve().parent != pathlib.Path('/').resolve() / 'nope'\n"
+            "assert str(pathlib.Path(argparse.__file__).resolve()).startswith(tuple(str(pathlib.Path(p).resolve()) for p in sys.path[1:]))\n"
+            "assert sys.argv == [__file__, '--real-argument']\n"
+            "assert json.dumps({'ok': True}) == '{\\\"ok\\\": true}'\n"
+        )
+        os.chmod(script / "immutable_candidate_core.py", 0o400)
+        os.chmod(entry, 0o500)
+        os.chmod(script, 0o500)
+        previous = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = str(poison)
+        try:
+            result = self.bootstrap._run_sealed_packaging(entry, held, ["immutable_candidate_core"], ["--real-argument"])
+        finally:
+            if previous is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = previous
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_runner_passes_only_sealed_env_cwd_and_isolated_flags(self):
         with mock.patch.object(self.bootstrap.subprocess, "run") as run:
