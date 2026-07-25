@@ -524,7 +524,6 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
     except Denied as error:
         deny("prepare-system-toolchain:" + str(error))
     authority.mkdir(mode=0o700, parents=False)
-    info = checked_directory(authority)
     if stat.S_IMODE(os.stat(authority, follow_symlinks=False).st_mode) != 0o700:
         deny("unsafe-authority-root")
     contract = {"schema": "lidswitch-hosted-held-contract-v1", "fd_map": FD_MAP, "roles": roles,
@@ -539,17 +538,21 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
             os.write(fd, data); os.fsync(fd)
         finally:
             os.close(fd)
-    ledger = {"schema": "lidswitch-hosted-authority-ledger-v1", "policy": pol["descriptor"],
-              "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "root": root,
-                         "manifest_sha256": manifest_sha, "manifest_descriptor": manifest},
-              "system": {"python": python, "bash": bash, "swift_frontend": swift, "sdk_root": sdk,
-                         "developer_dir": "/Library/Developer/CommandLineTools"}, "wrapper_sha256": WRAPPER_SHA256,
-              "generated": {"entry": descriptor(entry), "contract": descriptor(contract_path), "root": info}}
-    fd = os.open(ledger_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+    # Create every authority leaf before freezing the directory descriptor.
+    # Some filesystems update directory link metadata when a child is added;
+    # writing an already-created ledger leaf does not change that identity.
+    ledger_fd = os.open(ledger_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
     try:
-        data = canonical(ledger); os.write(fd, data); os.fsync(fd)
+        info = checked_directory(authority)
+        ledger = {"schema": "lidswitch-hosted-authority-ledger-v1", "policy": pol["descriptor"],
+                  "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "root": root,
+                             "manifest_sha256": manifest_sha, "manifest_descriptor": manifest},
+                  "system": {"python": python, "bash": bash, "swift_frontend": swift, "sdk_root": sdk,
+                             "developer_dir": "/Library/Developer/CommandLineTools"}, "wrapper_sha256": WRAPPER_SHA256,
+                  "generated": {"entry": descriptor(entry), "contract": descriptor(contract_path), "root": info}}
+        data = canonical(ledger); os.write(ledger_fd, data); os.fsync(ledger_fd)
     finally:
-        os.close(fd)
+        os.close(ledger_fd)
     # This receipt is deliberately emitted outside the generated ledger: the
     # next workflow step must carry these values as explicit build inputs.
     return {"schema": "lidswitch-hosted-prepare-v2", "authority": str(authority),

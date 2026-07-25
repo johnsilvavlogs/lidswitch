@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import importlib.util
+import json
 import os
 import stat
 import tempfile
@@ -85,6 +86,13 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
     def test_bootstrap_is_parseable(self):
         ast.parse(self.bootstrap)
 
+    def test_authority_root_is_frozen_after_every_leaf_exists(self):
+        ledger_create = self.bootstrap.index("ledger_fd = os.open(ledger_path")
+        root_freeze = self.bootstrap.index("info = checked_directory(authority)", ledger_create)
+        ledger_write = self.bootstrap.index("os.write(ledger_fd, data)", root_freeze)
+        self.assertLess(ledger_create, root_freeze)
+        self.assertLess(root_freeze, ledger_write)
+
 
 class HeldPackagingClosureTests(unittest.TestCase):
     @classmethod
@@ -137,6 +145,37 @@ class HeldPackagingClosureTests(unittest.TestCase):
         with mock.patch.object(self.bootstrap, "checked_directory", return_value=directory), mock.patch.object(self.bootstrap.os, "lstat", return_value=selector), mock.patch.object(self.bootstrap.os, "readlink", return_value="../Outside.sdk"):
             with self.assertRaisesRegex(self.bootstrap.Denied, "unsafe-system-selector-target"):
                 self.bootstrap.checked_system_directory_selector(path)
+
+    def test_prepare_freezes_authority_root_only_after_ledger_leaf_creation(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        source = Path(temp.name) / "source"
+        authority = Path(temp.name) / "authority"
+        source.mkdir()
+        manifest_sha = "a" * 64
+        directory = {"dev": 1, "inode": 10, "uid": os.getuid(), "gid": os.getgid(), "mode": 0o700, "nlink": 2}
+
+        def checked(path):
+            if Path(path) == authority:
+                self.assertTrue((authority / "hosted-authority-ledger.json").exists())
+            return directory
+
+        def git_result(_source, *args):
+            if args == ("rev-parse", "HEAD"):
+                return self.bootstrap.SOURCE_COMMIT + "\n"
+            if args == ("rev-parse", "HEAD^{tree}"):
+                return self.bootstrap.SOURCE_TREE + "\n"
+            return ""
+
+        def described(path, **_kwargs):
+            return {"path": str(path), "dev": 1, "inode": 1, "uid": os.getuid(), "gid": os.getgid(),
+                    "mode": 0o400, "nlink": 1, "size": 1, "sha256": self.bootstrap.WRAPPER_SHA256}
+
+        with mock.patch.object(self.bootstrap, "policy", return_value={"descriptor": described("policy"), "value": {"source_manifest_sha256": manifest_sha}}), mock.patch.object(self.bootstrap, "git", side_effect=git_result), mock.patch.object(self.bootstrap, "verify_manifest", return_value=({"sha256": manifest_sha}, manifest_sha)), mock.patch.object(self.bootstrap, "descriptor", side_effect=described), mock.patch.object(self.bootstrap, "checked_directory", side_effect=checked), mock.patch.object(self.bootstrap, "checked_system_directory_selector", return_value={"sdk": "bound"}):
+            result = self.bootstrap.prepare(source, authority, Path(temp.name) / "policy.json")
+        self.assertEqual(result["schema"], "lidswitch-hosted-prepare-v2")
+        ledger = json.loads((authority / "hosted-authority-ledger.json").read_text())
+        self.assertEqual(ledger["generated"]["root"], directory)
 
     def test_exact_closure_records_directories_and_all_leaves(self):
         temp, held = self.make_sealed_closure()
