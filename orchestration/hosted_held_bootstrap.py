@@ -205,6 +205,43 @@ def checked_directory(path: Path) -> dict[str, int]:
         os.close(fd)
 
 
+def checked_system_directory_selector(path: Path) -> dict[str, object]:
+    parent = path.parent
+    parent_before = checked_directory(parent)
+    if parent_before["uid"] != 0 or parent_before["gid"] != 0:
+        deny("unowned-system-directory: " + str(parent))
+
+    selector_before = os.lstat(path)
+    if not stat.S_ISLNK(selector_before.st_mode):
+        deny("non-symlinked-system-selector: " + str(path))
+    if selector_before.st_uid != 0 or selector_before.st_gid != 0 or selector_before.st_nlink != 1:
+        deny("unsafe-system-selector: " + str(path))
+    target_name = os.readlink(path)
+    target_component = Path(target_name)
+    if (not target_name or target_component.is_absolute() or len(target_component.parts) != 1
+            or target_name in {".", ".."}):
+        deny("unsafe-system-selector-target: " + str(path))
+
+    target_path = parent / target_name
+    target = checked_directory(target_path)
+    if target["uid"] != 0 or target["gid"] != 0:
+        deny("unowned-system-directory: " + str(target_path))
+    selector_after = os.lstat(path)
+    parent_after = checked_directory(parent)
+    if identity(selector_before) != identity(selector_after) or os.readlink(path) != target_name:
+        deny("drift-system-selector: " + str(path))
+    if parent_before != parent_after:
+        deny("drift-system-directory: " + str(parent))
+    return {
+        "selector": {"path": str(path), "dev": selector_before.st_dev, "inode": selector_before.st_ino,
+                     "uid": selector_before.st_uid, "gid": selector_before.st_gid,
+                     "mode": stat.S_IMODE(selector_before.st_mode), "nlink": selector_before.st_nlink,
+                     "size": selector_before.st_size, "target": target_name, "type": "symlink"},
+        "parent": {"path": str(parent), **parent_before},
+        "target": {"path": str(target_path), **target},
+    }
+
+
 def git(source: Path, *args: str) -> str:
     result = subprocess.run(["/usr/bin/git", "-C", str(source), *args], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -483,7 +520,7 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
         bash = descriptor(Path("/bin/bash"), system=True, maximum=16 * 1024 * 1024)
         python = descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024)
         swift = descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=512 * 1024 * 1024)
-        sdk = checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
+        sdk = checked_system_directory_selector(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
     except Denied as error:
         deny("prepare-system-toolchain:" + str(error))
     authority.mkdir(mode=0o700, parents=False)
@@ -595,7 +632,7 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
         deny("python-drift-before-build")
     if descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=512 * 1024 * 1024) != ledger["system"]["swift_frontend"]:
         deny("swift-frontend-drift-before-build")
-    if checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")) != ledger["system"]["sdk_root"]:
+    if checked_system_directory_selector(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")) != ledger["system"]["sdk_root"]:
         deny("sdk-root-drift-before-build")
     return {"ledger": ledger}
 

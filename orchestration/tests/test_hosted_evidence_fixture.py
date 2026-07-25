@@ -49,6 +49,18 @@ def system_descriptor(path, sha256):
             "nlink": 1, "size": 1, "sha256": sha256}
 
 
+def sdk_descriptor():
+    parent = "/Library/Developer/CommandLineTools/SDKs"
+    target = "MacOSX26.4.sdk"
+    directory = {"dev": 1, "inode": 1, "uid": 0, "gid": 0, "mode": 0o755, "nlink": 2}
+    return {
+        "parent": {"path": parent, **directory},
+        "selector": {"path": parent + "/MacOSX.sdk", "dev": 1, "inode": 2, "uid": 0, "gid": 0,
+                     "mode": 0o755, "nlink": 1, "size": len(target), "target": target, "type": "symlink"},
+        "target": {"path": parent + "/" + target, **directory},
+    }
+
+
 def source_bytes(relative):
     return subprocess.check_output(["git", "show", COMMIT + ":" + relative], cwd=ROOT)
 
@@ -98,7 +110,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
                      "source": {"commit": COMMIT, "tree": "d86650eccfe3326fc968fc855a07a1e3d06aaf57", "root": directory_descriptor(),
                                 "manifest_sha256": meta(root / "source/source_snapshot_manifest.jsonl")["sha256"],
                                 "manifest_descriptor": descriptor(root / "source/source_snapshot_manifest.jsonl", str(root / "source/script/source_snapshot_manifest.jsonl"))},
-                     "system": {"python": system_descriptor("/usr/bin/python3", "1" * 64), "bash": system_descriptor("/bin/bash", "2" * 64), "swift_frontend": system_descriptor("/Library/Developer/CommandLineTools/usr/bin/swift-frontend", "c" * 64), "sdk_root": directory_descriptor(), "developer_dir": "/Library/Developer/CommandLineTools"},
+                     "system": {"python": system_descriptor("/usr/bin/python3", "1" * 64), "bash": system_descriptor("/bin/bash", "2" * 64), "swift_frontend": system_descriptor("/Library/Developer/CommandLineTools/usr/bin/swift-frontend", "c" * 64), "sdk_root": sdk_descriptor(), "developer_dir": "/Library/Developer/CommandLineTools"},
                      "wrapper_sha256": roles["wrapper"]["sha256"],
                      "generated": {"entry": descriptor(root / "authority/entry.py", str(root / "authority/hosted-held-entry.py")), "contract": descriptor(root / "authority/contract.json", str(root / "authority/hosted-held-contract.json")), "root": directory_descriptor()}}
         write(root / "authority/ledger.json", authority, 0o400)
@@ -122,7 +134,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         write(root / "release-output/GeneratedReleaseHelperTrustAnchor.generated.swift", b"anchor", 0o444)
         app, helper, anchor = (meta(root / "release-output/LidSwitch"), meta(root / "release-output/LidSwitchHelper"), meta(root / "release-output/GeneratedReleaseHelperTrustAnchor.generated.swift"))
         inputs = {"appSourceSeal": "3" * 64, "baseManifestSHA256": meta(root / "source/source_snapshot_manifest.jsonl")["sha256"], "generatedAnchorSHA256": anchor["sha256"], "helperSourceSeal": "4" * 64, "releaseIdentitySHA256": meta(root / "packaging/LidSwitchReleaseIdentity.json")["sha256"], "trustAnchorTemplateSHA256": "6" * 64}
-        release_receipt = {"schema": "lidswitch-held-release-build-v1", "artifacts": {"app": {"identifier": "com.johnsilva.LidSwitch", "sha256": app["sha256"], "size": app["size"]}, "helper": {"cdhash": "a" * 40, "identifier": "com.johnsilva.lidswitch.helper", "sha256": helper["sha256"], "signature": "adhoc", "size": helper["size"], "teamIdentifier": None, "timestamp": None}}, "build": {"configuration": "release", "network": False, "paidLicenses": [], "releaseCandidateDefine": True, "signing": "manual-ad-hoc", "stages": ["helper", "app"]}, "captures": fixture_captures, "inputs": inputs, "toolchain": {"componentSealSHA256": "9" * 64, "driverIdentity": "1:swift-frontend", "profileSHA256": "a" * 64, "root": "/Library/Developer/CommandLineTools", "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"}}
+        release_receipt = {"schema": "lidswitch-held-release-build-v1", "artifacts": {"app": {"identifier": "com.johnsilva.LidSwitch", "sha256": app["sha256"], "size": app["size"]}, "helper": {"cdhash": "a" * 40, "identifier": "com.johnsilva.lidswitch.helper", "sha256": helper["sha256"], "signature": "adhoc", "size": helper["size"], "teamIdentifier": None, "timestamp": None}}, "build": {"configuration": "release", "network": False, "paidLicenses": [], "releaseCandidateDefine": True, "signing": "manual-ad-hoc", "stages": ["helper", "app"]}, "captures": fixture_captures, "inputs": inputs, "toolchain": {"componentSealSHA256": "9" * 64, "driverIdentity": "1:swift-frontend", "profileSHA256": "a" * 64, "root": "/Library/Developer/CommandLineTools", "sdk": "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk"}}
         write(root / "release-output/build-receipt.json", release_receipt, 0o444)
         release_leaves = {"GeneratedReleaseHelperTrustAnchor.generated.swift": anchor, "LidSwitch": app, "LidSwitchHelper": helper, "build-receipt.json": meta(root / "release-output/build-receipt.json")}
         seal = digest(b"".join((f"{name}|{release_leaves[name]['size']}|{release_leaves[name]['sha256']}\n").encode("ascii") for name in sorted(release_leaves)))
@@ -222,6 +234,32 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
 
     def test_complete_v3_fixture_is_accepted(self):
         temp, root = self.make_fixture(); result = self.verify(root); temp.cleanup(); self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_reledgered_sdk_authority_mismatch_is_rejected(self):
+        temp, root = self.make_fixture()
+        ledger_path = root / "authority/ledger.json"
+        ledger = json.loads(ledger_path.read_text())
+        ledger["system"]["sdk_root"]["selector"]["target"] = "Other.sdk"
+        ledger["system"]["sdk_root"]["selector"]["size"] = len("Other.sdk")
+        ledger["system"]["sdk_root"]["target"]["path"] = "/Library/Developer/CommandLineTools/SDKs/Other.sdk"
+        write(ledger_path, ledger, 0o400)
+        prepare_path = root / "receipts/prepare.json"
+        prepare = json.loads(prepare_path.read_text())
+        prepare["ledger"] = descriptor(ledger_path, prepare["ledger"]["path"])
+        write(prepare_path, prepare, 0o400)
+        build_path = root / "receipts/build.json"
+        build = json.loads(build_path.read_text())
+        build["ledger"] = prepare["ledger"]
+        write(build_path, build, 0o400)
+        evidence_path = root / "evidence-tree.json"
+        evidence = json.loads(evidence_path.read_text())
+        for relative in ("authority/ledger.json", "receipts/prepare.json", "receipts/build.json"):
+            evidence["files"][relative] = meta(root / relative)
+        write(evidence_path, evidence, 0o400)
+        result = self.verify(root)
+        temp.cleanup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release SDK authority binding mismatch", result.stderr)
 
     def test_dmg_checksum_drift_is_rejected(self):
         temp, root = self.make_fixture(); write(root / "candidate/LidSwitch.dmg.sha256", b"0" * 64); result = self.verify(root); temp.cleanup(); self.assertNotEqual(result.returncode, 0)

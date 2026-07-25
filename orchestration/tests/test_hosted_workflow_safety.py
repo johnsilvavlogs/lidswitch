@@ -2,6 +2,7 @@ import ast
 import hashlib
 import importlib.util
 import os
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -117,6 +118,25 @@ class HeldPackagingClosureTests(unittest.TestCase):
     def assert_denied(self, held):
         with self.assertRaises(self.bootstrap.Denied):
             self.bootstrap._sealed_package_closure(held)
+
+    def test_system_sdk_selector_binds_root_owned_parent_symlink_and_target(self):
+        path = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+        directory = {"dev": 1, "inode": 10, "uid": 0, "gid": 0, "mode": 0o755, "nlink": 2}
+        target_directory = {**directory, "inode": 11}
+        selector = os.stat_result((stat.S_IFLNK | 0o755, 12, 1, 1, 0, 0, 16, 0, 0, 0))
+        with mock.patch.object(self.bootstrap, "checked_directory", side_effect=[directory, target_directory, directory]), mock.patch.object(self.bootstrap.os, "lstat", side_effect=[selector, selector]), mock.patch.object(self.bootstrap.os, "readlink", side_effect=["MacOSX26.4.sdk", "MacOSX26.4.sdk"]):
+            result = self.bootstrap.checked_system_directory_selector(path)
+        self.assertEqual(result["selector"]["target"], "MacOSX26.4.sdk")
+        self.assertEqual(result["selector"]["type"], "symlink")
+        self.assertEqual(result["target"]["path"], "/Library/Developer/CommandLineTools/SDKs/MacOSX26.4.sdk")
+
+    def test_system_sdk_selector_rejects_target_outside_root_owned_parent(self):
+        path = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")
+        directory = {"dev": 1, "inode": 10, "uid": 0, "gid": 0, "mode": 0o755, "nlink": 2}
+        selector = os.stat_result((stat.S_IFLNK | 0o777, 12, 1, 1, 0, 0, 20, 0, 0, 0))
+        with mock.patch.object(self.bootstrap, "checked_directory", return_value=directory), mock.patch.object(self.bootstrap.os, "lstat", return_value=selector), mock.patch.object(self.bootstrap.os, "readlink", return_value="../Outside.sdk"):
+            with self.assertRaisesRegex(self.bootstrap.Denied, "unsafe-system-selector-target"):
+                self.bootstrap.checked_system_directory_selector(path)
 
     def test_exact_closure_records_directories_and_all_leaves(self):
         temp, held = self.make_sealed_closure()
