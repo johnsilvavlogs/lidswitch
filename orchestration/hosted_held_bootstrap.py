@@ -619,6 +619,15 @@ def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, 
     if run.returncode != 0:
         sys.stderr.write(run.stderr)
         deny("held-wrapper-failed: " + str(run.returncode))
+    receipt_path = authority / "live-state-retained.receipt"
+    if not receipt_path.exists():
+        sys.stderr.write(run.stderr)
+        try:
+            inventory = ",".join(sorted(os.listdir(authority)))
+        except OSError:
+            inventory = "unavailable"
+        sys.stderr.write("hosted-authority-inventory=" + inventory + "\n")
+        deny("held-terminal-receipt-missing")
     release_output = retained_release_output(authority)
     # Recheck the candidate after the wrapper and bind the actual retained
     # host-state proof into the build receipt rather than a hash-only claim.
