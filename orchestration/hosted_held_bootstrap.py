@@ -446,7 +446,10 @@ def policy(path: Path) -> dict[str, object]:
 
 
 def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, object]:
-    pol = policy(policy_path)
+    try:
+        pol = policy(policy_path)
+    except Denied as error:
+        deny("prepare-policy:" + str(error))
     source = source.resolve(strict=True)
     authority = authority.resolve(strict=False)
     if under(authority, source):
@@ -458,22 +461,31 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
         deny("source-commit-or-tree-mismatch")
     if git(source, "status", "--porcelain=v1", "--untracked-files=all"):
         deny("source-checkout-not-clean")
-    manifest, manifest_sha = verify_manifest(source)
+    try:
+        manifest, manifest_sha = verify_manifest(source)
+    except Denied as error:
+        deny("prepare-source-manifest:" + str(error))
     if manifest_sha != pol["value"]["source_manifest_sha256"]:
         deny("source-manifest-digest-mismatch")
     roles: dict[str, dict[str, object]] = {}
     directories: dict[str, dict[str, int]] = {}
     for name, (_fd, relative) in ROLES.items():
-        roles[name] = descriptor(source / relative, maximum=256 * 1024 * 1024)
+        try:
+            roles[name] = descriptor(source / relative, maximum=256 * 1024 * 1024)
+        except Denied as error:
+            deny("prepare-role-" + name + ":" + str(error))
         roles[name]["path"] = relative
         for component in relative.split("/")[:-1]:
             directories.setdefault(component, checked_directory(source / component))
     if roles["wrapper"]["sha256"] != WRAPPER_SHA256:
         deny("unchanged-wrapper-digest-mismatch")
-    bash = descriptor(Path("/bin/bash"), system=True, maximum=16 * 1024 * 1024)
-    python = descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024)
-    swift = descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=128 * 1024 * 1024)
-    sdk = checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
+    try:
+        bash = descriptor(Path("/bin/bash"), system=True, maximum=16 * 1024 * 1024)
+        python = descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024)
+        swift = descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=128 * 1024 * 1024)
+        sdk = checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
+    except Denied as error:
+        deny("prepare-system-toolchain:" + str(error))
     authority.mkdir(mode=0o700, parents=False)
     info = checked_directory(authority)
     if stat.S_IMODE(os.stat(authority, follow_symlinks=False).st_mode) != 0o700:
