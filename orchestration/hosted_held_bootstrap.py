@@ -542,6 +542,31 @@ def _read_authority_descriptor(path: Path, expected: dict[str, object]) -> bytes
         os.close(fd)
 
 
+def _sealed_package_closure(root: Path, names: dict[str, str]) -> dict[str, dict[str, object]]:
+    """Return the complete, exact import closure from its sealed private root.
+
+    The reviewed programs compute their sibling imports from ``__file__``. A
+    descriptor-only ``/dev/fd`` execution would deliberately break that
+    invariant, so this is the equivalent sealed-directory authority: exact
+    inventory, descriptor metadata and bytes are revalidated immediately
+    before and after each Python spawn, with PYTHONPATH limited to this root.
+    """
+    expected_scripts = set(names.values())
+    if set(os.listdir(root)) != {"script", "Resources"} or set(os.listdir(root / "script")) != expected_scripts or set(os.listdir(root / "Resources")) != {"LidSwitchReleaseIdentity.json", "LidSwitch.icns"}:
+        deny("held-packaging-inventory-drift")
+    records: dict[str, dict[str, object]] = {}
+    for name in sorted(expected_scripts):
+        records["script/" + name] = descriptor(root / "script" / name, maximum=256 * 1024 * 1024)
+    for name in ("LidSwitchReleaseIdentity.json", "LidSwitch.icns"):
+        records["Resources/" + name] = descriptor(root / "Resources" / name, maximum=256 * 1024 * 1024)
+    return records
+
+
+def _require_sealed_package_closure(root: Path, names: dict[str, str], expected: dict[str, dict[str, object]]) -> None:
+    if _sealed_package_closure(root, names) != expected:
+        deny("held-packaging-closure-drift")
+
+
 def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
     prepared = prepare_recheck(source, authority, policy_path)
     contract_path = authority / "hosted-held-contract.json"
@@ -558,15 +583,21 @@ def package(source: Path, authority: Path, policy_path: Path, release_output: Pa
         _copy_verified(source, contract["roles"][role]["path"], contract["roles"][role], held / "script" / name)
     for role, name in (("release_identity", "LidSwitchReleaseIdentity.json"), ("icon", "LidSwitch.icns")):
         _copy_verified(source, contract["roles"][role]["path"], contract["roles"][role], held / "Resources" / name)
+    closure = _sealed_package_closure(held, names)
     envelope = package_parent / "build-envelope.json"
     command = ["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/capture_immutable_build_envelope.py"), "--source-commit", SOURCE_COMMIT, "--source-manifest", str(held / "script/source_snapshot_manifest.jsonl"), "--held-build-wrapper", str(held / "script/run_swift_build_safely.sh"), "--swift", "/Library/Developer/CommandLineTools/usr/bin/swift", "--release-output", str(release_output), "--output", str(envelope)]
-    first = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
+    package_env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "PYTHONPATH": str(held / "script")}
+    _require_sealed_package_closure(held, names, closure)
+    first = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=package_env, check=False)
     if first.returncode:
         sys.stderr.write(first.stderr); deny("held-packaging-capture-failed")
+    _require_sealed_package_closure(held, names, closure)
     candidate = package_parent / "candidate"
-    second = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/assemble_manual_adhoc_candidate.py"), "--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--icon", str(held / "Resources/LidSwitch.icns"), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
+    _require_sealed_package_closure(held, names, closure)
+    second = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/assemble_manual_adhoc_candidate.py"), "--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--icon", str(held / "Resources/LidSwitch.icns"), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=package_env, check=False)
     if second.returncode:
         sys.stderr.write(second.stderr); deny("held-packaging-assemble-failed")
+    _require_sealed_package_closure(held, names, closure)
     prepare_recheck(source, authority, policy_path)
     return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate), "envelope": descriptor(envelope), "held_packaging": {name: descriptor(held / "script" / name) for name in names.values()}}
 

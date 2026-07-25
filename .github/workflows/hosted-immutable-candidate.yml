@@ -58,7 +58,7 @@ jobs:
           origin=$(/usr/bin/git config --get remote.origin.url)
           test "$origin" = "https://github.com/${GITHUB_REPOSITORY}.git" -o "$origin" = "git@github.com:${GITHUB_REPOSITORY}.git"
           test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 492effa352b75305a09c23ff3762c235b97b4bd430c3b40a18eef93604d677a4
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 6984d73c7f414b9652b26fa86676f78c23297309e6f2ee07da173127b1dfca84
           test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = cadfbe8f227900cdc505f256729d73f6269e4b946717609feeb3c1420fc1012c
           test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 739914bd98f28b595caafde05d2e17563f5c49c1db7e4836fa7ae2c44e3e9964
           test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 074b9ccff50a6ccdec7bde36ede0b87fe701bcc5817fcbf741ab9c349a4befc7

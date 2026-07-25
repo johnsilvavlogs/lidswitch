@@ -41,7 +41,7 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
-        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("terminal")!="idle-uninstalled"', 'rows.get("kernel")!="25E246"', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build"):
+        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("terminal")!="idle-uninstalled"', 'rows.get("kernel")!="25E246"', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PYTHONPATH"):
             self.assertIn(token, self.bootstrap)
 
     def test_verifier_closes_the_complete_evidence_inventory(self):
