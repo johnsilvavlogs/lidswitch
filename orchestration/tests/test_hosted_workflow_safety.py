@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -61,8 +62,10 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertIn("external-expected-", self.bootstrap)
 
     def test_entry_is_executed_by_verified_descriptor(self):
-        self.assertIn('"/dev/fd/" + str(entry_fd)', self.bootstrap)
-        self.assertIn("pass_fds=(contract_fd, entry_fd)", self.bootstrap)
+        self.assertIn('"-B", "-", "--repo"', self.bootstrap)
+        self.assertIn("stdin=entry_fd", self.bootstrap)
+        self.assertIn("pass_fds=(contract_fd,)", self.bootstrap)
+        self.assertNotIn('"-B", "/dev/fd/" + str(entry_fd)', self.bootstrap)
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
@@ -131,6 +134,22 @@ class HeldPackagingClosureTests(unittest.TestCase):
         os.chmod(resources, 0o500)
         os.chmod(held, 0o500)
         return temp, held
+
+    def test_verified_entry_descriptor_executes_once_through_stdin(self):
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        script = Path(temp.name) / "entry.py"
+        script.write_bytes(b'import sys\nprint("held-entry:" + sys.argv[1])\n')
+        os.chmod(script, 0o500)
+        entry_fd = os.open(script, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            run = subprocess.run(
+                ["/usr/bin/python3", "-I", "-S", "-B", "-", "proof"], stdin=entry_fd,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+            )
+        finally:
+            os.close(entry_fd)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout, "held-entry:proof\n")
 
     def assert_denied(self, held):
         with self.assertRaises(self.bootstrap.Denied):

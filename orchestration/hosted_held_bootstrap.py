@@ -607,12 +607,17 @@ def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, 
     try:
         # /dev/fd is backed by the descriptor just verified above; a mutable
         # authority pathname is not an execution authority.
-        run = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", "/dev/fd/" + str(entry_fd), "--repo", str(source),
+        # CPython opens script pathnames more than once.  On macOS, /dev/fd
+        # duplicates share their regular-file offset, so the execution read can
+        # observe EOF and return success without running ENTRY.  Feed the exact
+        # already-open, descriptor-verified bytes through stdin once instead.
+        os.lseek(entry_fd, 0, os.SEEK_SET)
+        run = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", "-", "--repo", str(source),
                               "--contract-fd", str(contract_fd), "--contract-sha256", str(generated["contract"]["sha256"]),
                               "--contract-size", str(generated["contract"]["size"]), "--hosted-receipt", str(authority / "hosted-live-envelope.json"), "--release-candidate", "build",
                               "--print-bin-path"],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             pass_fds=(contract_fd, entry_fd), env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
+                             stdin=entry_fd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             pass_fds=(contract_fd,), env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
     finally:
         os.close(contract_fd)
         os.close(entry_fd)
