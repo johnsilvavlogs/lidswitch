@@ -43,14 +43,16 @@ jobs:
           DEVELOPER_DIR=/Library/Developer/CommandLineTools /usr/bin/xcrun --sdk macosx --show-sdk-version > "$RUNNER_TEMP/sdk-version"
           /usr/bin/sw_vers > "$RUNNER_TEMP/sw-vers"
       - name: Verify pinned orchestration bootstrap before any authority exists
+        env:
+          REVIEWED_ORCHESTRATION_SHA: ${{ inputs.reviewed_orchestration_sha }}
         shell: /bin/bash -euo pipefail {0}
         run: |
           cd "$GITHUB_WORKSPACE/orchestration"
           test "${GITHUB_REPOSITORY:?}" = johnsilvavlogs/lidswitch
           test "${GITHUB_EVENT_NAME:?}" = workflow_dispatch
           test "${GITHUB_REF:?}" = refs/heads/main
-          test "${{ inputs.reviewed_orchestration_sha }}" = "${GITHUB_SHA:?}"
-          case "${{ inputs.reviewed_orchestration_sha }}" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) exit 74 ;; esac
+          test "$REVIEWED_ORCHESTRATION_SHA" = "${GITHUB_SHA:?}"
+          case "$REVIEWED_ORCHESTRATION_SHA" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) exit 74 ;; esac
           test "$(/usr/bin/git rev-parse HEAD)" = "${GITHUB_SHA:?}"
           test "$(/usr/bin/git show -s --format=%T "$GITHUB_SHA")" = "$(/usr/bin/git rev-parse HEAD^{tree})"
           origin=$(/usr/bin/git config --get remote.origin.url)
@@ -75,13 +77,14 @@ jobs:
             --source "$GITHUB_WORKSPACE/source" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" \
             --policy "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" $expected_args | tee "$RUNNER_TEMP/held-build.json"
       - name: Capture and package the retained held output without rebuilding
+        env:
+          REVIEWED_ORCHESTRATION_SHA: ${{ inputs.reviewed_orchestration_sha }}
         shell: /bin/bash -euo pipefail {0}
         run: |
           release_output=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_output"])' "$RUNNER_TEMP/held-build.json")
           package_parent=$(/usr/bin/mktemp -d "$RUNNER_TEMP/lidswitch-package.XXXXXX")
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/hosted_held_bootstrap.py" package --source "$GITHUB_WORKSPACE/source" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --policy "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" --release-output "$release_output" --package-parent "$package_parent" | tee "$RUNNER_TEMP/candidate.json"
           candidate_root=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_root"])' "$RUNNER_TEMP/candidate.json")
-          export REVIEWED_ORCHESTRATION_SHA='${{ inputs.reviewed_orchestration_sha }}'
           /usr/bin/python3 -c 'import hashlib,json,os,sys; policy,workflow,out,release,package,candidate=sys.argv[1:]; sha=lambda p: hashlib.sha256(open(p,"rb").read()).hexdigest(); value={"schema":"lidswitch-hosted-workflow-context-v2","source_commit":"6200836869591acb4bf65edb825eb62e84b56f87","source_tree":"d86650eccfe3326fc968fc855a07a1e3d06aaf57","orchestration_commit_sha":os.environ["GITHUB_SHA"],"workflow_file_sha256":sha(workflow),"workflow_ref":os.environ["GITHUB_REF"],"reviewed_orchestration_sha":os.environ["REVIEWED_ORCHESTRATION_SHA"],"run_id":os.environ["GITHUB_RUN_ID"],"run_attempt":os.environ["GITHUB_RUN_ATTEMPT"],"image_version":os.environ["ImageVersion"],"policy_sha256":sha(policy),"release_output":release,"package_parent":package,"candidate_root":candidate,"sdk_version":open(os.environ["RUNNER_TEMP"]+"/sdk-version").read().strip(),"driver_sha256":sha("/Library/Developer/CommandLineTools/usr/bin/swift-frontend")}; open(out,"wb").write(json.dumps(value,sort_keys=True,separators=(",",":")).encode()+b"\n")' "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" "$GITHUB_WORKSPACE/orchestration/.github/workflows/hosted-immutable-candidate.yml" "$RUNNER_TEMP/workflow-context.json" "$release_output" "$package_parent" "$candidate_root"
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/collect_hosted_candidate_evidence.py" --source "$GITHUB_WORKSPACE/source" --orchestration "$GITHUB_WORKSPACE/orchestration" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --package-parent "$package_parent" --candidate-root "$candidate_root" --release-output "$release_output" --workflow-context "$RUNNER_TEMP/workflow-context.json" --prepare-receipt "$RUNNER_TEMP/authority-prepare.json" --build-receipt "$RUNNER_TEMP/held-build.json" --output "$RUNNER_TEMP/lidswitch-hosted-evidence" | tee "$RUNNER_TEMP/evidence.json"
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/verify_hosted_candidate_evidence.py" --evidence "$RUNNER_TEMP/lidswitch-hosted-evidence"

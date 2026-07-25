@@ -19,6 +19,15 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
             self.assertIn(token, self.workflow)
         self.assertIn("workflow_file_sha256", self.workflow)
         self.assertIn("orchestration_commit_sha", self.workflow)
+        self.assertIn("REVIEWED_ORCHESTRATION_SHA: ${{ inputs.reviewed_orchestration_sha }}", self.workflow)
+        for line in self.workflow.splitlines():
+            if "${{ inputs.reviewed_orchestration_sha }}" in line:
+                self.assertTrue(line.lstrip().startswith("REVIEWED_ORCHESTRATION_SHA:"))
+
+    def test_shell_injection_payload_has_no_source_position(self):
+        payload = "' ; touch /tmp/pwned ; #"
+        self.assertNotIn(payload, self.workflow)
+        self.assertIn('case "$REVIEWED_ORCHESTRATION_SHA"', self.workflow)
 
     def test_build_requires_prepare_bound_expected_values(self):
         for name in ("ledger", "entry", "contract"):
