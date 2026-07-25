@@ -18,6 +18,10 @@ The workflow uses only full-SHA official actions:
 - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0` (v7.0.0)
 - `actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02` (v4.6.2)
 
+`workflow_dispatch` is evaluated from the repository default branch.  Review
+and merge the orchestration revision before dispatching it; do not bootstrap a
+candidate by executing orchestration bytes from the candidate checkout.
+
 It uploads exactly one evidence tree.  That tree contains the source identity
 and manifest, runner policy/context, system/role descriptors, generated held
 entry and contract, live-envelope receipt binding, immutable build envelope,
