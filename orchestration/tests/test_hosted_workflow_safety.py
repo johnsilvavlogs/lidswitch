@@ -23,10 +23,12 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
 
     def test_workflow_accepts_only_the_exact_policy_image(self):
         policy = json.loads((ROOT / "orchestration/hosted-runner-policy.json").read_text())
-        image = policy["runner"]["image_version"]
-        self.assertEqual(image, "20260715.0248.1")
-        self.assertIn('test "${ImageVersion:?missing ImageVersion}" = ' + image, self.workflow)
-        self.assertNotIn("20260720.0258.1", self.workflow)
+        images = policy["runner"]["image_versions"]
+        self.assertEqual(images, ["20260715.0248.1", "20260720.0258.1"])
+        for image in images:
+            self.assertEqual(self.workflow.count(image + ") ;;"), 1)
+        self.assertIn("*) exit 74 ;;", self.workflow)
+        self.assertNotIn("ImageVersion:?missing ImageVersion}" + " =", self.workflow)
 
     def test_swift_frontend_bound_covers_current_clt_without_becoming_unbounded(self):
         self.assertIn('maximum=512 * 1024 * 1024', self.bootstrap)
@@ -133,6 +135,27 @@ class HeldPackagingClosureTests(unittest.TestCase):
     def assert_denied(self, held):
         with self.assertRaises(self.bootstrap.Denied):
             self.bootstrap._sealed_package_closure(held)
+
+    def test_policy_rejects_every_noncanonical_image_set_shape(self):
+        base = json.loads((ROOT / "orchestration/hosted-runner-policy.json").read_text())
+        cases = []
+        for replacement in (
+            [],
+            ["20260720.0258.1", "20260715.0248.1"],
+            ["20260715.0248.1", "20260715.0248.1"],
+            ["20260715.0248.1", "20260720.0258.1", "20260721.0000.1"],
+            "20260715.0248.1",
+        ):
+            value = json.loads(json.dumps(base)); value["runner"]["image_versions"] = replacement; cases.append(value)
+        singular = json.loads(json.dumps(base)); singular["schema"] = "lidswitch-hosted-runner-policy-v1"; singular["runner"].pop("image_versions"); singular["runner"]["image_version"] = "20260715.0248.1"; cases.append(singular)
+        for index, value in enumerate(cases):
+            with self.subTest(index=index):
+                temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+                path = Path(temp.name) / "policy.json"
+                path.write_bytes(self.bootstrap.canonical(value))
+                with mock.patch.object(self.bootstrap, "descriptor", return_value={}):
+                    with self.assertRaises(self.bootstrap.Denied):
+                        self.bootstrap.policy(path)
 
     def test_system_sdk_selector_binds_root_owned_parent_symlink_and_target(self):
         path = Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")

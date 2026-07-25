@@ -17,6 +17,7 @@ SCHEMA = "lidswitch-hosted-evidence-v2"
 AUTHORITATIVE_CORE_SHA256 = "045c46f5fe7ab917d4e700fb4fbc10dbc125247b9eb14e8f8e6500037de14f32"
 SOURCE_COMMIT = "6200836869591acb4bf65edb825eb62e84b56f87"
 SOURCE_TREE = "d86650eccfe3326fc968fc855a07a1e3d06aaf57"
+REVIEWED_IMAGES = ["20260715.0248.1", "20260720.0258.1"]
 PACKAGING_ROLES = {
     "capture_package": "capture_immutable_build_envelope.py",
     "assemble_package": "assemble_manual_adhoc_candidate.py",
@@ -328,7 +329,11 @@ def main() -> int:
     core = trusted_core(root, files)
     policy = load(root / "orchestration/policy.json")
     exact(policy, ("runner", "schema", "source", "source_manifest_sha256", "toolchain"), "policy")
-    deny(policy["schema"] == "lidswitch-hosted-runner-policy-v1", "policy schema mismatch")
+    deny(policy["schema"] == "lidswitch-hosted-runner-policy-v2", "policy schema mismatch")
+    runner = exact(policy["runner"], ("architecture", "image_versions", "kernel", "label"), "policy runner")
+    deny(runner == {"architecture": "arm64", "image_versions": REVIEWED_IMAGES, "kernel": "25E246", "label": "macos-26"}, "policy runner mismatch")
+    toolchain_policy = exact(policy["toolchain"], ("developer_dir", "sdk_name", "swift_driver"), "policy toolchain")
+    deny(toolchain_policy == {"developer_dir": "/Library/Developer/CommandLineTools", "sdk_name": "macosx", "swift_driver": "/Library/Developer/CommandLineTools/usr/bin/swift"}, "policy toolchain mismatch")
     source = exact(policy["source"], ("commit", "tree", "wrapper_sha256"), "policy source")
     deny(source["commit"] == SOURCE_COMMIT and source["tree"] == SOURCE_TREE, "policy source mismatch")
     hexdigest(source["wrapper_sha256"], "policy wrapper")
@@ -414,7 +419,7 @@ def main() -> int:
 
     context = load(root / "workflow-context.json")
     exact(context, ("candidate_root", "driver_sha256", "image_version", "orchestration_commit_sha", "package_parent", "policy_sha256", "release_output", "reviewed_orchestration_sha", "run_attempt", "run_id", "schema", "sdk_version", "source_commit", "source_tree", "workflow_file_sha256", "workflow_ref"), "workflow context")
-    deny(context["schema"] == "lidswitch-hosted-workflow-context-v2" and context["source_commit"] == SOURCE_COMMIT and context["source_tree"] == SOURCE_TREE and context["workflow_ref"] == "refs/heads/main" and context["orchestration_commit_sha"] == context["reviewed_orchestration_sha"] and context["policy_sha256"] == files["orchestration/policy.json"]["sha256"] and context["workflow_file_sha256"] == files["orchestration/workflow.yml"]["sha256"] and context["image_version"] == policy["runner"]["image_version"], "workflow context mismatch")
+    deny(context["schema"] == "lidswitch-hosted-workflow-context-v2" and context["source_commit"] == SOURCE_COMMIT and context["source_tree"] == SOURCE_TREE and context["workflow_ref"] == "refs/heads/main" and context["orchestration_commit_sha"] == context["reviewed_orchestration_sha"] and context["policy_sha256"] == files["orchestration/policy.json"]["sha256"] and context["workflow_file_sha256"] == files["orchestration/workflow.yml"]["sha256"] and context["image_version"] in runner["image_versions"], "workflow context mismatch")
     hexdigest(context["driver_sha256"], "workflow driver")
     deny(all(isinstance(context[key], str) and context[key] for key in ("run_id", "run_attempt", "release_output", "package_parent", "candidate_root", "sdk_version")), "workflow context invalid")
     context_release_output = release_output_path(context["release_output"], "workflow release output")
