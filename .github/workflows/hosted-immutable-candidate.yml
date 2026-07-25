@@ -37,7 +37,7 @@ jobs:
           export PATH=/usr/bin:/bin:/usr/sbin:/sbin
           test "$(/usr/bin/uname -m)" = arm64
           test "$(/usr/sbin/sysctl -n kern.osversion)" = 25E246
-          test "${ImageVersion:?missing ImageVersion}" = 20260720.0258.1
+          test "${ImageVersion:?missing ImageVersion}" = 20260715.0248.1
           test -x /Library/Developer/CommandLineTools/usr/bin/swift
           test "$(DEVELOPER_DIR=/Library/Developer/CommandLineTools /usr/bin/xcrun --sdk macosx --show-sdk-path)" = /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
           DEVELOPER_DIR=/Library/Developer/CommandLineTools /usr/bin/xcrun --sdk macosx --show-sdk-version > "$RUNNER_TEMP/sdk-version"
@@ -59,7 +59,7 @@ jobs:
           test "$origin" = "https://github.com/${GITHUB_REPOSITORY}" -o "$origin" = "https://github.com/${GITHUB_REPOSITORY}.git" -o "$origin" = "git@github.com:${GITHUB_REPOSITORY}.git"
           test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
           test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = f113244c6dd0b2e96b182d9acf8f4a04f4d0464e39bddcceaa2706cc1b41faf5
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = cadfbe8f227900cdc505f256729d73f6269e4b946717609feeb3c1420fc1012c
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = 1dc3568f4fced9690aea50e19388d2cf3a874f8a34b4bc4c9c54768800e30285
           test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 0dd17112edae46f81d59a8aac71ba004354dbfab240da66421d0183d3591dcfa
           test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = cf6269b1bb037f36de64ea5de8deac80f339d86009e5e5f1c577053f3085d140
           /usr/bin/python3 -m py_compile orchestration/hosted_held_bootstrap.py orchestration/collect_hosted_candidate_evidence.py
