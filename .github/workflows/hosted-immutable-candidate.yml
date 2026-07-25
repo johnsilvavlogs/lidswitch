@@ -28,19 +28,26 @@ jobs:
       - name: Fail closed on any non-reviewed runner or toolchain
         shell: /bin/bash -euo pipefail {0}
         run: |
+          export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
           test "$(/usr/bin/uname -m)" = arm64
           test "$(/usr/sbin/sysctl -n kern.osversion)" = 25E246
           test "${ImageVersion:?missing ImageVersion}" = 20260720.0258.1
-          test "$(/usr/bin/xcode-select -p)" = /Library/Developer/CommandLineTools
           test -x /Library/Developer/CommandLineTools/usr/bin/swift
-          test "$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" = /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
-          /usr/bin/xcrun --sdk macosx --show-sdk-version > "$RUNNER_TEMP/sdk-version"
+          test "$(DEVELOPER_DIR=/Library/Developer/CommandLineTools /usr/bin/xcrun --sdk macosx --show-sdk-path)" = /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+          DEVELOPER_DIR=/Library/Developer/CommandLineTools /usr/bin/xcrun --sdk macosx --show-sdk-version > "$RUNNER_TEMP/sdk-version"
           /usr/bin/sw_vers > "$RUNNER_TEMP/sw-vers"
       - name: Verify pinned orchestration bootstrap before any authority exists
         shell: /bin/bash -euo pipefail {0}
         run: |
           cd "$GITHUB_WORKSPACE/orchestration"
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 194431219bb003d4027716f2a6824a2e555a1fc5265a2efd1c00f4f88ad667f7
+          test "${GITHUB_EVENT_NAME:?}" = workflow_dispatch
+          test "$(/usr/bin/git rev-parse HEAD)" = "${GITHUB_SHA:?}"
+          test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 85db64677e8e522d4ffa4d5aeba3a4db61aa7def13cc32561d26f5cfe8b98d17
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = cadfbe8f227900cdc505f256729d73f6269e4b946717609feeb3c1420fc1012c
+          test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 739914bd98f28b595caafde05d2e17563f5c49c1db7e4836fa7ae2c44e3e9964
+          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 918ff8fd4dd800a0f93fb607a32f12856bfb08c08c3039d9aedc2fffc66e96aa
           /usr/bin/python3 -m py_compile orchestration/hosted_held_bootstrap.py orchestration/collect_hosted_candidate_evidence.py
       - name: Create runner-specific held authority after exact source verification
         shell: /bin/bash -euo pipefail {0}
@@ -51,19 +58,20 @@ jobs:
       - name: Run only the descriptor-held unchanged release wrapper
         shell: /bin/bash -euo pipefail {0}
         run: |
+          expected_args=$(/usr/bin/python3 -I -S -B -c 'import json,sys; p=json.load(open(sys.argv[1])); print(" ".join("--expected-%s-sha256 %s --expected-%s-size %s"%(n,p[n]["sha256"],n,p[n]["size"]) for n in ("ledger","entry","contract")))' "$RUNNER_TEMP/authority-prepare.json")
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/hosted_held_bootstrap.py" build \
             --source "$GITHUB_WORKSPACE/source" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" \
-            --policy "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" | tee "$RUNNER_TEMP/held-build.json"
+            --policy "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" $expected_args | tee "$RUNNER_TEMP/held-build.json"
       - name: Capture and package the retained held output without rebuilding
         shell: /bin/bash -euo pipefail {0}
         run: |
           release_output=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["release_output"])' "$RUNNER_TEMP/held-build.json")
           package_parent=$(/usr/bin/mktemp -d "$RUNNER_TEMP/lidswitch-package.XXXXXX")
-          /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/source/script/capture_immutable_build_envelope.py" --source-commit 6200836869591acb4bf65edb825eb62e84b56f87 --source-manifest "$GITHUB_WORKSPACE/source/script/source_snapshot_manifest.jsonl" --held-build-wrapper "$GITHUB_WORKSPACE/source/script/run_swift_build_safely.sh" --swift /Library/Developer/CommandLineTools/usr/bin/swift --release-output "$release_output" --output "$package_parent/build-envelope.json"
-          candidate_root="$package_parent/candidate"
-          /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/source/script/assemble_manual_adhoc_candidate.py" --envelope-receipt "$package_parent/build-envelope.json" --release-output "$release_output" --output-root "$candidate_root" | tee "$RUNNER_TEMP/candidate.json"
+          /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/hosted_held_bootstrap.py" package --source "$GITHUB_WORKSPACE/source" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --policy "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" --release-output "$release_output" --package-parent "$package_parent" | tee "$RUNNER_TEMP/candidate.json"
+          candidate_root=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_root"])' "$RUNNER_TEMP/candidate.json")
           /usr/bin/python3 -c 'import hashlib,json,os,sys; policy,out,release,package,candidate=sys.argv[1:]; sha=lambda p: hashlib.sha256(open(p,"rb").read()).hexdigest(); value={"schema":"lidswitch-hosted-workflow-context-v1","source_commit":"6200836869591acb4bf65edb825eb62e84b56f87","source_tree":"d86650eccfe3326fc968fc855a07a1e3d06aaf57","workflow_sha":os.environ["GITHUB_SHA"],"workflow_ref":os.environ["GITHUB_REF"],"run_id":os.environ["GITHUB_RUN_ID"],"run_attempt":os.environ["GITHUB_RUN_ATTEMPT"],"image_version":os.environ["ImageVersion"],"policy_sha256":sha(policy),"release_output":release,"package_parent":package,"candidate_root":candidate,"sdk_version":open(os.environ["RUNNER_TEMP"]+"/sdk-version").read().strip(),"driver_sha256":sha("/Library/Developer/CommandLineTools/usr/bin/swift-frontend")}; open(out,"wb").write(json.dumps(value,sort_keys=True,separators=(",",":")).encode()+b"\n")' "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" "$RUNNER_TEMP/workflow-context.json" "$release_output" "$package_parent" "$candidate_root"
-          /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/collect_hosted_candidate_evidence.py" --source "$GITHUB_WORKSPACE/source" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --package-parent "$package_parent" --candidate-root "$candidate_root" --release-output "$release_output" --workflow-context "$RUNNER_TEMP/workflow-context.json" --output "$RUNNER_TEMP/lidswitch-hosted-evidence" | tee "$RUNNER_TEMP/evidence.json"
+          /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/collect_hosted_candidate_evidence.py" --source "$GITHUB_WORKSPACE/source" --orchestration "$GITHUB_WORKSPACE/orchestration" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --package-parent "$package_parent" --candidate-root "$candidate_root" --release-output "$release_output" --workflow-context "$RUNNER_TEMP/workflow-context.json" --prepare-receipt "$RUNNER_TEMP/authority-prepare.json" --build-receipt "$RUNNER_TEMP/held-build.json" --output "$RUNNER_TEMP/lidswitch-hosted-evidence" | tee "$RUNNER_TEMP/evidence.json"
+          /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/verify_hosted_candidate_evidence.py" --evidence "$RUNNER_TEMP/lidswitch-hosted-evidence"
       - name: Upload the one immutable evidence bundle
         id: evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

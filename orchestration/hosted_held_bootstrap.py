@@ -37,6 +37,18 @@ ROLES = {
     "safe_file": (34, "script/safe_file_capability.py"),
     "supervisor": (35, "script/safe_process_supervisor.py"),
     "source_manifest": (36, "script/source_snapshot_manifest.jsonl"),
+    # The packaging closure is never executed by pathname from the source
+    # checkout.  These are copied from verified descriptors into a fresh
+    # private directory before Python imports them.
+    "capture_package": (42, "script/capture_immutable_build_envelope.py"),
+    "assemble_package": (43, "script/assemble_manual_adhoc_candidate.py"),
+    "candidate_core": (44, "script/immutable_candidate_core.py"),
+    "build_manifest": (45, "script/build_immutable_candidate.py"),
+    "package_manifest": (46, "script/package_immutable_candidate.py"),
+    "validate_candidate": (47, "script/validate_immutable_candidate.py"),
+    "validate_dmg": (48, "script/validate_immutable_dmg.py"),
+    "release_identity": (49, "Resources/LidSwitchReleaseIdentity.json"),
+    "icon": (50, "Resources/LidSwitch.icns"),
 }
 FD_MAP = {name: fd for name, (fd, _path) in ROLES.items()} | {
     "repo_root": 37, "control_root": 38, "execution_root": 39,
@@ -231,7 +243,7 @@ def verify_manifest(source: Path) -> tuple[dict[str, object], str]:
 
 ENTRY = r'''#!/usr/bin/python3
 import argparse, fcntl, hashlib, json, os, stat, sys, tempfile
-EX=74; ROLES={"wrapper":30,"common":31,"envelope":32,"profile":33,"safe_file":34,"supervisor":35,"source_manifest":36}
+EX=74; ROLES={"wrapper":30,"common":31,"envelope":32,"profile":33,"safe_file":34,"supervisor":35,"source_manifest":36,"capture_package":42,"assemble_package":43,"candidate_core":44,"build_manifest":45,"package_manifest":46,"validate_candidate":47,"validate_dmg":48,"release_identity":49,"icon":50}
 def die(): raise SystemExit(EX)
 def ident(s): return (s.st_dev,s.st_ino,s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode),s.st_nlink,s.st_size)
 def read(fd,limit=8*1024*1024):
@@ -306,9 +318,36 @@ def main():
  for n in ROLES:
   q=role(root,c["roles"][n]["path"],c["roles"][n],c.get("directories",{})); close(q)
  receipt=read(os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536); rc=os.WEXITSTATUS(status) if os.WIFEXITED(status) else EX
- if not receipt.startswith(b"schema=3\\n") or (b"wrapper_exit="+str(rc).encode()+b"\\n") not in receipt: die()
  try:
-  with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v1","control_root":control,"receipt_sha256":hashlib.sha256(receipt).hexdigest(),"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\\n")
+  rows={};
+  for line in receipt.decode("utf-8","strict").splitlines():
+   k,v=line.split("=",1)
+   if not k or k in rows: die()
+   rows[k]=v
+  if rows.get("schema")!="3" or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rc!=0: die()
+  def snap(names,want):
+   for name in names:
+    try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
+    except OSError: continue
+    if hashlib.sha256(raw).hexdigest()!=want: continue
+    vals={}
+    for line in raw.decode("utf-8","strict").splitlines():
+     k,v=line.split("=",1)
+     if not k or k in vals: die()
+     vals[k]=v
+    if vals.get("host_class")!="idle-uninstalled" or vals.get("kernel_build")!="25E246": die()
+    return raw
+   die()
+  pre=snap(("live-preflight.kv","live-preflight-initial.kv"),rows.get("preflight_sha256","")); post=snap(("live-postflight.kv",),rows.get("postflight_sha256",""))
+  destination=os.path.dirname(a.hosted_receipt)
+  def save(name,data):
+   fd=os.open(os.path.join(destination,name),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o400)
+   try: os.write(fd,data); os.fsync(fd)
+   finally: os.close(fd)
+  save("live-state-retained.receipt",receipt); save("preflight-state.snapshot",pre); save("postflight-state.snapshot",post)
+ except BaseException: die()
+ try:
+  with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v2","receipt_sha256":hashlib.sha256(receipt).hexdigest(),"preflight_sha256":hashlib.sha256(pre).hexdigest(),"postflight_sha256":hashlib.sha256(post).hexdigest(),"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\\n")
  except OSError: die()
  os.write(2,("LIDSWITCH_HOSTED_HELD_RECEIPT\\nschema=1\\nreceipt_sha256="+hashlib.sha256(receipt).hexdigest()+"\\nwrapper_exit="+str(rc)+"\\n").encode()); raise SystemExit(rc)
 if __name__=="__main__":
@@ -356,6 +395,8 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
         deny("unchanged-wrapper-digest-mismatch")
     bash = descriptor(Path("/bin/bash"), system=True, maximum=16 * 1024 * 1024)
     python = descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024)
+    swift = descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=128 * 1024 * 1024)
+    sdk = checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk"))
     authority.mkdir(mode=0o700, parents=False)
     info = checked_directory(authority)
     if stat.S_IMODE(os.stat(authority, follow_symlinks=False).st_mode) != 0o700:
@@ -375,18 +416,27 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
     ledger = {"schema": "lidswitch-hosted-authority-ledger-v1", "policy": pol["descriptor"],
               "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "root": root,
                          "manifest_sha256": manifest_sha, "manifest_descriptor": manifest},
-              "system": {"python": python, "bash": bash}, "wrapper_sha256": WRAPPER_SHA256,
+              "system": {"python": python, "bash": bash, "swift_frontend": swift, "sdk_root": sdk,
+                         "developer_dir": "/Library/Developer/CommandLineTools"}, "wrapper_sha256": WRAPPER_SHA256,
               "generated": {"entry": descriptor(entry), "contract": descriptor(contract_path), "root": info}}
     fd = os.open(ledger_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
     try:
         data = canonical(ledger); os.write(fd, data); os.fsync(fd)
     finally:
         os.close(fd)
-    return {"authority": str(authority), "ledger": descriptor(ledger_path), "entry": descriptor(entry),
+    # This receipt is deliberately emitted outside the generated ledger: the
+    # next workflow step must carry these values as explicit build inputs.
+    return {"schema": "lidswitch-hosted-prepare-v2", "authority": str(authority),
+            "ledger": descriptor(ledger_path), "entry": descriptor(entry),
             "contract": descriptor(contract_path), "source_manifest_sha256": manifest_sha}
 
 
-def build(source: Path, authority: Path, policy_path: Path) -> dict[str, object]:
+def _expected(descriptor_value: dict[str, object], name: str, sha: str, size: int) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", sha) or size <= 0 or descriptor_value.get("sha256") != sha or descriptor_value.get("size") != size:
+        deny("external-expected-" + name + "-mismatch")
+
+
+def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, tuple[str, int]]) -> dict[str, object]:
     prepared = prepare_recheck(source, authority, policy_path)
     ledger = prepared["ledger"]
     generated = ledger["generated"]
@@ -396,23 +446,32 @@ def build(source: Path, authority: Path, policy_path: Path) -> dict[str, object]
         observed = descriptor(path)
         if observed != generated[name]:
             deny("generated-authority-drift: " + name)
+    _expected(descriptor(ledger_path := authority / "hosted-authority-ledger.json"), "ledger", *expected["ledger"])
+    _expected(descriptor(entry), "entry", *expected["entry"])
+    _expected(descriptor(contract), "contract", *expected["contract"])
     contract_fd = os.open(contract, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    entry_fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
-        run = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", str(entry), "--repo", str(source),
+        # /dev/fd is backed by the descriptor just verified above; a mutable
+        # authority pathname is not an execution authority.
+        run = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", "/dev/fd/" + str(entry_fd), "--repo", str(source),
                               "--contract-fd", str(contract_fd), "--contract-sha256", str(generated["contract"]["sha256"]),
                               "--contract-size", str(generated["contract"]["size"]), "--hosted-receipt", str(authority / "hosted-live-envelope.json"), "--release-candidate", "build",
                               "--print-bin-path"],
                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                             pass_fds=(contract_fd,), env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"}, check=False)
+                             pass_fds=(contract_fd, entry_fd), env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
     finally:
         os.close(contract_fd)
+        os.close(entry_fd)
     if run.returncode != 0:
         sys.stderr.write(run.stderr)
         deny("held-wrapper-failed: " + str(run.returncode))
     release_output = run.stdout.strip()
     if not release_output.startswith("/private/tmp/lidswitch-swift.") or "/release-output" not in release_output:
         deny("held-release-output-path-invalid")
-    print(canonical({"source": ledger["source"], "generated": generated, "release_output": release_output}).decode(), end="")
+    print(canonical({"schema": "lidswitch-hosted-build-v2", "source": ledger["source"], "generated": generated,
+                     "ledger": descriptor(ledger_path), "entry": descriptor(entry), "contract": descriptor(contract),
+                     "release_output": release_output}).decode(), end="")
     return {"release_output": release_output}
 
 
@@ -426,10 +485,6 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
         deny("invalid-authority-ledger")
     if ledger.get("source", {}).get("commit") != SOURCE_COMMIT or ledger.get("source", {}).get("tree") != SOURCE_TREE:
         deny("authority-source-binding-mismatch")
-    if observed != ledger.get("generated", {}).get("ledger", observed):
-        # The ledger is create-once and its descriptor is supplied separately;
-        # only its canonical content is self-describing.
-        deny("authority-ledger-self-reference-invalid")
     if git(source, "rev-parse", "HEAD").strip() != SOURCE_COMMIT or git(source, "rev-parse", "HEAD^{tree}").strip() != SOURCE_TREE:
         deny("source-drift-before-build")
     if git(source, "status", "--porcelain=v1", "--untracked-files=all"):
@@ -441,23 +496,77 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
         deny("bash-drift-before-build")
     if descriptor(Path("/usr/bin/python3"), system=True, maximum=64 * 1024 * 1024) != ledger["system"]["python"]:
         deny("python-drift-before-build")
+    if descriptor(Path("/Library/Developer/CommandLineTools/usr/bin/swift-frontend"), system=True, maximum=128 * 1024 * 1024) != ledger["system"]["swift_frontend"]:
+        deny("swift-frontend-drift-before-build")
+    if checked_directory(Path("/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk")) != ledger["system"]["sdk_root"]:
+        deny("sdk-root-drift-before-build")
     return {"ledger": ledger}
+
+
+def _copy_verified(source: Path, relative: str, expected: dict[str, object], target: Path) -> None:
+    """Copy a descriptor-verified source leaf into private held packaging."""
+    if descriptor(source / relative, maximum=256 * 1024 * 1024) != expected:
+        deny("packaging-role-drift: " + relative)
+    data = (source / relative).read_bytes()
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o500)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    if descriptor(target, maximum=256 * 1024 * 1024)["sha256"] != expected["sha256"]:
+        deny("held-packaging-copy-drift: " + relative)
+
+
+def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
+    prepared = prepare_recheck(source, authority, policy_path)
+    contract = json.loads((authority / "hosted-held-contract.json").read_text("utf-8"))
+    held = package_parent / "held-packaging"
+    if held.exists() or held.is_symlink() or package_parent.is_symlink():
+        deny("unsafe-held-packaging-root")
+    held.mkdir(mode=0o700)
+    names = {"capture_package": "capture_immutable_build_envelope.py", "assemble_package": "assemble_manual_adhoc_candidate.py", "candidate_core": "immutable_candidate_core.py", "build_manifest": "build_immutable_candidate.py", "package_manifest": "package_immutable_candidate.py", "validate_candidate": "validate_immutable_candidate.py", "validate_dmg": "validate_immutable_dmg.py", "source_manifest": "source_snapshot_manifest.jsonl", "wrapper": "run_swift_build_safely.sh"}
+    for role, name in names.items():
+        _copy_verified(source, contract["roles"][role]["path"], contract["roles"][role], held / "script" / name)
+    for role, name in (("release_identity", "LidSwitchReleaseIdentity.json"), ("icon", "LidSwitch.icns")):
+        _copy_verified(source, contract["roles"][role]["path"], contract["roles"][role], held / "Resources" / name)
+    envelope = package_parent / "build-envelope.json"
+    command = ["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/capture_immutable_build_envelope.py"), "--source-commit", SOURCE_COMMIT, "--source-manifest", str(held / "script/source_snapshot_manifest.jsonl"), "--held-build-wrapper", str(held / "script/run_swift_build_safely.sh"), "--swift", "/Library/Developer/CommandLineTools/usr/bin/swift", "--release-output", str(release_output), "--output", str(envelope)]
+    first = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
+    if first.returncode:
+        sys.stderr.write(first.stderr); deny("held-packaging-capture-failed")
+    candidate = package_parent / "candidate"
+    second = subprocess.run(["/usr/bin/python3", "-I", "-S", "-B", str(held / "script/assemble_manual_adhoc_candidate.py"), "--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--icon", str(held / "Resources/LidSwitch.icns"), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools"}, check=False)
+    if second.returncode:
+        sys.stderr.write(second.stderr); deny("held-packaging-assemble-failed")
+    prepare_recheck(source, authority, policy_path)
+    return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate), "envelope": descriptor(envelope), "held_packaging": {name: descriptor(held / "script" / name) for name in names.values()}}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("prepare", "build"):
+    for name in ("prepare", "build", "package"):
         item = sub.add_parser(name, allow_abbrev=False)
         item.add_argument("--source", required=True, type=Path)
         item.add_argument("--authority", required=True, type=Path)
         item.add_argument("--policy", required=True, type=Path)
+        if name == "build":
+            for role in ("ledger", "entry", "contract"):
+                item.add_argument("--expected-" + role + "-sha256", required=True)
+                item.add_argument("--expected-" + role + "-size", required=True, type=int)
+        if name == "package":
+            item.add_argument("--release-output", required=True, type=Path)
+            item.add_argument("--package-parent", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
             print(canonical(prepare(args.source, args.authority, args.policy)).decode(), end="")
+        elif args.command == "build":
+            build(args.source, args.authority, args.policy, {role: (getattr(args, "expected_" + role + "_sha256"), getattr(args, "expected_" + role + "_size")) for role in ("ledger", "entry", "contract")})
         else:
-            build(args.source, args.authority, args.policy)
+            print(canonical(package(args.source, args.authority, args.policy, args.release_output, args.package_parent)).decode(), end="")
         return 0
     except (Denied, OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
         print("hosted-held-bootstrap-denied: " + str(error), file=sys.stderr)

@@ -78,12 +78,18 @@ def main() -> int:
     require(policy["source_manifest_sha256"] == authority["source"]["manifest_sha256"], "manifest cross-binding mismatch")
     require(authority["generated"]["entry"]["sha256"] == files["authority/entry.py"]["sha256"] and authority["generated"]["contract"]["sha256"] == files["authority/contract.json"]["sha256"], "authority byte cross-binding mismatch")
     require(contract["roles"]["wrapper"]["sha256"] == policy["source"]["wrapper_sha256"], "wrapper cross-binding mismatch")
+    packaging_roles = {"capture_package": "capture_immutable_build_envelope.py", "assemble_package": "assemble_manual_adhoc_candidate.py", "candidate_core": "immutable_candidate_core.py", "build_manifest": "build_immutable_candidate.py", "package_manifest": "package_immutable_candidate.py", "validate_candidate": "validate_immutable_candidate.py", "validate_dmg": "validate_immutable_dmg.py"}
+    for role, name in packaging_roles.items():
+        require(contract["roles"][role]["sha256"] == files["packaging/" + name]["sha256"], "packaging closure cross-binding mismatch")
     require(context["policy_sha256"] == files["orchestration/policy.json"]["sha256"] and context["workflow_sha256"] and context["workflow_ref"] and context["run_id"] and context["image_version"] == policy["runner"]["image_version"], "workflow context mismatch")
     require(prepare["ledger"]["sha256"] == files["authority/ledger.json"]["sha256"] and build["ledger"]["sha256"] == files["authority/ledger.json"]["sha256"], "prepare/build authority mismatch")
     receipt = (root / "authority/live-state-retained.receipt").read_text("utf-8")
     fields = dict(line.split("=", 1) for line in receipt.splitlines() if "=" in line)
-    require(fields.get("terminal") == "idle-uninstalled" and fields.get("kernel") == "25E246" and fields.get("child_command_exit") == "0" and fields.get("wrapper_exit") == "0" and fields.get("outcome") == "preserved", "terminal receipt invalid")
+    require(fields.get("child_command_exit") == "0" and fields.get("wrapper_exit") == "0" and fields.get("outcome") == "preserved", "terminal receipt invalid")
     require(fields.get("preflight_sha256") == files["authority/preflight-state.snapshot"]["sha256"] and fields.get("postflight_sha256") == files["authority/postflight-state.snapshot"]["sha256"], "snapshot receipt binding mismatch")
+    for snapshot in ("authority/preflight-state.snapshot", "authority/postflight-state.snapshot"):
+        state = dict(line.split("=", 1) for line in (root / snapshot).read_text("utf-8").splitlines() if "=" in line)
+        require(state.get("host_class") == "idle-uninstalled" and state.get("kernel_build") == "25E246", "snapshot terminal state invalid")
     require(live["receipt_sha256"] == files["authority/live-state-retained.receipt"]["sha256"] and live["preflight_sha256"] == fields["preflight_sha256"] and live["postflight_sha256"] == fields["postflight_sha256"], "live-envelope binding mismatch")
     print(json.dumps({"evidence_tree_sha256": sha(ledger_path), "files_verified": len(files)}, sort_keys=True, separators=(",", ":")))
     return 0

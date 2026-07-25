@@ -86,7 +86,7 @@ def main() -> int:
         (args.source / "script/release.env", "source/release.env"),
     ]
     for relative in ("capture_immutable_build_envelope.py", "assemble_manual_adhoc_candidate.py", "immutable_candidate_core.py", "build_immutable_candidate.py", "package_immutable_candidate.py", "validate_immutable_candidate.py", "validate_immutable_dmg.py"):
-        wanted.append((args.source / "script" / relative, "packaging/" + relative))
+        wanted.append((args.package_parent / "held-packaging/script" / relative, "packaging/" + relative))
     for name in ("candidate-manifest.json", "package-manifest.json", "LidSwitch.dmg", "LidSwitch.dmg.sha256", "LidSwitchHelper"):
         wanted.append((args.candidate_root / name, "candidate/" + name))
     for name in ("LidSwitch", "LidSwitchHelper", "build-receipt.json", "GeneratedReleaseHelperTrustAnchor.generated.swift"):
