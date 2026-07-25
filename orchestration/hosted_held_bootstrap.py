@@ -76,6 +76,8 @@ PACKAGING_ENTRYPOINTS = {
     "assemble_manual_adhoc_candidate.py",
     "run_swift_build_safely.sh",
 }
+AUTHORITY_INITIAL_FILES = frozenset({"hosted-held-entry.py", "hosted-held-contract.json", "hosted-authority-ledger.json"})
+AUTHORITY_COMPLETE_FILES = AUTHORITY_INITIAL_FILES | frozenset({"live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "hosted-live-envelope.json"})
 PACKAGING_ENV = {
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
     "LC_ALL": "C",
@@ -240,6 +242,21 @@ def checked_system_directory_selector(path: Path) -> dict[str, object]:
         "parent": {"path": str(parent), **parent_before},
         "target": {"path": str(target_path), **target},
     }
+
+
+def checked_authority_root(path: Path, expected_files: frozenset[str]) -> dict[str, int]:
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_nlink < 2 or info.st_uid != os.getuid()
+                or info.st_gid != os.getgid() or stat.S_IMODE(info.st_mode) != 0o700):
+            deny("unsafe-authority-root")
+        if set(os.listdir(fd)) != set(expected_files):
+            deny("authority-inventory-mismatch")
+        return {"dev": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "gid": info.st_gid,
+                "mode": stat.S_IMODE(info.st_mode)}
+    finally:
+        os.close(fd)
 
 
 def git(source: Path, *args: str) -> str:
@@ -543,7 +560,7 @@ def prepare(source: Path, authority: Path, policy_path: Path) -> dict[str, objec
     # writing an already-created ledger leaf does not change that identity.
     ledger_fd = os.open(ledger_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
     try:
-        info = checked_directory(authority)
+        info = checked_authority_root(authority, AUTHORITY_INITIAL_FILES)
         ledger = {"schema": "lidswitch-hosted-authority-ledger-v1", "policy": pol["descriptor"],
                   "source": {"commit": SOURCE_COMMIT, "tree": SOURCE_TREE, "root": root,
                              "manifest_sha256": manifest_sha, "manifest_descriptor": manifest},
@@ -566,7 +583,7 @@ def _expected(descriptor_value: dict[str, object], name: str, sha: str, size: in
 
 
 def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, tuple[str, int]]) -> dict[str, object]:
-    prepared = prepare_recheck(source, authority, policy_path)
+    prepared = prepare_recheck(source, authority, policy_path, completed=False)
     ledger = prepared["ledger"]
     generated = ledger["generated"]
     entry = authority / "hosted-held-entry.py"
@@ -595,12 +612,10 @@ def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, 
     if run.returncode != 0:
         sys.stderr.write(run.stderr)
         deny("held-wrapper-failed: " + str(run.returncode))
-    release_output = run.stdout.strip()
-    if not release_output.startswith("/private/tmp/lidswitch-swift.") or "/release-output" not in release_output:
-        deny("held-release-output-path-invalid")
+    release_output = retained_release_output(authority)
     # Recheck the candidate after the wrapper and bind the actual retained
     # host-state proof into the build receipt rather than a hash-only claim.
-    prepare_recheck(source, authority, policy_path)
+    prepare_recheck(source, authority, policy_path, completed=True)
     retained = {name: descriptor(authority / name, maximum=65536) for name in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "hosted-live-envelope.json")}
     print(canonical({"schema": "lidswitch-hosted-build-v2", "source": ledger["source"], "generated": generated,
                      "ledger": descriptor(ledger_path), "entry": descriptor(entry), "contract": descriptor(contract),
@@ -608,7 +623,35 @@ def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, 
     return {"release_output": release_output}
 
 
-def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[str, object]:
+def retained_release_output(authority: Path) -> str:
+    receipt_path = authority / "live-state-retained.receipt"
+    fd = os.open(receipt_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        raw = read_fd(fd, 65536)
+    finally:
+        os.close(fd)
+    rows: dict[str, str] = {}
+    for line in raw.decode("utf-8", "strict").splitlines():
+        if "=" not in line:
+            deny("invalid-retained-receipt")
+        key, value = line.split("=", 1)
+        if not key or key in rows:
+            deny("invalid-retained-receipt")
+        rows[key] = value
+    expected = {"schema", "nonce", "outcome", "child_command_exit", "wrapper_exit", "preflight_sha256",
+                "postflight_sha256", "host_preserved", "benchmark_published", "error", "capture_identifiers",
+                "control_root", "execution_root"}
+    if set(rows) != expected or rows["schema"] != "3" or rows["outcome"] != "preserved" or rows["child_command_exit"] != "0" or rows["wrapper_exit"] != "0" or rows["host_preserved"] != "true" or rows["error"] != "none":
+        deny("invalid-retained-receipt")
+    execution = Path(rows["execution_root"])
+    if execution.parent != Path("/private/tmp") or re.fullmatch(r"lidswitch-swift\.[A-Za-z0-9._+-]{1,128}", execution.name) is None:
+        deny("held-release-output-path-invalid")
+    release_output = execution / "release-output"
+    checked_directory(release_output)
+    return str(release_output)
+
+
+def prepare_recheck(source: Path, authority: Path, policy_path: Path, *, completed: bool) -> dict[str, object]:
     policy(policy_path)
     ledger_path = authority / "hosted-authority-ledger.json"
     observed = descriptor(ledger_path, maximum=1024 * 1024)
@@ -620,7 +663,8 @@ def prepare_recheck(source: Path, authority: Path, policy_path: Path) -> dict[st
         deny("authority-source-binding-mismatch")
     if checked_directory(source) != ledger["source"]["root"]:
         deny("source-root-replacement-before-build")
-    if checked_directory(authority) != ledger["generated"]["root"]:
+    expected_files = AUTHORITY_COMPLETE_FILES if completed else AUTHORITY_INITIAL_FILES
+    if checked_authority_root(authority, expected_files) != ledger["generated"]["root"]:
         deny("authority-root-replacement-before-build")
     if git(source, "rev-parse", "HEAD").strip() != SOURCE_COMMIT or git(source, "rev-parse", "HEAD^{tree}").strip() != SOURCE_TREE:
         deny("source-drift-before-build")
@@ -815,7 +859,7 @@ def _run_sealed_packaging(entry: Path, held: Path, allowed_modules: list[str], a
 
 
 def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
-    prepared = prepare_recheck(source, authority, policy_path)
+    prepared = prepare_recheck(source, authority, policy_path, completed=True)
     contract_path = authority / "hosted-held-contract.json"
     raw_contract = _read_authority_descriptor(contract_path, prepared["ledger"]["generated"]["contract"])
     contract = json.loads(raw_contract.decode("utf-8"))
@@ -867,7 +911,7 @@ def package(source: Path, authority: Path, policy_path: Path, release_output: Pa
     if second.returncode:
         sys.stderr.write(second.stderr); deny("held-packaging-assemble-failed")
     _require_sealed_package_closure(held, names, closure)
-    prepare_recheck(source, authority, policy_path)
+    prepare_recheck(source, authority, policy_path, completed=True)
     return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate), "envelope": descriptor(envelope), "held_packaging": closure}
 
 

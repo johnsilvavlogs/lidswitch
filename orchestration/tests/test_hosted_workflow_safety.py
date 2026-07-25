@@ -88,7 +88,7 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
 
     def test_authority_root_is_frozen_after_every_leaf_exists(self):
         ledger_create = self.bootstrap.index("ledger_fd = os.open(ledger_path")
-        root_freeze = self.bootstrap.index("info = checked_directory(authority)", ledger_create)
+        root_freeze = self.bootstrap.index("info = checked_authority_root(authority, AUTHORITY_INITIAL_FILES)", ledger_create)
         ledger_write = self.bootstrap.index("os.write(ledger_fd, data)", root_freeze)
         self.assertLess(ledger_create, root_freeze)
         self.assertLess(root_freeze, ledger_write)
@@ -175,7 +175,43 @@ class HeldPackagingClosureTests(unittest.TestCase):
             result = self.bootstrap.prepare(source, authority, Path(temp.name) / "policy.json")
         self.assertEqual(result["schema"], "lidswitch-hosted-prepare-v2")
         ledger = json.loads((authority / "hosted-authority-ledger.json").read_text())
-        self.assertEqual(ledger["generated"]["root"], directory)
+        root = ledger["generated"]["root"]
+        self.assertEqual(set(root), {"dev", "inode", "uid", "gid", "mode"})
+        self.assertEqual(root["inode"], os.stat(authority, follow_symlinks=False).st_ino)
+
+    def test_authority_root_uses_stable_identity_and_exact_staged_inventory(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        authority = Path(temp.name) / "authority"
+        authority.mkdir(mode=0o700)
+        for name in self.bootstrap.AUTHORITY_INITIAL_FILES:
+            (authority / name).write_bytes(b"held")
+        anchor = self.bootstrap.checked_authority_root(authority, self.bootstrap.AUTHORITY_INITIAL_FILES)
+        self.assertEqual(set(anchor), {"dev", "inode", "uid", "gid", "mode"})
+        (authority / "unexpected").write_bytes(b"no")
+        with self.assertRaisesRegex(self.bootstrap.Denied, "authority-inventory-mismatch"):
+            self.bootstrap.checked_authority_root(authority, self.bootstrap.AUTHORITY_INITIAL_FILES)
+
+    def test_retained_receipt_selects_release_output_without_trusting_wrapper_stdout(self):
+        authority_temp = tempfile.TemporaryDirectory()
+        execution_temp = tempfile.TemporaryDirectory(prefix="lidswitch-swift.", dir="/private/tmp")
+        self.addCleanup(authority_temp.cleanup)
+        self.addCleanup(execution_temp.cleanup)
+        authority = Path(authority_temp.name)
+        execution = Path(execution_temp.name)
+        release_output = execution / "release-output"
+        release_output.mkdir(mode=0o700)
+        rows = {
+            "schema": "3", "nonce": "fixture", "outcome": "preserved", "child_command_exit": "0",
+            "wrapper_exit": "0", "preflight_sha256": "1" * 64, "postflight_sha256": "2" * 64,
+            "host_preserved": "true", "benchmark_published": "false", "error": "none",
+            "capture_identifiers": "fixture", "control_root": "/private/tmp/lidswitch-envelope.fixture",
+            "execution_root": str(execution),
+        }
+        receipt = authority / "live-state-retained.receipt"
+        receipt.write_text("".join(f"{key}={value}\n" for key, value in rows.items()))
+        os.chmod(receipt, 0o400)
+        self.assertEqual(self.bootstrap.retained_release_output(authority), str(release_output))
 
     def test_exact_closure_records_directories_and_all_leaves(self):
         temp, held = self.make_sealed_closure()
@@ -246,7 +282,7 @@ class HeldPackagingClosureTests(unittest.TestCase):
         (authority / "hosted-authority-ledger.json").write_bytes(self.bootstrap.canonical(ledger))
         with mock.patch.object(self.bootstrap, "policy"), mock.patch.object(self.bootstrap, "descriptor", return_value={}), mock.patch.object(self.bootstrap, "checked_directory", return_value={"inode": 99}):
             with self.assertRaisesRegex(self.bootstrap.Denied, "source-root-replacement-before-build"):
-                self.bootstrap.prepare_recheck(source, authority, Path(temp.name) / "policy.json")
+                self.bootstrap.prepare_recheck(source, authority, Path(temp.name) / "policy.json", completed=False)
 
     def test_poisoned_cwd_and_pythonpath_are_ignored_for_sealed_runner(self):
         temp, held = self.make_sealed_closure()
