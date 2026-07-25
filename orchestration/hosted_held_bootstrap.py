@@ -529,12 +529,23 @@ def _copy_verified(source: Path, relative: str, expected: dict[str, object], tar
         deny("held-packaging-copy-drift: " + relative)
 
 
+def _read_authority_descriptor(path: Path, expected: dict[str, object]) -> bytes:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        data = read_fd(fd, 1024 * 1024)
+        actual = {"path": str(path), "dev": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "nlink": info.st_nlink, "size": info.st_size, "sha256": sha256(data)}
+        if actual != expected:
+            deny("packaging-contract-authority-drift")
+        return data
+    finally:
+        os.close(fd)
+
+
 def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
     prepared = prepare_recheck(source, authority, policy_path)
     contract_path = authority / "hosted-held-contract.json"
-    if descriptor(contract_path) != prepared["ledger"]["generated"]["contract"]:
-        deny("packaging-contract-authority-drift")
-    raw_contract = contract_path.read_bytes()
+    raw_contract = _read_authority_descriptor(contract_path, prepared["ledger"]["generated"]["contract"])
     contract = json.loads(raw_contract.decode("utf-8"))
     if canonical(contract) != raw_contract or contract.get("source_manifest") != prepared["ledger"]["source"]["manifest_descriptor"]["sha256"]:
         deny("packaging-contract-invalid")

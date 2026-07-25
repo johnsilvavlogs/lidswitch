@@ -23,7 +23,7 @@ class HostedEvidenceVerifierTests(unittest.TestCase):
         policy = {"runner":{"image_version":"image"},"source":{"commit":"c","tree":"t","wrapper_sha256":"w"},"source_manifest_sha256":"m"}; names["orchestration/policy.json"] = policy
         contract = {"roles":{"wrapper":{"sha256":"w"}}}; names["authority/contract.json"] = contract
         authority = {"source":{"commit":"c","tree":"t","manifest_sha256":"m"},"generated":{"entry":{},"contract":{}}}; names["authority/ledger.json"] = authority
-        context = {"source_commit":"c","source_tree":"t","policy_sha256":"","workflow_sha256":"s","workflow_ref":"r","run_id":"1","image_version":"image"}; names["workflow-context.json"] = context
+        context = {"old_context_key":"s"}; names["workflow-context.json"] = context
         for rel, value in names.items():
             path=root/rel
             if value is None:
