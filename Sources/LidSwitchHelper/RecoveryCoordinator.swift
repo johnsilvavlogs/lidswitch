@@ -62,6 +62,14 @@ final class RecoveryCoordinator {
         guard let store = storeFactory(configuration.supportDirectory) else {
             return projectRequired("unsafe-root-state-directory")
         }
+        // An administrator one-shot may be the only live helper process when
+        // launchd is disabled during install/recovery. Do not rely on its
+        // asynchronous queue surviving process exit: synchronously retire only
+        // an already-ambiguous receipt whose exact members and PGID/SID are
+        // stably absent. No signal or second mutation is reachable here.
+        if intent != .startup && !allowReconnect {
+            _ = Self.reconcileExtinctAmbiguousContainment(store: store)
+        }
         guard let outcome = store.withTransaction({ transaction in
             self.withContainmentReceipt(store: store, transaction: transaction) {
                 self.recoverLocked(
@@ -1098,6 +1106,72 @@ final class RecoveryCoordinator {
     /// Claim under RootStateLock, run exactly one signal/reap/inventory action
     /// after releasing it, then compare-and-swap the same token back under the
     /// lock. A queued task is therefore never allowed to wedge XPC or status.
+    @discardableResult
+    static func reconcileExtinctAmbiguousContainment(store: RecoveryAuthorityStore) -> Bool {
+        let now = UInt64(max(0, MonotonicClock.seconds()) * 1_000_000_000)
+        let owner = UUID()
+        guard let receipt = store.withTransaction({ transaction -> ContainedProcessReceipt? in
+            guard case let .valid(current) = store.containmentReceiptRecord(),
+                  current.phase == .ambiguous else { return nil }
+            return store.claimContainmentReceipt(
+                token: current.token,
+                owner: owner,
+                now: now,
+                until: now &+ 500_000_000,
+                transaction
+            )
+        }) ?? nil else { return false }
+        guard ContainedProcessRunner.cleanupStep(receipt: receipt, owner: owner, now: now) == .extinguished
+        else { return false }
+        return store.withTransaction { transaction in
+            retireExtinctContainmentReceipt(
+                receipt,
+                owner: owner,
+                store: store,
+                transaction: transaction
+            )
+        } ?? false
+    }
+
+    private static func retireExtinctContainmentReceipt(
+        _ receipt: ContainedProcessReceipt,
+        owner: UUID,
+        store: RecoveryAuthorityStore,
+        transaction: VerifiedRootStateDirectory.Transaction
+    ) -> Bool {
+        let closed: ContainedProcessReceipt
+        if receipt.leaderReaped {
+            closed = receipt
+        } else {
+            guard let observed = receipt.markingKernelExtinctionVerified(
+                owner: owner,
+                deadline: receipt.ownerDeadlineNanoseconds
+            ), store.advanceContainmentReceipt(expected: receipt, next: observed, transaction)
+            else { return false }
+            closed = observed
+        }
+        guard let extinct = closed.advancing(
+                to: .extinguished,
+                owner: owner,
+                deadline: closed.ownerDeadlineNanoseconds
+              ),
+              store.advanceContainmentReceipt(expected: closed, next: extinct, transaction),
+              case let .valid(current) = store.containmentReceiptRecord(), current == extinct
+        else { return false }
+        // Preserve an existing terminal/migrated proof; otherwise durably
+        // require explicit recovery before removing the fence, so no
+        // reconnect/begin path can auto-rearm.
+        switch store.proofRecord() {
+        case .absent, .invalid:
+            guard store.markRecoveryRequired(
+                "containment-extinguished-explicit-recovery-required",
+                transaction
+            ).isVerified else { return false }
+        case .valid: break
+        }
+        return store.removeContainmentReceipt(expected: extinct, transaction) == .removed
+    }
+
     static func scheduleContainmentCleanup(configuration: HelperServiceConfiguration, owner continuingOwner: UUID? = nil) {
         containmentCleanupQueue.async {
             guard let store = RecoveryAuthorityStore(supportDirectory: configuration.supportDirectory) else { return }
@@ -1126,19 +1200,12 @@ final class RecoveryCoordinator {
             switch action {
             case .extinguished:
                 _ = store.withTransaction { transaction in
-                    guard let extinct = receipt.advancing(to: .extinguished, owner: owner, deadline: receipt.ownerDeadlineNanoseconds),
-                          store.advanceContainmentReceipt(expected: receipt, next: extinct, transaction),
-                          case let .valid(current) = store.containmentReceiptRecord(), current == extinct
-                    else { return false }
-                    // Preserve an existing terminal/migrated proof; otherwise
-                    // durably require explicit recovery before removing the
-                    // fence, so no reconnect/begin path can auto-rearm.
-                    switch store.proofRecord() {
-                    case .absent, .invalid:
-                        guard store.markRecoveryRequired("containment-extinguished-explicit-recovery-required", transaction).isVerified else { return false }
-                    case .valid: break
-                    }
-                    return store.removeContainmentReceipt(expected: extinct, transaction) == .removed
+                    retireExtinctContainmentReceipt(
+                        receipt,
+                        owner: owner,
+                        store: store,
+                        transaction: transaction
+                    )
                 }
             case .signalKILL:
                 // Persist both KILL intent and issued latch before the signal.

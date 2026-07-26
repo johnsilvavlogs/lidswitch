@@ -141,16 +141,52 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      ownerDeadlineNanoseconds: deadline)
     }
 
+    /// An ambiguity fence may be reclaimed only for a new read-only kernel
+    /// extinction proof. It deliberately remains in `.ambiguous`, so a live,
+    /// reused, mismatched, or incomplete inventory can never regain signal
+    /// authority after the original cleanup owner is gone.
+    public func reclaimedAmbiguousForExtinctionProof(
+        by owner: UUID,
+        now: UInt64,
+        until deadline: UInt64
+    ) -> ContainedProcessReceipt? {
+        guard phase == .ambiguous, ownerDeadlineNanoseconds < now, deadline > now else { return nil }
+        return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
+                     leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
+                     rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
+                     noSecondMutation: noSecondMutation, phase: .ambiguous,
+                     termSignalIssued: termSignalIssued, killSignalIssued: killSignalIssued,
+                     leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount,
+                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline)
+    }
+
     public func advancing(to next: CleanupPhase, owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
-        guard cleanupOwnerToken == owner, phase == .term || phase == .kill,
+        guard cleanupOwnerToken == owner, phase == .term || phase == .kill || phase == .ambiguous,
               (next == .kill || next == .ambiguous || next == .extinguished), deadline >= ownerDeadlineNanoseconds
         else { return nil }
+        guard phase != .ambiguous || next == .extinguished else { return nil }
         guard next != .extinguished || leaderReaped else { return nil }
         return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: next, termSignalIssued: termSignalIssued, killSignalIssued: next == .kill ? false : killSignalIssued, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: owner,
                      ownerDeadlineNanoseconds: deadline)
+    }
+
+    /// The legacy `leader_reaped` storage bit is the durable leader-lifecycle
+    /// closure latch. The original parent sets it after waitpid; a later
+    /// cleanup owner may set it only after two stable kernel inventories prove
+    /// every exact receipt member and the bound PGID/SID are absent. This
+    /// closes restart recovery without treating ECHILD alone as proof.
+    public func markingKernelExtinctionVerified(owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
+        guard !leaderReaped, cleanupOwnerToken == owner, deadline >= ownerDeadlineNanoseconds,
+              phase == .term || phase == .kill || phase == .ambiguous else { return nil }
+        return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
+                     leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
+                     rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
+                     noSecondMutation: noSecondMutation, phase: phase, termSignalIssued: termSignalIssued,
+                     killSignalIssued: killSignalIssued, leaderReaped: true, reapAttemptCount: reapAttemptCount,
+                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline)
     }
 
     /// The TERM intent is committed before the signal.  On restart a committed
@@ -337,11 +373,10 @@ public enum ContainedProcessCleanupMachine {
         case .memberReusedOrUnknown, .groupOrSessionMismatch, .incompleteInventory:
             return .retainFence
         case .leaderReapedAndExtinct:
-            if receipt.leaderReaped { return .extinguished }
-            // Absence of members cannot remove a receipt until this parent has
-            // itself reaped the recorded leader.  At lease expiry it becomes
-            // one retained ambiguity, not an endlessly scheduled waitpid.
-            return now < receipt.ownerDeadlineNanoseconds && receipt.reapAttemptCount < 8 ? .reapLeader : .retainFence
+            // Every recorded birth tuple is absent and two stable inventories
+            // prove the bound PGID/SID empty. This closes restart recovery even
+            // when waitpid correctly reports ECHILD to a later non-parent.
+            return .extinguished
         case .liveExact:
             guard now < receipt.cleanupDeadlineNanoseconds else { return .retainFence }
             switch receipt.phase {

@@ -62,7 +62,7 @@ try: sys.argv=[p]+sys.argv[3:]; exec(code,{"__name__":"__main__","__file__":p,"_
 except BaseException:
  if isinstance(sys.exc_info()[1],SystemExit) and sys.exc_info()[1].code==74: raise
  raise SystemExit(74)
-' script/test_safe_envelope.py da2fd56836c07024d8b26385f43b82f0fe70856f23fb179ae1b70846ada68510
+' script/test_safe_envelope.py 9aad0bad1073fa7046a912f30b977b557dcd3633c006a5e0fbd1b2c358555a83
 ```
 
 Do not substitute bare `python3`, `/usr/bin/env python`, an Anaconda/interpreter
@@ -103,6 +103,7 @@ test_benchmark_app_intake_uses_the_production_private_tmp_capability
 test_benchmark_private_tmp_name_boundaries_and_public_intake_are_exact
 test_bootstrap_early_eof_and_interruption_regressions
 test_explicit_runner_rejects_private_namespace_zero_discovery_and_result_classes
+test_hosted_absent_sleepdisabled_is_limited_to_exact_idle_uninstalled_proof
 test_production_artifact_capabilities_reject_tree_swaps_and_false_rows
 test_production_capture_verifier_round_trip_and_adversarial_mutations
 test_production_cleanup_fd_plan_executes_verified_bytes_after_path_swap
@@ -117,8 +118,8 @@ test_selected_clt_capability_contract_rejects_inherited_or_alternate_roots
 test_trusted_isolated_python_gate_source_contract
 ```
 
-An authentic gate run prints each of those 16 test names at verbosity 2, then
-`Ran 16 tests` and `OK`. Discovery drift, zero tests, duplicate/missing/extra or
+An authentic gate run prints each of those 17 test names at verbosity 2, then
+`Ran 17 tests` and `OK`. Discovery drift, zero tests, duplicate/missing/extra or
 renamed methods, a skip, expected failure, unexpected success, failure, or error
 terminates with 74; no nominal `OK` is accepted for a partial inventory.
 

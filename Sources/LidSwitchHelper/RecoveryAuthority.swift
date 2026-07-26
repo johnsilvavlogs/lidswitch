@@ -1841,7 +1841,9 @@ final class RecoveryAuthorityStore {
     ) -> ContainedProcessReceipt? {
         guard case let .valid(current) = containmentReceiptRecord(), current.token == token,
               let claimed = (current.cleanupOwnerToken == owner && current.ownerDeadlineNanoseconds > now) ? current
-                : (current.claimed(by: owner, until: deadline) ?? current.reclaimed(by: owner, now: now, until: deadline)),
+                : (current.claimed(by: owner, until: deadline)
+                    ?? current.reclaimed(by: owner, now: now, until: deadline)
+                    ?? current.reclaimedAmbiguousForExtinctionProof(by: owner, now: now, until: deadline)),
               publish(claimed.storagePayload, Self.containmentReceiptBasename, transaction, parser: {
                   ContainedProcessReceipt.parse($0) == claimed
               }).isVerified
