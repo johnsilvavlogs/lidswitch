@@ -51,7 +51,7 @@ def authority_root_descriptor():
 
 def system_descriptor(path, sha256):
     return {"path": path, "dev": 1, "inode": 1, "uid": 0, "gid": 0, "mode": 0o555,
-            "nlink": 1, "size": 1, "sha256": sha256}
+            "nlink": 2, "size": 1, "sha256": sha256}
 
 
 def sdk_descriptor():
@@ -297,6 +297,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         self.assertEqual(authority["policy"]["mode"], 0o644)
         self.assertEqual(authority["generated"]["entry"]["mode"], 0o500)
         self.assertEqual(contract["roles"]["candidate_core"]["mode"], 0o644)
+        self.assertEqual(authority["system"]["python"]["nlink"], 2)
         result = self.verify(root)
         temp.cleanup()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -318,6 +319,22 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         cases = {
             "writable-mode": (lambda authority: authority["policy"].update(mode=0o666), "authority policy descriptor invalid"),
             "wrong-bytes": (lambda authority: authority["policy"].update(sha256="0" * 64), "authority policy byte binding mismatch"),
+        }
+        for label, (transform, message) in cases.items():
+            with self.subTest(label=label):
+                temp, root = self.make_fixture()
+                self.rewrite_authority_ledger(root, transform)
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+    def test_system_descriptors_allow_hardlinks_but_reject_unsafe_metadata(self):
+        cases = {
+            "owner": (lambda authority: authority["system"]["python"].update(uid=1), "authority python owner mismatch"),
+            "writable-mode": (lambda authority: authority["system"]["python"].update(mode=0o666), "authority python descriptor invalid"),
+            "zero-link": (lambda authority: authority["system"]["python"].update(nlink=0), "authority python descriptor invalid"),
+            "non-system-hardlink": (lambda authority: authority["policy"].update(nlink=2), "authority policy descriptor invalid"),
         }
         for label, (transform, message) in cases.items():
             with self.subTest(label=label):

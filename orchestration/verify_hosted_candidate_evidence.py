@@ -129,7 +129,8 @@ def descriptor(value: object, *, path: str | None = None, label: str,
     hexdigest(item["sha256"], label)
     for key in ("dev", "gid", "inode", "mode", "nlink", "size", "uid"):
         deny(isinstance(item[key], int) and not isinstance(item[key], bool) and item[key] >= 0, label + " descriptor invalid")
-    deny(item["nlink"] == 1 and item["size"] > 0 and item["mode"] <= 0o777
+    nlink_ok = item["nlink"] >= 1 if system_owned else item["nlink"] == 1
+    deny(nlink_ok and item["size"] > 0 and item["mode"] <= 0o777
          and not item["mode"] & 0o022, label + " descriptor invalid")
     if system_owned:
         deny(item["uid"] == 0 and item["gid"] == 0, label + " owner mismatch")
