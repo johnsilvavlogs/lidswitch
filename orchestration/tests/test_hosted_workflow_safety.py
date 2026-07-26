@@ -406,3 +406,11 @@ class HeldPackagingClosureTests(unittest.TestCase):
 
     def test_generated_held_entry_is_parseable(self):
         compile(self.bootstrap.ENTRY, "held-entry.py", "exec")
+
+    def test_generated_held_entry_uses_canonical_newline_bytes(self):
+        constants = [node.value for node in ast.walk(ast.parse(self.bootstrap.ENTRY)) if isinstance(node, ast.Constant)]
+        self.assertIn(b"\n", constants)
+        self.assertNotIn(b"\\n", constants)
+        marker = next(value for value in constants if isinstance(value, str) and value.startswith("LIDSWITCH_HOSTED_HELD_RECEIPT"))
+        self.assertIn("\n", marker)
+        self.assertNotIn("\\n", marker)

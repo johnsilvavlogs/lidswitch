@@ -431,7 +431,7 @@ def main():
  if len(raw)!=a.contract_size or hashlib.sha256(raw).hexdigest()!=a.contract_sha256: die()
  try: c=json.loads(raw.decode("utf-8"))
  except BaseException: die()
- if json.dumps(c,sort_keys=True,separators=(",",":")).encode()+b"\\n"!=raw or c.get("schema")!="lidswitch-hosted-held-contract-v1" or c.get("fd_map")!={**ROLES,"repo_root":37,"control_root":38,"execution_root":39,"terminal_pipe":40,"startup_gate":41}: die()
+ if json.dumps(c,sort_keys=True,separators=(",",":")).encode()+b"\n"!=raw or c.get("schema")!="lidswitch-hosted-held-contract-v1" or c.get("fd_map")!={**ROLES,"repo_root":37,"control_root":38,"execution_root":39,"terminal_pipe":40,"startup_gate":41}: die()
  if set(c.get("roles",{}))!=set(ROLES) or c.get("roles",{}).get("wrapper",{}).get("path")!="script/run_swift_build_safely.sh": die()
  close(a.contract_fd); root=os.open(a.repo,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC); rs=os.fstat(root)
  if not stat.S_ISDIR(rs.st_mode) or rs.st_mode&0o022: die()
@@ -456,7 +456,7 @@ def main():
   if set(rows)!={"schema","nonce","outcome","child_command_exit","wrapper_exit","preflight_sha256","postflight_sha256","host_preserved","benchmark_published","error","capture_identifiers","control_root","execution_root"} or rows.get("schema")!="3" or not rows.get("nonce") or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rows.get("host_preserved")!="true" or rows.get("benchmark_published") not in ("true","false") or rows.get("error")!="none" or rows.get("control_root")!=control or rows.get("execution_root")!=execution or any(len(rows.get(name,""))!=64 or any(ch not in "0123456789abcdef" for ch in rows[name]) for name in ("preflight_sha256","postflight_sha256")) or len(capture_values)!=len(capture_names) or any(not value.startswith(name+":") or len(value)!=len(name)+130 or any(ch not in "0123456789abcdef:" for ch in value[len(name)+1:]) or value[len(name)+65]!=":" for name,value in zip(capture_names,capture_values)) or rc!=0: die()
   release_raw=read(os.open(os.path.join(execution,"release-output","build-receipt.json"),os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC),262144)
   release=json.loads(release_raw.decode("utf-8"))
-  if json.dumps(release,sort_keys=True,separators=(",",":")).encode()+b"\\n"!=release_raw or tuple(release.get("captures",{}))!=capture_names or any(capture_values[index]!=name+":"+release["captures"][name] for index,name in enumerate(capture_names)): die()
+  if json.dumps(release,sort_keys=True,separators=(",",":")).encode()+b"\n"!=release_raw or tuple(release.get("captures",{}))!=capture_names or any(capture_values[index]!=name+":"+release["captures"][name] for index,name in enumerate(capture_names)): die()
   def snap(names,want):
    for name in names:
     try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
@@ -479,9 +479,9 @@ def main():
   save("live-state-retained.receipt",receipt); save("preflight-state.snapshot",pre); save("postflight-state.snapshot",post)
  except BaseException: die()
  try:
-  with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v2","receipt_sha256":hashlib.sha256(receipt).hexdigest(),"preflight_sha256":hashlib.sha256(pre).hexdigest(),"postflight_sha256":hashlib.sha256(post).hexdigest(),"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\\n")
+  with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v2","receipt_sha256":hashlib.sha256(receipt).hexdigest(),"preflight_sha256":hashlib.sha256(pre).hexdigest(),"postflight_sha256":hashlib.sha256(post).hexdigest(),"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\n")
  except OSError: die()
- os.write(2,("LIDSWITCH_HOSTED_HELD_RECEIPT\\nschema=1\\nreceipt_sha256="+hashlib.sha256(receipt).hexdigest()+"\\nwrapper_exit="+str(rc)+"\\n").encode()); raise SystemExit(rc)
+ os.write(2,("LIDSWITCH_HOSTED_HELD_RECEIPT\nschema=1\nreceipt_sha256="+hashlib.sha256(receipt).hexdigest()+"\nwrapper_exit="+str(rc)+"\n").encode()); raise SystemExit(rc)
 if __name__=="__main__":
  try: main()
  except SystemExit: raise
