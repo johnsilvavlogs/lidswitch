@@ -69,7 +69,7 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
-        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "LIDSWITCH_HOSTED_WRAPPER_FAILURE", "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "held-terminal-receipt-missing", "hosted-authority-inventory=", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
+        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "LIDSWITCH_HOSTED_WRAPPER_FAILURE", "LIDSWITCH_HOSTED_PREFLIGHT_FAILURE", "control_files=", "status_reason_class", "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "held-terminal-receipt-missing", "hosted-authority-inventory=", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
             self.assertIn(token, self.bootstrap)
 
     def test_verifier_closes_the_complete_evidence_inventory(self):
