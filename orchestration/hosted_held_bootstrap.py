@@ -444,7 +444,26 @@ def main():
  pid=os.posix_spawn("/bin/bash",["/bin/bash","-p","--","/dev/fd/30",*a.args],env,file_actions=acts); close(gr); os.write(gw,b"R"); close(gw); close(tw); _,status=os.waitpid(pid,0); bash(c["bash"])
  for n in ROLES:
   q=role(root,c["roles"][n]["path"],c["roles"][n],c.get("directories",{})); close(q)
- receipt=read(os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536); rc=os.WEXITSTATUS(status) if os.WIFEXITED(status) else EX
+ rc=os.WEXITSTATUS(status) if os.WIFEXITED(status) else EX
+ try: receipt_fd=os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd)
+ except OSError:
+  allowed=("live-preflight-initial.kv","live-preflight.kv","live-postflight.kv","live-state-retained.receipt")
+  try: present=tuple(name for name in allowed if name in os.listdir(cfd))
+  except OSError: die()
+  values={}
+  for name in ("live-preflight.kv","live-preflight-initial.kv"):
+   if name not in present: continue
+   try: diagnostic=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
+   except SystemExit: continue
+   try:
+    for line in diagnostic.decode("utf-8","strict").splitlines():
+     key,value=line.split("=",1)
+     if key in ("host_class","kernel_build","power_source","sleep_disabled","launchd_presence","status_presence","authority_kind","status_reason_class") and 0<len(value)<=128 and all(ch.isalnum() or ch in "-._" for ch in value): values[key]=value
+   except BaseException: die()
+   break
+  fields=("host_class","kernel_build","power_source","sleep_disabled","launchd_presence","status_presence","authority_kind","status_reason_class")
+  os.write(2,("LIDSWITCH_HOSTED_PREFLIGHT_FAILURE\nschema=1\ncontrol_files="+(",".join(present) if present else "none")+"\n"+"".join(key+"="+values.get(key,"missing")+"\n" for key in fields)).encode()); die()
+ receipt=read(receipt_fd,65536)
  try:
   rows={};
   for line in receipt.decode("utf-8","strict").splitlines():
