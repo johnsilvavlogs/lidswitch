@@ -297,37 +297,20 @@ def trusted_core(root: Path, files: dict[str, object]):
     return module
 
 
-def candidate_order(value: dict[str, object]) -> dict[str, object]:
-    """Restore the producer's typed order before invoking its exact validator.
+def load_captured_source_json(path: Path, core) -> dict[str, object]:
+    """Parse bytes emitted by the pinned candidate source, not orchestration JSON.
 
-    Candidate JSON is canonicalized with sorted keys on disk.  The pinned core
-    intentionally uses insertion order as an additional typed-schema check, so
-    its pure validator is invoked with the producer order after this verifier
-    has already established canonical bytes.
+    The collector has already bound the exact raw bytes in ``evidence-tree.json``.
+    Captured envelope and manifest bytes use the pinned core's insertion-order
+    canonical format, which intentionally differs from orchestration's
+    sorted-key JSON format.
     """
-    def ordered(item: object, names: tuple[str, ...]) -> object:
-        if not isinstance(item, dict):
-            return item
-        return {name: item[name] for name in names}
-    artifact = ("role", "name", "sha256", "size", "mode", "uid", "gid", "tree_sha256", "signature_receipt")
-    signed = artifact + ("identifier", "cdhash", "signing_profile", "team_id", "notarized")
-    receipt = ("role", "name", "sha256", "tool_sha256", "subject_role", "subject_name", "subject_sha256", "subject_size", "source_commit", "candidate_binding", "previous_receipt", "strict", "exit")
-    release = ordered(value["envelope"]["release_output"], ("seal_sha256", "build_receipt_sha256", "anchor_sha256", "anchor_size", "source_manifest_sha256", "release_identity_sha256", "app", "helper"))
-    release["app"] = ordered(release["app"], ("identifier", "sha256", "size"))
-    release["helper"] = ordered(release["helper"], ("cdhash", "identifier", "sha256", "signature", "size", "teamIdentifier", "timestamp"))
-    envelope = ordered(value["envelope"], ("receipt_sha256", "wrapper_sha256", "source_tree_sha256", "toolchain_sha256", "release_output")); envelope["release_output"] = release
-    package = ordered(value["package"], ("dmg", "checksum", "extraction_receipt", "extracted_tree_sha256"))
-    for name in ("dmg", "checksum"):
-        if package[name] is not None:
-            package[name] = ordered(package[name], artifact)
-    return {
-        "schema_version": value["schema_version"], "candidate_id": value["candidate_id"], "phase": value["phase"],
-        "envelope": envelope,
-        "release_identity": ordered(value["release_identity"], ("name", "sha256", "signing_profile", "team_id", "notarized")),
-        "source": ordered(value["source"], ("commit", "tree_sha256")),
-        "helper": ordered(value["helper"], signed), "app": ordered(value["app"], signed), "package": package,
-        "receipts": [ordered(item, receipt) for item in value["receipts"]],
-    }
+    try:
+        value = core.parse(path.read_bytes())
+    except (core.CandidateError, UnicodeError, ValueError) as error:
+        raise ValueError("invalid captured source json: " + str(path)) from error
+    deny(isinstance(value, dict), "captured source json is not an object: " + str(path))
+    return value
 
 
 def source_manifest(root: Path, files: dict[str, object], policy: dict[str, object]) -> dict[str, dict[str, object]]:
@@ -505,17 +488,17 @@ def main() -> int:
     context_release_output = release_output_path(context["release_output"], "workflow release output")
     deny(swift["sha256"] == context["driver_sha256"], "authority/context toolchain mismatch")
 
-    envelope = load(root / "package/build-envelope.json")
-    exact(envelope, ("environment", "executables", "release_output", "schema_version", "source_commit", "source_tree_sha256", "toolchain_sha256", "wrapper_sha256"), "build envelope")
+    envelope = load_captured_source_json(root / "package/build-envelope.json", core)
+    exact(envelope, ("schema_version", "wrapper_sha256", "source_commit", "source_tree_sha256", "toolchain_sha256", "executables", "environment", "release_output"), "build envelope")
     deny(envelope["schema_version"] == core.ENVELOPE_SCHEMA and envelope["source_commit"] == SOURCE_COMMIT and envelope["source_tree_sha256"] == policy["source_manifest_sha256"] and envelope["wrapper_sha256"] == source["wrapper_sha256"] and envelope["toolchain_sha256"] == context["driver_sha256"], "build envelope mismatch")
     deny(envelope["environment"] == {"locale": "C", "timezone": "UTC", "path": "/usr/bin:/bin:/usr/sbin:/sbin"}, "build envelope environment mismatch")
     deny(isinstance(envelope["executables"], list) and 1 <= len(envelope["executables"]) <= 16, "build envelope executable mismatch")
     roles = set()
     for executable in envelope["executables"]:
-        exact(executable, ("path", "role", "sha256"), "build executable")
+        exact(executable, ("role", "path", "sha256"), "build executable")
         deny(isinstance(executable["role"], str) and executable["role"] not in roles and isinstance(executable["path"], str), "build executable mismatch")
         roles.add(executable["role"]); hexdigest(executable["sha256"], "executable digest")
-    release = exact(envelope["release_output"], ("anchor_sha256", "anchor_size", "app", "build_receipt_sha256", "helper", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"), "release output")
+    release = exact(envelope["release_output"], ("seal_sha256", "build_receipt_sha256", "anchor_sha256", "anchor_size", "source_manifest_sha256", "release_identity_sha256", "app", "helper"), "release output")
     release_receipt = load(root / "release-output/build-receipt.json")
     check_release_receipt(release_receipt, files)
     deny(release_receipt["toolchain"]["sdk"] == sdk_target["path"], "release SDK authority binding mismatch")
@@ -524,21 +507,21 @@ def main() -> int:
     for key in ("anchor_sha256", "build_receipt_sha256", "release_identity_sha256", "seal_sha256", "source_manifest_sha256"):
         hexdigest(release[key], "release digest")
 
-    candidate = load(root / "candidate/candidate-manifest.json")
-    packaged = load(root / "candidate/package-manifest.json")
+    candidate = load_captured_source_json(root / "candidate/candidate-manifest.json", core)
+    packaged = load_captured_source_json(root / "candidate/package-manifest.json", core)
     candidate_keys = {"schema_version", "candidate_id", "phase", "envelope", "release_identity", "source", "helper", "app", "package", "receipts"}
     deny(set(candidate) == candidate_keys and set(packaged) == candidate_keys, "candidate manifest schema mismatch")
     envelope_sha = files["package/build-envelope.json"]["sha256"]
     try:
-        core.validate_manifest(candidate_order(candidate), envelope, envelope_sha)
-        core.validate_manifest(candidate_order(packaged), envelope, envelope_sha)
+        core.validate_manifest(candidate, envelope, envelope_sha)
+        core.validate_manifest(packaged, envelope, envelope_sha)
     except (core.CandidateError, KeyError, TypeError, ValueError) as error:
         raise ValueError("candidate manifest invalid: " + str(error)) from error
     deny(candidate["phase"] == "app-captured" and packaged["phase"] == "package-captured" and candidate["receipts"] == packaged["receipts"][:6], "candidate phase/receipt mismatch")
     deny(len(packaged["receipts"]) == 9 and tuple(item["role"] for item in packaged["receipts"]) == core.PHASES["package-captured"], "candidate receipt order mismatch")
-    binding = core.candidate_binding(candidate_order(packaged))
+    binding = core.candidate_binding(packaged)
     previous = "0" * 64
-    for item in candidate_order(packaged)["receipts"]:
+    for item in packaged["receipts"]:
         deny(item["candidate_binding"] == binding and item["source_commit"] == SOURCE_COMMIT and item["previous_receipt"] == previous and item["sha256"] == sha_bytes(core.canonical_receipt_payload(item)), "candidate receipt chain mismatch")
         previous = item["sha256"]
     for manifest in (candidate, packaged):
