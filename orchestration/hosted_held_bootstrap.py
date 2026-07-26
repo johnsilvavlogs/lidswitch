@@ -128,6 +128,19 @@ for module_name in allowed:
     module_file = getattr(module, "__file__", None)
     if not isinstance(module_file, str) or os.path.dirname(os.path.realpath(module_file)) != script_root:
         raise SystemExit(74)
+# ``-I``/``-S`` plus the rebuilt path prevent normal inherited imports.  Audit
+# the loaded module set as well: an entry that mutates ``sys.path`` must not be
+# able to pull a module from the source checkout, cwd, or another same-UID
+# location while the held package is executing.
+for module in tuple(sys.modules.values()):
+    module_file = getattr(module, "__file__", None)
+    if module_file is None:
+        continue
+    if not isinstance(module_file, str):
+        raise SystemExit(74)
+    resolved = os.path.realpath(module_file)
+    if not (resolved.startswith(script_root + os.sep) or trusted_stdlib(resolved)):
+        raise SystemExit(74)
 raise SystemExit(exit_code)
 '''
 

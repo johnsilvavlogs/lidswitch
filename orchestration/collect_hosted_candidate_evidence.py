@@ -13,6 +13,29 @@ from pathlib import Path
 MAX = 1024 * 1024 * 1024
 SCHEMA = "lidswitch-hosted-evidence-v2"
 
+# The ledger must name every retained leaf, not just a convenient subset of
+# cross-links.  Keeping this as a closed identity map makes omissions and
+# additions independently visible in the immutable evidence receipt.
+EXPECTED_BINDINGS = {
+    "orchestration/workflow.yml", "orchestration/bootstrap.py", "orchestration/policy.json",
+    "orchestration/collector.py", "orchestration/verifier.py", "receipts/prepare.json",
+    "receipts/build.json", "authority/ledger.json", "authority/entry.py",
+    "authority/contract.json", "authority/live-envelope.json",
+    "authority/live-state-retained.receipt", "authority/preflight-state.snapshot",
+    "authority/postflight-state.snapshot", "workflow-context.json",
+    "source/source_snapshot_manifest.jsonl", "source/release.env", "package/build-envelope.json",
+    "packaging/capture_immutable_build_envelope.py",
+    "packaging/assemble_manual_adhoc_candidate.py",
+    "packaging/immutable_candidate_core.py", "packaging/build_immutable_candidate.py",
+    "packaging/package_immutable_candidate.py", "packaging/validate_immutable_candidate.py",
+    "packaging/validate_immutable_dmg.py", "packaging/LidSwitchReleaseIdentity.json",
+    "candidate/candidate-manifest.json", "candidate/package-manifest.json",
+    "candidate/LidSwitch.dmg", "candidate/LidSwitch.dmg.sha256", "candidate/LidSwitchHelper",
+    "release-output/LidSwitch", "release-output/LidSwitchHelper",
+    "release-output/build-receipt.json",
+    "release-output/GeneratedReleaseHelperTrustAnchor.generated.swift",
+}
+
 
 def canon(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
@@ -97,9 +120,11 @@ def main() -> int:
         wanted.append((args.release_output / name, "release-output/" + name))
     for source, relative in wanted:
         copy_leaf(source, args.output / relative, files, relative)
+    if set(files) != EXPECTED_BINDINGS:
+        raise ValueError("unexpected hosted evidence inventory")
     ledger = {"schema": SCHEMA, "files": files,
               "inventory": sorted(files),
-              "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}
+              "bindings": {relative: relative for relative in sorted(EXPECTED_BINDINGS)}}
     payload = canon(ledger)
     ledger_path = args.output / "evidence-tree.json"
     ledger_path.write_bytes(payload)

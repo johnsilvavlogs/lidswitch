@@ -170,7 +170,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": "d86650eccfe3326fc968fc855a07a1e3d06aaf57", "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": image_version or policy_images[0], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
         write(root / "workflow-context.json", context, 0o400)
         files = {relative: meta(root / relative) for relative in required}
-        write(root / "evidence-tree.json", {"schema": "lidswitch-hosted-evidence-v2", "files": files, "inventory": sorted(files), "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}, 0o400)
+        write(root / "evidence-tree.json", {"schema": "lidswitch-hosted-evidence-v2", "files": files, "inventory": sorted(files), "bindings": {relative: relative for relative in sorted(required)}}, 0o400)
         return temp, root
 
     def verify(self, root):
@@ -282,8 +282,8 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
     def test_receipt_chain_drift_is_rejected(self):
         temp, root = self.make_fixture(); value = json.loads((root / "candidate/package-manifest.json").read_text()); value["receipts"][1]["previous_receipt"] = "0" * 64; write(root / "candidate/package-manifest.json", value); result = self.verify(root); temp.cleanup(); self.assertNotEqual(result.returncode, 0)
 
-    def test_empty_or_extra_bindings_are_rejected(self):
-        for bindings in ({}, {"extra": "candidate/LidSwitch.dmg"}):
+    def test_every_required_leaf_is_bound_and_partial_or_extra_bindings_are_rejected(self):
+        for bindings in ({}, {"extra": "candidate/LidSwitch.dmg"}, {relative: relative for relative in sorted(__import__("runpy").run_path(str(VERIFY))["REQUIRED"] - {"candidate/LidSwitch.dmg"})}):
             temp, root = self.make_fixture(); ledger = json.loads((root / "evidence-tree.json").read_text()); ledger["bindings"] = bindings; write(root / "evidence-tree.json", ledger); result = self.verify(root); temp.cleanup(); self.assertNotEqual(result.returncode, 0)
 
     def test_v3_semantic_tampering_is_rejected_after_reledgering(self):

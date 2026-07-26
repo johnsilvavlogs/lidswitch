@@ -28,19 +28,6 @@ PACKAGING_ROLES = {
     "validate_dmg": "validate_immutable_dmg.py",
 }
 CAPTURE_NAMES = ("app-bin-path", "app-build", "helper-bin-path", "helper-build", "helper-identity", "helper-sign", "helper-verify")
-FIXED_BINDINGS = {
-    "source_manifest": "source/source_snapshot_manifest.jsonl",
-    "authority_ledger": "authority/ledger.json",
-    "contract": "authority/contract.json",
-    "entry": "authority/entry.py",
-    "live_receipt": "authority/live-state-retained.receipt",
-    "preflight": "authority/preflight-state.snapshot",
-    "postflight": "authority/postflight-state.snapshot",
-    "workflow": "orchestration/workflow.yml",
-    "context": "workflow-context.json",
-    "prepare": "receipts/prepare.json",
-    "build": "receipts/build.json",
-}
 REQUIRED = {
     "orchestration/workflow.yml", "orchestration/bootstrap.py", "orchestration/policy.json",
     "orchestration/collector.py", "orchestration/verifier.py", "receipts/prepare.json",
@@ -56,6 +43,11 @@ REQUIRED = {
     "release-output/LidSwitchHelper", "release-output/build-receipt.json",
     "release-output/GeneratedReleaseHelperTrustAnchor.generated.swift",
 }
+# A self-map is intentionally redundant with ``files``: it is an exact,
+# human-auditable statement that every retained leaf participates in the
+# evidence contract.  Rejecting a partial or widened map prevents a reledgered
+# subset from silently becoming the claimed authority surface.
+FIXED_BINDINGS = {relative: relative for relative in sorted(REQUIRED)}
 
 
 def canon(value: object) -> bytes:

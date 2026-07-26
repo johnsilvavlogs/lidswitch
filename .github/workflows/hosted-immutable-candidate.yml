@@ -62,10 +62,10 @@ jobs:
           origin=$(/usr/bin/git config --get remote.origin.url)
           test "$origin" = "https://github.com/${GITHUB_REPOSITORY}" -o "$origin" = "https://github.com/${GITHUB_REPOSITORY}.git" -o "$origin" = "git@github.com:${GITHUB_REPOSITORY}.git"
           test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = d4604d2d60b4302a9da8dd8cb8e1df6bd294b7e3fe7240465a5360dd18798849
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 1c31cb62c91cd64cdba9dd26b0b3966a2ba59d5c27b26941c9a997f432b8905c
           test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = 544a80fe29971976f5924622c751bd63be8009fe9eab12d58e1affad5d52d6fb
-          test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 0dd17112edae46f81d59a8aac71ba004354dbfab240da66421d0183d3591dcfa
-          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 033d4da7a284a6743ebfb0dbf05a3c93d6abe8c86fbc7f523faccc6b2c41ce01
+          test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 27c1413dc9cdcb7df9d8ecaf3a92d987bf40327769eadc60f366cce211a562c8
+          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 5a5a11c1eebfa96c912f5494c94654bcce0269fec253ff5f8deff4fc4ef094ce
           /usr/bin/python3 -m py_compile orchestration/hosted_held_bootstrap.py orchestration/collect_hosted_candidate_evidence.py
       - name: Create runner-specific held authority after exact source verification
         shell: /bin/bash -euo pipefail {0}

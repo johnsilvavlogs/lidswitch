@@ -395,6 +395,27 @@ class HeldPackagingClosureTests(unittest.TestCase):
                 os.environ["PYTHONPATH"] = previous
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_sealed_launcher_rejects_entry_added_foreign_module_path(self):
+        temp, held = self.make_sealed_closure()
+        self.addCleanup(temp.cleanup)
+        script = held / "script"
+        entry = script / "capture_immutable_build_envelope.py"
+        foreign = Path(temp.name) / "foreign"
+        foreign.mkdir()
+        (foreign / "unsealed.py").write_text("VALUE = 'unsealed'\n")
+        os.chmod(script, 0o700)
+        os.chmod(entry, 0o700)
+        entry.write_text(
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "import unsealed\n"
+            "assert unsealed.VALUE == 'unsealed'\n" % str(foreign)
+        )
+        os.chmod(entry, 0o500)
+        os.chmod(script, 0o500)
+        result = self.bootstrap._run_sealed_packaging(entry, held, [], [])
+        self.assertEqual(result.returncode, 74, result.stderr)
+
     def test_runner_passes_only_sealed_env_cwd_and_isolated_flags(self):
         with mock.patch.object(self.bootstrap.subprocess, "run") as run:
             self.bootstrap._run_sealed_packaging(Path("/private/tmp/held/script/entry.py"), Path("/private/tmp/held"), ["immutable_candidate_core"], ["--safe"])
