@@ -122,19 +122,37 @@ def positive(value: object, label: str) -> int:
     return value
 
 
-def descriptor(value: object, *, path: str | None = None, label: str) -> dict[str, object]:
+def descriptor(value: object, *, path: str | None = None, label: str,
+               system_owned: bool = False, mode: int | None = None) -> dict[str, object]:
     item = exact(value, ("dev", "gid", "inode", "mode", "nlink", "path", "sha256", "size", "uid"), label)
     deny(isinstance(item["path"], str) and (path is None or item["path"] == path), label + " path mismatch")
     hexdigest(item["sha256"], label)
     for key in ("dev", "gid", "inode", "mode", "nlink", "size", "uid"):
         deny(isinstance(item[key], int) and not isinstance(item[key], bool) and item[key] >= 0, label + " descriptor invalid")
-    deny(item["nlink"] == 1 and item["size"] > 0, label + " descriptor invalid")
+    deny(item["nlink"] == 1 and item["size"] > 0 and item["mode"] <= 0o777
+         and not item["mode"] & 0o022, label + " descriptor invalid")
+    if system_owned:
+        deny(item["uid"] == 0 and item["gid"] == 0, label + " owner mismatch")
+    if mode is not None:
+        deny(item["mode"] == mode, label + " mode mismatch")
     return item
 
 
 def descriptor_matches(item: object, meta: dict[str, object], label: str) -> dict[str, object]:
     value = descriptor(item, label=label)
-    deny(value["sha256"] == meta["sha256"] and value["size"] == meta["size"] and value["mode"] == meta["mode"], label + " byte binding mismatch")
+    # Evidence is a normalized, read-only copy.  Its 0400 mode is intentionally
+    # not the source descriptor mode; only immutable bytes and their length bind
+    # the original descriptor to that copy.
+    deny(value["sha256"] == meta["sha256"] and value["size"] == meta["size"], label + " byte binding mismatch")
+    return value
+
+
+def authority_descriptor(item: object, meta: dict[str, object], root: dict[str, object],
+                         *, mode: int, label: str) -> dict[str, object]:
+    """Bind an authority-owned source descriptor to its normalized evidence copy."""
+    value = descriptor_matches(item, meta, label)
+    deny(value["uid"] == root["uid"] and value["gid"] == root["gid"] and value["mode"] == mode,
+         label + " authority descriptor mismatch")
     return value
 
 
@@ -259,7 +277,7 @@ def leaf_meta(root: Path, relative: str, expected: object) -> dict[str, object]:
     path = root / relative
     info = os.lstat(path)
     deny(not path.is_symlink() and stat.S_ISREG(info.st_mode), "unsafe evidence leaf: " + relative)
-    deny(expected["nlink"] == info.st_nlink == 1 and expected["mode"] == stat.S_IMODE(info.st_mode)
+    deny(expected["nlink"] == info.st_nlink == 1 and expected["mode"] == stat.S_IMODE(info.st_mode) == 0o400
          and expected["size"] == info.st_size and expected["sha256"] == sha(path), "evidence mismatch: " + relative)
     hexdigest(expected["sha256"], "ledger digest")
     positive(expected["size"], "ledger size")
@@ -409,8 +427,10 @@ def main() -> int:
     generated = exact(authority["generated"], ("contract", "entry", "root"), "authority generated")
     generated_root = exact(generated["root"], ("dev", "gid", "inode", "mode", "uid"), "authority generated root")
     deny(all(isinstance(generated_root[key], int) and generated_root[key] >= 0 for key in ("dev", "gid", "inode", "uid")) and generated_root["inode"] > 0 and generated_root["mode"] == 0o700, "authority generated root mismatch")
-    generated_entry = descriptor_matches(generated["entry"], files["authority/entry.py"], "authority entry")
-    generated_contract = descriptor_matches(generated["contract"], files["authority/contract.json"], "authority contract")
+    generated_entry = authority_descriptor(generated["entry"], files["authority/entry.py"], generated_root,
+                                           mode=0o500, label="authority entry")
+    generated_contract = authority_descriptor(generated["contract"], files["authority/contract.json"], generated_root,
+                                              mode=0o400, label="authority contract")
     contract = load(root / "authority/contract.json")
     exact(contract, ("bash", "directories", "fd_map", "roles", "schema", "source_manifest"), "authority contract")
     deny(contract["schema"] == "lidswitch-hosted-held-contract-v1" and contract["source_manifest"] == policy["source_manifest_sha256"], "authority contract mismatch")
@@ -426,9 +446,9 @@ def main() -> int:
     deny(contract["roles"]["wrapper"]["sha256"] == source["wrapper_sha256"], "wrapper cross-binding mismatch")
     deny(isinstance(authority["system"], dict) and set(authority["system"]) == {"python", "bash", "swift_frontend", "sdk_root", "developer_dir"}, "authority system mismatch")
     system = authority["system"]
-    descriptor(system["python"], path="/usr/bin/python3", label="authority python")
-    descriptor(system["bash"], path="/bin/bash", label="authority bash")
-    swift = descriptor(system["swift_frontend"], path="/Library/Developer/CommandLineTools/usr/bin/swift-frontend", label="authority swift")
+    descriptor(system["python"], path="/usr/bin/python3", label="authority python", system_owned=True)
+    descriptor(system["bash"], path="/bin/bash", label="authority bash", system_owned=True)
+    swift = descriptor(system["swift_frontend"], path="/Library/Developer/CommandLineTools/usr/bin/swift-frontend", label="authority swift", system_owned=True)
     sdk = exact(system["sdk_root"], ("parent", "selector", "target"), "authority sdk root")
     sdk_parent = exact(sdk["parent"], ("dev", "gid", "inode", "mode", "nlink", "path", "uid"), "authority sdk parent")
     sdk_selector = exact(sdk["selector"], ("dev", "gid", "inode", "mode", "nlink", "path", "size", "target", "type", "uid"), "authority sdk selector")
@@ -444,14 +464,16 @@ def main() -> int:
     deny(prepare["schema"] == "lidswitch-hosted-prepare-v2" and prepare["source_manifest_sha256"] == policy["source_manifest_sha256"], "prepare receipt mismatch")
     authority_path = Path(prepare["authority"])
     deny(authority_path.is_absolute() and "." not in authority_path.parts and ".." not in authority_path.parts and not path_under(authority_path, source_root) and not path_under(authority_path, policy_path.parent), "prepare authority path mismatch")
-    expected_authority_paths = {"ledger": ("authority/ledger.json", "hosted-authority-ledger.json"), "entry": ("authority/entry.py", "hosted-held-entry.py"), "contract": ("authority/contract.json", "hosted-held-contract.json")}
-    for name, (relative, suffix) in expected_authority_paths.items():
-        observed = descriptor_matches(prepare[name], files[relative], "prepare binding")
+    expected_authority_paths = {"ledger": ("authority/ledger.json", "hosted-authority-ledger.json", 0o400), "entry": ("authority/entry.py", "hosted-held-entry.py", 0o500), "contract": ("authority/contract.json", "hosted-held-contract.json", 0o400)}
+    for name, (relative, suffix, mode) in expected_authority_paths.items():
+        observed = authority_descriptor(prepare[name], files[relative], generated_root,
+                                        mode=mode, label="prepare binding")
         absolute_child(observed["path"], authority_path, suffix, "prepare " + name)
     exact(build, ("contract", "entry", "generated", "ledger", "release_output", "retained", "schema", "source"), "build receipt")
     deny(build["schema"] == "lidswitch-hosted-build-v2" and build["source"] == authority["source"] and build["generated"] == authority["generated"], "build authority mismatch")
-    for name, (relative, suffix) in expected_authority_paths.items():
-        observed = descriptor_matches(build[name], files[relative], "build binding")
+    for name, (relative, suffix, mode) in expected_authority_paths.items():
+        observed = authority_descriptor(build[name], files[relative], generated_root,
+                                        mode=mode, label="build binding")
         absolute_child(observed["path"], authority_path, suffix, "build " + name)
         same_descriptor(observed, prepare[name], "prepare/build " + name)
     same_descriptor(prepare["entry"], generated_entry, "prepare/generated entry")
