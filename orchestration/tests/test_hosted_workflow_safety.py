@@ -7,6 +7,7 @@ import signal
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -483,22 +484,32 @@ class HeldPackagingClosureTests(unittest.TestCase):
 
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         root = Path(temp.name)
-        missing = root / "missing"; present = root / "present"; unknown = root / "unknown"
-        missing.mkdir(); present.mkdir(); unknown.mkdir()
+        missing = root / "missing"; present = root / "present"; symlink = root / "symlink"
+        directory = root / "directory"; fifo = root / "fifo"
+        missing.mkdir(); present.mkdir(); symlink.mkdir(); directory.mkdir(); fifo.mkdir()
         (present / "live-state-retained.receipt").write_bytes(b"metadata only")
-        os.symlink("target", unknown / "live-state-retained.receipt")
+        os.symlink("target", symlink / "live-state-retained.receipt")
+        (directory / "live-state-retained.receipt").mkdir()
+        os.mkfifo(fifo / "live-state-retained.receipt")
         fds = {
             "absent": os.open(missing, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
             "present": os.open(present, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
-            "unknown": os.open(unknown, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
+            "unknown": os.open(symlink, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
+            "unknown-directory": os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
+            "unknown-fifo": os.open(fifo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
         }
         for fd in fds.values():
             self.addCleanup(os.close, fd)
         statuses = {"zero": 0, "nonzero": 5 << 8, "signaled": signal.SIGTERM, "unknown": 0x7F}
+        presence_cases = (
+            ("absent", fds["absent"]), ("present", fds["present"]),
+            ("unknown", fds["unknown"]), ("unknown", fds["unknown-directory"]),
+            ("unknown", fds["unknown-fifo"]),
+        )
 
         for stage in stages:
             for rc_class, status in statuses.items():
-                for presence, control_fd in fds.items():
+                for presence, control_fd in presence_cases:
                     block = scope["hosted_entry_failure_block"](stage, status, control_fd)
                     self.assertLessEqual(len(block), 256)
                     self.assertTrue(block.endswith(b"\n"))
@@ -515,6 +526,14 @@ class HeldPackagingClosureTests(unittest.TestCase):
                         self.assertNotIn(forbidden, block)
 
         self.assertIn(b"stage=internal\n", scope["hosted_entry_failure_block"]("not-a-stage", 0, fds["absent"]))
+        self.assertEqual(scope["retained_receipt_presence"](-1), "unknown")
+        with mock.patch.object(scope["os"], "stat", side_effect=OSError(13, "metadata denied")):
+            self.assertEqual(scope["retained_receipt_presence"](fds["absent"]), "unknown")
+        fifo_result = []
+        fifo_probe = threading.Thread(target=lambda: fifo_result.append(scope["retained_receipt_presence"](fds["unknown-fifo"])), daemon=True)
+        fifo_probe.start(); fifo_probe.join(0.25)
+        self.assertFalse(fifo_probe.is_alive(), "metadata-only FIFO classification must not wait for a writer")
+        self.assertEqual(fifo_result, ["unknown"])
         emitted = [False]
         with mock.patch.object(scope["os"], "write", return_value=1) as write:
             self.assertTrue(scope["emit_hosted_entry_failure"](emitted, "bash-reassert", 0, fds["absent"]))

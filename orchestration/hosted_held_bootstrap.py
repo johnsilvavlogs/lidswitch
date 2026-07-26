@@ -399,19 +399,11 @@ def child_rc_class(status):
  if os.WIFSIGNALED(status): return "signaled"
  return "unknown"
 def retained_receipt_presence(control_fd):
- fd=None
  try:
-  fd=os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=control_fd)
+  meta=os.stat("live-state-retained.receipt",dir_fd=control_fd,follow_symlinks=False)
  except OSError as error:
   return "absent" if error.errno==errno.ENOENT else "unknown"
- try:
-  meta=os.fstat(fd)
-  return "present" if stat.S_ISREG(meta.st_mode) and meta.st_nlink==1 else "unknown"
- except OSError: return "unknown"
- finally:
-  if fd is not None:
-   try: os.close(fd)
-   except OSError: pass
+ return "present" if stat.S_ISREG(meta.st_mode) and meta.st_nlink==1 else "unknown"
 def hosted_entry_failure_block(stage,status,control_fd):
  if stage not in POST_CHILD_STAGES: stage="internal"
  block=("LIDSWITCH_HOSTED_ENTRY_FAILURE\nschema=1\nstage="+stage+"\nchild_rc_class="+child_rc_class(status)+"\nreceipt_presence="+retained_receipt_presence(control_fd)+"\n").encode("ascii")
