@@ -46,7 +46,7 @@ def directory_descriptor():
 
 
 def authority_root_descriptor():
-    return {"dev": 1, "inode": 1, "uid": 1, "gid": 1, "mode": 0o700}
+    return {"dev": 1, "inode": 1, "uid": os.getuid(), "gid": os.getgid(), "mode": 0o700}
 
 
 def system_descriptor(path, sha256):
@@ -88,16 +88,16 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
             "validate_dmg": "validate_immutable_dmg.py",
         }
         for role, name in package_names.items():
-            write(root / "packaging" / name, source_bytes("script/" + name), 0o444)
-        write(root / "packaging/LidSwitchReleaseIdentity.json", source_bytes("Resources/LidSwitchReleaseIdentity.json"), 0o444)
+            write(root / "packaging" / name, source_bytes("script/" + name), 0o644)
+        write(root / "packaging/LidSwitchReleaseIdentity.json", source_bytes("Resources/LidSwitchReleaseIdentity.json"), 0o644)
         core = core_module((root / "packaging/immutable_candidate_core.py").read_bytes())
-        write(root / "source/source_snapshot_manifest.jsonl", source_bytes("script/source_snapshot_manifest.jsonl"), 0o444)
-        write(root / "source/release.env", source_bytes("script/release.env"), 0o444)
-        write(root / "orchestration/policy.json", (ROOT / "orchestration/hosted-runner-policy.json").read_bytes(), 0o444)
-        write(root / "orchestration/workflow.yml", b"workflow", 0o444)
-        write(root / "orchestration/bootstrap.py", b"bootstrap", 0o444)
-        write(root / "orchestration/collector.py", b"collector", 0o444)
-        write(root / "orchestration/verifier.py", b"verifier", 0o444)
+        write(root / "source/source_snapshot_manifest.jsonl", source_bytes("script/source_snapshot_manifest.jsonl"), 0o644)
+        write(root / "source/release.env", source_bytes("script/release.env"), 0o644)
+        write(root / "orchestration/policy.json", (ROOT / "orchestration/hosted-runner-policy.json").read_bytes(), 0o644)
+        write(root / "orchestration/workflow.yml", b"workflow", 0o644)
+        write(root / "orchestration/bootstrap.py", b"bootstrap", 0o644)
+        write(root / "orchestration/collector.py", b"collector", 0o644)
+        write(root / "orchestration/verifier.py", b"verifier", 0o644)
         write(root / "authority/entry.py", b"entry", 0o500)
         roles = {"wrapper": {"path": "script/run_swift_build_safely.sh", "dev": 1, "inode": 1, "uid": 1, "gid": 1, "mode": 0o555, "nlink": 1, "size": 1, "sha256": json.loads((root / "orchestration/policy.json").read_text())["source"]["wrapper_sha256"]}}
         for role, name in package_names.items():
@@ -184,6 +184,11 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         policy_images = json.loads((root / "orchestration/policy.json").read_text())["runner"]["image_versions"]
         context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": TREE, "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": image_version or policy_images[0], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
         write(root / "workflow-context.json", context, 0o400)
+        # The collector copies every declared leaf into the evidence tree and
+        # normalizes that copy to 0400.  Source descriptors above intentionally
+        # retain their pre-copy source modes (for example 0644 and 0500).
+        for relative in required:
+            os.chmod(root / relative, 0o400)
         files = {relative: meta(root / relative) for relative in required}
         write(root / "evidence-tree.json", {"schema": "lidswitch-hosted-evidence-v2", "files": files, "inventory": sorted(files), "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "preflight_assertions": "authority/preflight.pmset-assertions", "postflight_assertions": "authority/postflight.pmset-assertions", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}, 0o400)
         return temp, root
@@ -214,6 +219,28 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         ledger = json.loads((root / "evidence-tree.json").read_text())
         ledger["files"][relative] = meta(path)
         write(root / "evidence-tree.json", ledger, 0o400)
+
+    def rewrite_authority_ledger(self, root, transform):
+        authority_path = root / "authority/ledger.json"
+        authority = json.loads(authority_path.read_text())
+        transform(authority)
+        write(authority_path, authority, 0o400)
+
+        prepare_path = root / "receipts/prepare.json"
+        prepare = json.loads(prepare_path.read_text())
+        prepare["ledger"] = descriptor(authority_path, prepare["ledger"]["path"])
+        write(prepare_path, prepare, 0o400)
+
+        build_path = root / "receipts/build.json"
+        build = json.loads(build_path.read_text())
+        build["ledger"] = prepare["ledger"]
+        write(build_path, build, 0o400)
+
+        evidence_path = root / "evidence-tree.json"
+        evidence = json.loads(evidence_path.read_text())
+        for relative in ("authority/ledger.json", "receipts/prepare.json", "receipts/build.json"):
+            evidence["files"][relative] = meta(root / relative)
+        write(evidence_path, evidence, 0o400)
 
     def rewrite_terminal_receipt(self, root, transform):
         receipt_path = root / "authority/live-state-retained.receipt"
@@ -258,6 +285,48 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
                 result = self.verify(root)
                 temp.cleanup()
                 self.assertNotEqual(result.returncode, 0)
+
+    def test_normalized_evidence_copies_bind_realistic_source_descriptors(self):
+        temp, root = self.make_fixture()
+        authority = json.loads((root / "authority/ledger.json").read_text())
+        contract = json.loads((root / "authority/contract.json").read_text())
+        evidence = json.loads((root / "evidence-tree.json").read_text())
+        self.assertEqual(meta(root / "orchestration/policy.json")["mode"], 0o400)
+        self.assertEqual(meta(root / "packaging/immutable_candidate_core.py")["mode"], 0o400)
+        self.assertEqual({item["mode"] for item in evidence["files"].values()}, {0o400})
+        self.assertEqual(authority["policy"]["mode"], 0o644)
+        self.assertEqual(authority["generated"]["entry"]["mode"], 0o500)
+        self.assertEqual(contract["roles"]["candidate_core"]["mode"], 0o644)
+        result = self.verify(root)
+        temp.cleanup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_reledgered_writable_evidence_copy_is_rejected(self):
+        temp, root = self.make_fixture()
+        path = root / "orchestration/policy.json"
+        os.chmod(path, 0o600)
+        evidence_path = root / "evidence-tree.json"
+        evidence = json.loads(evidence_path.read_text())
+        evidence["files"]["orchestration/policy.json"] = meta(path)
+        write(evidence_path, evidence, 0o400)
+        result = self.verify(root)
+        temp.cleanup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("evidence mismatch: orchestration/policy.json", result.stderr)
+
+    def test_reledgered_source_descriptor_mode_and_byte_drift_are_rejected(self):
+        cases = {
+            "writable-mode": (lambda authority: authority["policy"].update(mode=0o666), "authority policy descriptor invalid"),
+            "wrong-bytes": (lambda authority: authority["policy"].update(sha256="0" * 64), "authority policy byte binding mismatch"),
+        }
+        for label, (transform, message) in cases.items():
+            with self.subTest(label=label):
+                temp, root = self.make_fixture()
+                self.rewrite_authority_ledger(root, transform)
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
     def test_complete_v3_fixture_is_accepted(self):
         temp, root = self.make_fixture(); result = self.verify(root); temp.cleanup(); self.assertEqual(result.returncode, 0, result.stderr)
