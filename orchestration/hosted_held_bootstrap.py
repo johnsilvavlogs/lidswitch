@@ -545,9 +545,9 @@ def main():
    raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
    try:
     lines=raw.decode("utf-8","strict").splitlines(); header=lines.index("Assertion status system-wide:"); listed=lines.index("Listed by owning process:")
-    if header!=0 or listed<=header or lines.count("Assertion status system-wide:")!=1 or lines.count("Listed by owning process:")!=1: die()
-    matches=[line for line in lines[header+1:listed] if line.strip().startswith("PreventSystemSleep")]
-    if len(matches)!=1 or re.fullmatch(r"[ \\t]+PreventSystemSleep[ \\t]+0",matches[0]) is None or any(line.strip().startswith("PreventSystemSleep") for line in lines[listed+1:]): die()
+    if header>4 or listed<=header or lines.count("Assertion status system-wide:")!=1 or lines.count("Listed by owning process:")!=1 or any(not line or len(line)>256 or any(ord(ch)<32 or ord(ch)>126 for ch in line) for line in lines[:header]): die()
+    matches=[line for line in lines[header+1:listed] if line.strip().startswith("PreventSystemSleep")]; all_matches=[line for line in lines if line.strip().startswith("PreventSystemSleep")]
+    if len(all_matches)!=1 or matches!=all_matches or re.fullmatch(r"[ \\t]+PreventSystemSleep[ \\t]+0",matches[0]) is None: die()
    except BaseException: die()
    return raw
   pre,pre_name=snap(("live-preflight.kv","live-preflight-initial.kv"),rows.get("preflight_sha256",""),{"live-preflight.kv":"pre","live-preflight-initial.kv":"pre-initial"}); post,post_name=snap(("live-postflight.kv",),rows.get("postflight_sha256",""),{"live-postflight.kv":"post"})

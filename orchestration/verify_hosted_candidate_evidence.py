@@ -214,11 +214,11 @@ def assertions_prevent_system_sleep_zero(path: Path) -> None:
         raise ValueError("assertions invalid") from error
     header = "Assertion status system-wide:"
     listed = "Listed by owning process:"
-    deny(bool(lines) and lines.count(header) == 1 and lines.count(listed) == 1 and lines[0] == header, "assertions structure invalid")
+    deny(bool(lines) and lines.count(header) == 1 and lines.count(listed) == 1, "assertions structure invalid")
+    header_index = lines.index(header)
     marker = lines.index(listed)
-    deny(marker > 1, "assertions structure invalid")
-    system = lines[1:marker]
-    owned = lines[marker + 1:]
+    deny(header_index <= 4 and marker > header_index and all(0 < len(line) <= 256 and all(32 <= ord(char) <= 126 for char in line) for line in lines[:header_index]), "assertions structure invalid")
+    system = lines[header_index + 1:marker]
     all_matches = [line for line in lines if line.strip().startswith("PreventSystemSleep")]
     matches = [line for line in system if line.strip().startswith("PreventSystemSleep")]
     deny(len(all_matches) == 1 and matches == all_matches and re.fullmatch(r"[ \t]+PreventSystemSleep[ \t]+0", matches[0]) is not None, "assertions system sleep invalid")

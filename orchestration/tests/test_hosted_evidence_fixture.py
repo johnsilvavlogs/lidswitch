@@ -133,7 +133,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
             }
             return "".join(f"{key}={value}\n" for key, value in values.items()).encode()
         pre = snapshot(pre_phase); post = snapshot("post")
-        assertions = b"Assertion status system-wide:\n   PreventSystemSleep             0\nListed by owning process:\n"
+        assertions = b"2026-07-26 14:00:00 -0300\nAssertion status system-wide:\n   PreventSystemSleep             0\nListed by owning process:\n"
         write(root / "authority/preflight-state.snapshot", pre, 0o400); write(root / "authority/postflight-state.snapshot", post, 0o400)
         write(root / "authority/preflight.pmset-assertions", assertions, 0o400); write(root / "authority/postflight.pmset-assertions", assertions, 0o400)
         capture_names = ("app-bin-path", "app-build", "helper-bin-path", "helper-build", "helper-identity", "helper-sign", "helper-verify")
@@ -275,14 +275,19 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
             "duplicate": b"Assertion status system-wide:\n PreventSystemSleep 0\n PreventSystemSleep 0\nListed by owning process:\n",
             "nonzero": b"Assertion status system-wide:\n PreventSystemSleep 1\nListed by owning process:\n",
             "malformed": b"Assertion status system-wide:\n PreventSystemSleep=0\nListed by owning process:\n",
+            "missing-header": b"2026-07-26 14:00:00 -0300\n PreventSystemSleep 0\nListed by owning process:\n",
+            "missing-delimiter": b"2026-07-26 14:00:00 -0300\nAssertion status system-wide:\n PreventSystemSleep 0\n",
+            "misordered": b"Listed by owning process:\nAssertion status system-wide:\n PreventSystemSleep 0\n",
+            "outside-system": b"2026-07-26 14:00:00 -0300\n PreventSystemSleep 0\nAssertion status system-wide:\n OtherAssertion 0\nListed by owning process:\n",
         }
         for label, payload in raw_cases.items():
-            with self.subTest(label=label):
-                temp, root = self.make_fixture()
-                self.rewrite_leaf_and_reledger(root, "authority/preflight.pmset-assertions", payload)
-                result = self.verify(root)
-                temp.cleanup()
-                self.assertNotEqual(result.returncode, 0)
+            for leaf in ("authority/preflight.pmset-assertions", "authority/postflight.pmset-assertions"):
+                with self.subTest(label=label, leaf=leaf):
+                    temp, root = self.make_fixture()
+                    self.rewrite_leaf_and_reledger(root, leaf, payload)
+                    result = self.verify(root)
+                    temp.cleanup()
+                    self.assertNotEqual(result.returncode, 0)
         for label, change in {
             "host-class": lambda payload: payload.replace(b"host_class=idle-uninstalled", b"host_class=active"),
             "sleep-proof": lambda payload: payload.replace(b"sleep_proof=pmset-assertions-system-prevent-system-sleep-0", b"sleep_proof=pmset-live"),
