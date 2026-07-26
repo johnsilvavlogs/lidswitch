@@ -2,9 +2,9 @@
 
 `hosted-immutable-candidate.yml` is intentionally an orchestration artifact,
 not candidate source.  It checks out the workflow revision to `orchestration/`
-and checks out `6d095bba519a926a1b4131490cb3f6650fe9ab20` separately to
+and checks out `cc63481b6823e864fbe217a6182972474a6a8c8d` separately to
 `source/`.  The latter must remain detached, clean, and at tree
-`c7e942353a2976c2abf75c4494d009c133aca1eb` throughout the held build.
+`b31374650c7cd789c91ea53567a0e47112badb06` throughout the held build.
 
 The workflow is manual only, has `contents: read`, uses no repository secrets
 or caches, and fails before authority creation unless the runner is arm64,
@@ -13,7 +13,7 @@ Command Line Tools / macOS SDK locations match the reviewed policy.  The only
 release build invocation is the descriptor-held wrapper whose byte digest is
 `7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260`.
 The independently checked source-manifest byte digest is
-`f58d58c106a42eb4ae90374b4ca19fd7f21608c9403603742ac02f4becc5d5df`.
+`79b847db977783d725af0fa2226618d98161751759b0aa990eaa5b29b77502ee`.
 
 The workflow uses only full-SHA official actions:
 
@@ -26,7 +26,7 @@ Dispatch with `--ref main` and that SHA as `reviewed_orchestration_sha`. The
 run rejects a non-main ref, another repository, a mismatched head/input, or a
 non-clean orchestration checkout. This feature branch is not dispatchable.
 The wrapper SHA-256 is `7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260`;
-the source-manifest SHA-256 is `f58d58c106a42eb4ae90374b4ca19fd7f21608c9403603742ac02f4becc5d5df`.
+the source-manifest SHA-256 is `79b847db977783d725af0fa2226618d98161751759b0aa990eaa5b29b77502ee`.
 
 It uploads exactly one evidence tree.  That tree contains the source identity
 and manifest, runner policy/context, system/role descriptors, generated held

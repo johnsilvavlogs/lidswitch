@@ -26,7 +26,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ github.repository }}
-          ref: 6d095bba519a926a1b4131490cb3f6650fe9ab20
+          ref: cc63481b6823e864fbe217a6182972474a6a8c8d
           path: source
           persist-credentials: false
           fetch-depth: 1
@@ -62,10 +62,10 @@ jobs:
           origin=$(/usr/bin/git config --get remote.origin.url)
           test "$origin" = "https://github.com/${GITHUB_REPOSITORY}" -o "$origin" = "https://github.com/${GITHUB_REPOSITORY}.git" -o "$origin" = "git@github.com:${GITHUB_REPOSITORY}.git"
           test -z "$(/usr/bin/git status --porcelain=v1 --untracked-files=all)"
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 81725eb1974edbfba1af56aa527f71d6e1252fdadec574dd857bbc9f8bc3bc5e
-          test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = 25f6451c262625cdbecc571178fcd872f44a0f3e19bef41b274a6c7266852b58
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = c8bb621f07efa78662c45e103f9505fa331667837690f63f186c40bc12f4ec30
+          test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = eec9ce5b351d1b2818ed901e2b5659c40e6c9d364858489f2460df7f5a0e8923
           test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 65ac111c5b0eb9c5e1494b86d0abec0a59fabb1fe30b3e9793776cb31e9bfcd1
-          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = d58e75055d6069e1e8abb5e42c799667d16fdd72cad53768c11d26fbb2ed9e99
+          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = ba155629af82da72fe72c360758c8e5297542d40a7358ee49a8f96db3c967dde
           /usr/bin/python3 -m py_compile orchestration/hosted_held_bootstrap.py orchestration/collect_hosted_candidate_evidence.py
       - name: Create runner-specific held authority after exact source verification
         shell: /bin/bash -euo pipefail {0}
@@ -89,7 +89,7 @@ jobs:
           package_parent=$(/usr/bin/mktemp -d "$RUNNER_TEMP/lidswitch-package.XXXXXX")
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/hosted_held_bootstrap.py" package --source "$GITHUB_WORKSPACE/source" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --policy "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" --release-output "$release_output" --package-parent "$package_parent" | tee "$RUNNER_TEMP/candidate.json"
           candidate_root=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_root"])' "$RUNNER_TEMP/candidate.json")
-          /usr/bin/python3 -c 'import hashlib,json,os,sys; policy,workflow,out,release,package,candidate=sys.argv[1:]; sha=lambda p: hashlib.sha256(open(p,"rb").read()).hexdigest(); value={"schema":"lidswitch-hosted-workflow-context-v2","source_commit":"6d095bba519a926a1b4131490cb3f6650fe9ab20","source_tree":"c7e942353a2976c2abf75c4494d009c133aca1eb","orchestration_commit_sha":os.environ["GITHUB_SHA"],"workflow_file_sha256":sha(workflow),"workflow_ref":os.environ["GITHUB_REF"],"reviewed_orchestration_sha":os.environ["REVIEWED_ORCHESTRATION_SHA"],"run_id":os.environ["GITHUB_RUN_ID"],"run_attempt":os.environ["GITHUB_RUN_ATTEMPT"],"image_version":os.environ["ImageVersion"],"policy_sha256":sha(policy),"release_output":release,"package_parent":package,"candidate_root":candidate,"sdk_version":open(os.environ["RUNNER_TEMP"]+"/sdk-version").read().strip(),"driver_sha256":sha("/Library/Developer/CommandLineTools/usr/bin/swift-frontend")}; open(out,"wb").write(json.dumps(value,sort_keys=True,separators=(",",":")).encode()+b"\n")' "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" "$GITHUB_WORKSPACE/orchestration/.github/workflows/hosted-immutable-candidate.yml" "$RUNNER_TEMP/workflow-context.json" "$release_output" "$package_parent" "$candidate_root"
+          /usr/bin/python3 -c 'import hashlib,json,os,sys; policy,workflow,out,release,package,candidate=sys.argv[1:]; sha=lambda p: hashlib.sha256(open(p,"rb").read()).hexdigest(); value={"schema":"lidswitch-hosted-workflow-context-v2","source_commit":"cc63481b6823e864fbe217a6182972474a6a8c8d","source_tree":"b31374650c7cd789c91ea53567a0e47112badb06","orchestration_commit_sha":os.environ["GITHUB_SHA"],"workflow_file_sha256":sha(workflow),"workflow_ref":os.environ["GITHUB_REF"],"reviewed_orchestration_sha":os.environ["REVIEWED_ORCHESTRATION_SHA"],"run_id":os.environ["GITHUB_RUN_ID"],"run_attempt":os.environ["GITHUB_RUN_ATTEMPT"],"image_version":os.environ["ImageVersion"],"policy_sha256":sha(policy),"release_output":release,"package_parent":package,"candidate_root":candidate,"sdk_version":open(os.environ["RUNNER_TEMP"]+"/sdk-version").read().strip(),"driver_sha256":sha("/Library/Developer/CommandLineTools/usr/bin/swift-frontend")}; open(out,"wb").write(json.dumps(value,sort_keys=True,separators=(",",":")).encode()+b"\n")' "$GITHUB_WORKSPACE/orchestration/orchestration/hosted-runner-policy.json" "$GITHUB_WORKSPACE/orchestration/.github/workflows/hosted-immutable-candidate.yml" "$RUNNER_TEMP/workflow-context.json" "$release_output" "$package_parent" "$candidate_root"
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/collect_hosted_candidate_evidence.py" --source "$GITHUB_WORKSPACE/source" --orchestration "$GITHUB_WORKSPACE/orchestration" --authority "$RUNNER_TEMP/lidswitch-hosted-authority" --package-parent "$package_parent" --candidate-root "$candidate_root" --release-output "$release_output" --workflow-context "$RUNNER_TEMP/workflow-context.json" --prepare-receipt "$RUNNER_TEMP/authority-prepare.json" --build-receipt "$RUNNER_TEMP/held-build.json" --output "$RUNNER_TEMP/lidswitch-hosted-evidence" | tee "$RUNNER_TEMP/evidence.json"
           /usr/bin/python3 -I -S -B "$GITHUB_WORKSPACE/orchestration/orchestration/verify_hosted_candidate_evidence.py" --evidence "$RUNNER_TEMP/lidswitch-hosted-evidence"
       - name: Upload the one immutable evidence bundle
