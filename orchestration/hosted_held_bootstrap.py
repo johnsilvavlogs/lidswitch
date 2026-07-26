@@ -1061,7 +1061,10 @@ def package(source: Path, authority: Path, policy_path: Path, release_output: Pa
     _require_sealed_package_closure(held, names, closure)
     candidate = package_parent / "candidate"
     _require_sealed_package_closure(held, names, closure)
-    second = _run_sealed_packaging(held / "script/assemble_manual_adhoc_candidate.py", held, allowed_modules, ["--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--icon", str(held / "Resources/LidSwitch.icns"), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")])
+    # The pinned assembler binds its icon to ROOT.parent/Resources.  In the
+    # held layout that is exactly held/Resources/LidSwitch.icns; passing an
+    # undeclared --icon option would fail argument parsing before packaging.
+    second = _run_sealed_packaging(held / "script/assemble_manual_adhoc_candidate.py", held, allowed_modules, ["--envelope-receipt", str(envelope), "--release-output", str(release_output), "--output-root", str(candidate), "--release-identity", str(held / "Resources/LidSwitchReleaseIdentity.json")])
     if second.returncode:
         sys.stderr.write(second.stderr); deny("held-packaging-assemble-failed")
     _require_sealed_package_closure(held, names, closure)
