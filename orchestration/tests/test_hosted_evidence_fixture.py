@@ -9,7 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFY = ROOT / "orchestration/verify_hosted_candidate_evidence.py"
-COMMIT = "6200836869591acb4bf65edb825eb62e84b56f87"
+COMMIT = "6d095bba519a926a1b4131490cb3f6650fe9ab20"
+TREE = "c7e942353a2976c2abf75c4494d009c133aca1eb"
 
 
 def canonical(value):
@@ -76,7 +77,7 @@ def core_module(payload):
 
 
 class HostedEvidenceFixtureTests(unittest.TestCase):
-    def make_fixture(self, image_version=None):
+    def make_fixture(self, image_version=None, pre_phase="pre-initial"):
         required = sorted(__import__("runpy").run_path(str(VERIFY))["REQUIRED"])
         temp = tempfile.TemporaryDirectory()
         root = Path(temp.name)
@@ -111,7 +112,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         write(root / "authority/contract.json", contract, 0o400)
         policy_desc = descriptor(root / "orchestration/policy.json", str(root / "orchestration/hosted-runner-policy.json"))
         authority = {"schema": "lidswitch-hosted-authority-ledger-v1", "policy": policy_desc,
-                     "source": {"commit": COMMIT, "tree": "d86650eccfe3326fc968fc855a07a1e3d06aaf57", "root": directory_descriptor(),
+                     "source": {"commit": COMMIT, "tree": TREE, "root": directory_descriptor(),
                                 "manifest_sha256": meta(root / "source/source_snapshot_manifest.jsonl")["sha256"],
                                 "manifest_descriptor": descriptor(root / "source/source_snapshot_manifest.jsonl", str(root / "source/script/source_snapshot_manifest.jsonl"))},
                      "system": {"python": system_descriptor("/usr/bin/python3", "1" * 64), "bash": system_descriptor("/bin/bash", "2" * 64), "swift_frontend": system_descriptor("/Library/Developer/CommandLineTools/usr/bin/swift-frontend", "c" * 64), "sdk_root": sdk_descriptor(), "developer_dir": "/Library/Developer/CommandLineTools"},
@@ -119,18 +120,32 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
                      "generated": {"entry": descriptor(root / "authority/entry.py", str(root / "authority/hosted-held-entry.py")), "contract": descriptor(root / "authority/contract.json", str(root / "authority/hosted-held-contract.json")), "root": authority_root_descriptor()}}
         write(root / "authority/ledger.json", authority, 0o400)
         authority_meta = meta(root / "authority/ledger.json")
-        pre = b"host_class=idle-uninstalled\nkernel_build=25E246\n"
-        write(root / "authority/preflight-state.snapshot", pre, 0o400); write(root / "authority/postflight-state.snapshot", pre, 0o400)
+        def snapshot(phase):
+            values = {
+                "schema": "1", "nonce": "fixture-nonce", "phase": phase, "captured_epoch": "1785040101",
+                "kernel_boot": "11111111-1111-4111-8111-111111111111", "kernel_build": "25E246", "kernel_monotonic": "1.000",
+                "host_class": "idle-uninstalled", "power_source": "ac", "sleep_disabled": "absent", "sleep_proof": "pmset-assertions-system-prevent-system-sleep-0", "ac_sleep_minutes": "0",
+                "status_presence": "absent", "status_state": "none", "status_reason": "none", "status_reason_class": "none", "status_session": "none", "status_updated": "none", "status_monotonic": "none", "status_boot_id": "none", "status_schema": "absent", "status_evidence": "none", "status_meta": "absent",
+                "launchd_presence": "absent", "launchd_state": "none", "launchd_pid": "none", "launchd_program": "none",
+                "plist_contract": "absent", "plist_qualified_build": "absent", "plist_meta": "absent", "plist_sha256": "absent", "helper_path": "absent", "helper_meta": "absent", "app_meta": "absent",
+                "root_support_structure": "absent", "private_applied_meta": "absent", "private_terminal_meta": "absent", "private_reservations_meta": "absent", "private_proof_meta": "absent", "private_lock_meta": "absent", "original_ac_meta": "absent", "original_battery_meta": "absent",
+                "authority_kind": "none", "lease_session": "none", "lease_boot": "none", "lease_expires": "none", "lease_issued_mono": "none", "lease_expires_mono": "none", "lease_uid": "none", "lease_build": "none", "lease_meta": "absent", "lease_lifetime": "none", "user_history_diagnostic_meta": "absent",
+            }
+            return "".join(f"{key}={value}\n" for key, value in values.items()).encode()
+        pre = snapshot(pre_phase); post = snapshot("post")
+        assertions = b"Assertion status system-wide:\n   PreventSystemSleep             0\nListed by owning process:\n"
+        write(root / "authority/preflight-state.snapshot", pre, 0o400); write(root / "authority/postflight-state.snapshot", post, 0o400)
+        write(root / "authority/preflight.pmset-assertions", assertions, 0o400); write(root / "authority/postflight.pmset-assertions", assertions, 0o400)
         capture_names = ("app-bin-path", "app-build", "helper-bin-path", "helper-build", "helper-identity", "helper-sign", "helper-verify")
         fixture_captures = {name: f"{index:064x}:{index + 16:064x}" for index, name in enumerate(capture_names, 1)}
         release_output_path = "/private/tmp/lidswitch-swift.fixture/release-output"
         receipt_captures = ",".join(name + ":" + fixture_captures[name] for name in capture_names)
         receipt = ("schema=3\nnonce=fixture-nonce\noutcome=preserved\nchild_command_exit=0\nwrapper_exit=0\npreflight_sha256=" + meta(root / "authority/preflight-state.snapshot")["sha256"] + "\npostflight_sha256=" + meta(root / "authority/postflight-state.snapshot")["sha256"] + "\nhost_preserved=true\nbenchmark_published=false\nerror=none\ncapture_identifiers=" + receipt_captures + "\ncontrol_root=/private/tmp/lidswitch-envelope.fixture\nexecution_root=" + str(Path(release_output_path).parent) + "\n").encode()
         write(root / "authority/live-state-retained.receipt", receipt, 0o400)
-        write(root / "authority/live-envelope.json", {"schema": "lidswitch-hosted-live-envelope-v2", "receipt_sha256": meta(root / "authority/live-state-retained.receipt")["sha256"], "preflight_sha256": meta(root / "authority/preflight-state.snapshot")["sha256"], "postflight_sha256": meta(root / "authority/postflight-state.snapshot")["sha256"], "wrapper_exit": 0}, 0o400)
+        write(root / "authority/live-envelope.json", {"schema": "lidswitch-hosted-live-envelope-v3", "receipt_sha256": meta(root / "authority/live-state-retained.receipt")["sha256"], "preflight": {"phase": pre_phase, "snapshot_sha256": meta(root / "authority/preflight-state.snapshot")["sha256"], "assertions_sha256": meta(root / "authority/preflight.pmset-assertions")["sha256"], "sleep_proof": "pmset-assertions-system-prevent-system-sleep-0"}, "postflight": {"phase": "post", "snapshot_sha256": meta(root / "authority/postflight-state.snapshot")["sha256"], "assertions_sha256": meta(root / "authority/postflight.pmset-assertions")["sha256"], "sleep_proof": "pmset-assertions-system-prevent-system-sleep-0"}, "wrapper_exit": 0}, 0o400)
         prepare = {"schema": "lidswitch-hosted-prepare-v2", "authority": str(root / "authority"), "ledger": descriptor(root / "authority/ledger.json", str(root / "authority/hosted-authority-ledger.json")), "entry": descriptor(root / "authority/entry.py", str(root / "authority/hosted-held-entry.py")), "contract": descriptor(root / "authority/contract.json", str(root / "authority/hosted-held-contract.json")), "source_manifest_sha256": meta(root / "source/source_snapshot_manifest.jsonl")["sha256"]}
         write(root / "receipts/prepare.json", prepare, 0o400)
-        retained = {name: descriptor(root / relative, str(root / "authority" / name)) for name, relative in {"live-state-retained.receipt": "authority/live-state-retained.receipt", "preflight-state.snapshot": "authority/preflight-state.snapshot", "postflight-state.snapshot": "authority/postflight-state.snapshot", "hosted-live-envelope.json": "authority/live-envelope.json"}.items()}
+        retained = {name: descriptor(root / relative, str(root / "authority" / name)) for name, relative in {"live-state-retained.receipt": "authority/live-state-retained.receipt", "preflight-state.snapshot": "authority/preflight-state.snapshot", "postflight-state.snapshot": "authority/postflight-state.snapshot", "preflight.pmset-assertions": "authority/preflight.pmset-assertions", "postflight.pmset-assertions": "authority/postflight.pmset-assertions", "hosted-live-envelope.json": "authority/live-envelope.json"}.items()}
         build = {"schema": "lidswitch-hosted-build-v2", "source": authority["source"], "generated": authority["generated"], "ledger": prepare["ledger"], "entry": prepare["entry"], "contract": prepare["contract"], "retained": retained, "release_output": release_output_path}
         write(root / "receipts/build.json", build, 0o400)
         write(root / "release-output/LidSwitch", b"app-binary", 0o555)
@@ -167,10 +182,10 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         package = dict(candidate); package["candidate_id"] = "0" * 64; package["phase"] = "package-captured"; package["package"] = {"dmg": package_leaf("package", "LidSwitch.dmg"), "checksum": package_leaf("checksum", "LidSwitch.dmg.sha256"), "extraction_receipt": "0" * 64, "extracted_tree_sha256": app_artifact["tree_sha256"]}; package["receipts"] = receipts(package, 9); package["helper"]["signature_receipt"] = package["receipts"][0]["sha256"]; package["app"]["signature_receipt"] = package["receipts"][3]["sha256"]; package["package"]["extraction_receipt"] = package["receipts"][8]["sha256"]; package["candidate_id"] = digest(core.canonical({key: value for key, value in package.items() if key != "candidate_id"}))
         write(root / "candidate/candidate-manifest.json", candidate, 0o600); write(root / "candidate/package-manifest.json", package, 0o600)
         policy_images = json.loads((root / "orchestration/policy.json").read_text())["runner"]["image_versions"]
-        context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": "d86650eccfe3326fc968fc855a07a1e3d06aaf57", "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": image_version or policy_images[0], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
+        context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": TREE, "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": image_version or policy_images[0], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
         write(root / "workflow-context.json", context, 0o400)
         files = {relative: meta(root / relative) for relative in required}
-        write(root / "evidence-tree.json", {"schema": "lidswitch-hosted-evidence-v2", "files": files, "inventory": sorted(files), "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}, 0o400)
+        write(root / "evidence-tree.json", {"schema": "lidswitch-hosted-evidence-v2", "files": files, "inventory": sorted(files), "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "preflight_assertions": "authority/preflight.pmset-assertions", "postflight_assertions": "authority/postflight.pmset-assertions", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}, 0o400)
         return temp, root
 
     def verify(self, root):
@@ -192,6 +207,13 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         result = self.verify(root)
         temp.cleanup()
         self.assertNotEqual(result.returncode, 0)
+
+    def rewrite_leaf_and_reledger(self, root, relative, payload):
+        path = root / relative
+        write(path, payload, 0o400)
+        ledger = json.loads((root / "evidence-tree.json").read_text())
+        ledger["files"][relative] = meta(path)
+        write(root / "evidence-tree.json", ledger, 0o400)
 
     def rewrite_terminal_receipt(self, root, transform):
         receipt_path = root / "authority/live-state-retained.receipt"
@@ -239,6 +261,53 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
 
     def test_complete_v3_fixture_is_accepted(self):
         temp, root = self.make_fixture(); result = self.verify(root); temp.cleanup(); self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_preflight_success_and_initial_selection_are_both_bound(self):
+        for phase in ("pre", "pre-initial"):
+            with self.subTest(phase=phase):
+                temp, root = self.make_fixture(pre_phase=phase)
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hosted_sleep_proof_adversarial_raw_and_snapshot_cases_are_rejected(self):
+        raw_cases = {
+            "duplicate": b"Assertion status system-wide:\n PreventSystemSleep 0\n PreventSystemSleep 0\nListed by owning process:\n",
+            "nonzero": b"Assertion status system-wide:\n PreventSystemSleep 1\nListed by owning process:\n",
+            "malformed": b"Assertion status system-wide:\n PreventSystemSleep=0\nListed by owning process:\n",
+        }
+        for label, payload in raw_cases.items():
+            with self.subTest(label=label):
+                temp, root = self.make_fixture()
+                self.rewrite_leaf_and_reledger(root, "authority/preflight.pmset-assertions", payload)
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertNotEqual(result.returncode, 0)
+        for label, change in {
+            "host-class": lambda payload: payload.replace(b"host_class=idle-uninstalled", b"host_class=active"),
+            "sleep-proof": lambda payload: payload.replace(b"sleep_proof=pmset-assertions-system-prevent-system-sleep-0", b"sleep_proof=pmset-live"),
+            "status": lambda payload: payload.replace(b"status_presence=absent", b"status_presence=present"),
+            "authority": lambda payload: payload.replace(b"authority_kind=none", b"authority_kind=candidate-status-renewal"),
+        }.items():
+            with self.subTest(label=label):
+                temp, root = self.make_fixture()
+                self.rewrite_leaf_and_reledger(root, "authority/preflight-state.snapshot", change((root / "authority/preflight-state.snapshot").read_bytes()))
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertNotEqual(result.returncode, 0)
+        temp, root = self.make_fixture()
+        (root / "authority/postflight.pmset-assertions").unlink()
+        result = self.verify(root)
+        temp.cleanup()
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_hosted_sleep_proof_pair_and_inventory_drift_are_rejected(self):
+        self.assert_denied_mutation("authority/live-envelope.json", lambda value: value["preflight"].update(assertions_sha256="0" * 64))
+        temp, root = self.make_fixture()
+        write(root / "authority/unexpected-proof", b"unexpected\n", 0o400)
+        result = self.verify(root)
+        temp.cleanup()
+        self.assertNotEqual(result.returncode, 0)
 
     def test_each_exact_reviewed_image_fixture_is_accepted(self):
         for image_version in ("20260715.0248.1", "20260720.0258.1"):

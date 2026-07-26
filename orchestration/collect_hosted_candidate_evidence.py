@@ -80,6 +80,8 @@ def main() -> int:
         (args.authority / "live-state-retained.receipt", "authority/live-state-retained.receipt"),
         (args.authority / "preflight-state.snapshot", "authority/preflight-state.snapshot"),
         (args.authority / "postflight-state.snapshot", "authority/postflight-state.snapshot"),
+        (args.authority / "preflight.pmset-assertions", "authority/preflight.pmset-assertions"),
+        (args.authority / "postflight.pmset-assertions", "authority/postflight.pmset-assertions"),
         (args.package_parent / "build-envelope.json", "package/build-envelope.json"),
         (args.workflow_context, "workflow-context.json"),
         (args.source / "script/source_snapshot_manifest.jsonl", "source/source_snapshot_manifest.jsonl"),
@@ -99,7 +101,7 @@ def main() -> int:
         copy_leaf(source, args.output / relative, files, relative)
     ledger = {"schema": SCHEMA, "files": files,
               "inventory": sorted(files),
-              "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}
+              "bindings": {"source_manifest": "source/source_snapshot_manifest.jsonl", "authority_ledger": "authority/ledger.json", "contract": "authority/contract.json", "entry": "authority/entry.py", "live_receipt": "authority/live-state-retained.receipt", "preflight": "authority/preflight-state.snapshot", "postflight": "authority/postflight-state.snapshot", "preflight_assertions": "authority/preflight.pmset-assertions", "postflight_assertions": "authority/postflight.pmset-assertions", "workflow": "orchestration/workflow.yml", "context": "workflow-context.json", "prepare": "receipts/prepare.json", "build": "receipts/build.json"}}
     payload = canon(ledger)
     ledger_path = args.output / "evidence-tree.json"
     ledger_path.write_bytes(payload)

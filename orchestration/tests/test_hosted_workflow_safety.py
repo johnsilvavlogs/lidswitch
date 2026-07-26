@@ -69,12 +69,12 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
-        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "LIDSWITCH_HOSTED_WRAPPER_FAILURE", "LIDSWITCH_HOSTED_PREFLIGHT_FAILURE", "pre-initial.pmset-batt", "drawing", "live_sleep_disabled", "custom_ac_sleep", "control_files=", "status_reason_class", "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "held-terminal-receipt-missing", "hosted-authority-inventory=", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
+        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "preflight.pmset-assertions", "postflight.pmset-assertions", "LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "LIDSWITCH_HOSTED_WRAPPER_FAILURE", "LIDSWITCH_HOSTED_PREFLIGHT_FAILURE", "pre-initial.pmset-batt", "drawing", "live_sleep_disabled", "custom_ac_sleep", "control_files=", "status_reason_class", "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "held-terminal-receipt-missing", "hosted-authority-inventory=", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
             self.assertIn(token, self.bootstrap)
 
     def test_verifier_closes_the_complete_evidence_inventory(self):
         verifier = (ROOT / "orchestration/verify_hosted_candidate_evidence.py").read_text()
-        for token in ("missing or extra declared evidence leaf", "package/build-envelope.json", "candidate/package-manifest.json", "release-output/build-receipt.json", "lidswitch-hosted-live-envelope-v2", "receipt_captures", "execution_root", "release_output_seal", "LidSwitchReleaseIdentity.json"):
+        for token in ("missing or extra declared evidence leaf", "package/build-envelope.json", "candidate/package-manifest.json", "release-output/build-receipt.json", "lidswitch-hosted-live-envelope-v3", "pmset-assertions", "exact_idle_uninstalled_snapshot", "receipt_captures", "execution_root", "release_output_seal", "LidSwitchReleaseIdentity.json"):
             self.assertIn(token, verifier)
 
     def test_workflow_pins_match_current_authority_files(self):
@@ -97,6 +97,18 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
 
     def test_bootstrap_is_parseable(self):
         ast.parse(self.bootstrap)
+
+    def test_hosted_runner_marker_is_held_entry_only(self):
+        self.assertIn('"LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY":"v1"', self.bootstrap)
+        self.assertNotIn("LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY", __import__("runpy").run_path(str(ROOT / "orchestration/hosted_held_bootstrap.py"))["PACKAGING_ENV"])
+
+    def test_hosted_runner_marker_is_not_inherited_or_spoofable_from_workflow_env(self):
+        namespace = __import__("runpy").run_path(str(ROOT / "orchestration/hosted_held_bootstrap.py"))
+        env_line = next(line for line in namespace["ENTRY"].splitlines() if line.startswith(' env={"PATH"'))
+        self.assertIn('"LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY":"v1"', env_line)
+        self.assertNotIn("os.environ", env_line)
+        source = subprocess.check_output(["git", "show", namespace["SOURCE_COMMIT"] + ":script/live_state_envelope.sh"], cwd=ROOT, text=True)
+        self.assertIn('[[ "${LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY:-}" == "v1" ]]', source)
 
     def test_authority_root_is_frozen_after_every_leaf_exists(self):
         ledger_create = self.bootstrap.index("ledger_fd = os.open(ledger_path")
