@@ -26,8 +26,8 @@ from pathlib import Path
 
 EX_IOERR = 74
 LIMIT = 8 * 1024 * 1024
-SOURCE_COMMIT = "6200836869591acb4bf65edb825eb62e84b56f87"
-SOURCE_TREE = "d86650eccfe3326fc968fc855a07a1e3d06aaf57"
+SOURCE_COMMIT = "6d095bba519a926a1b4131490cb3f6650fe9ab20"
+SOURCE_TREE = "c7e942353a2976c2abf75c4494d009c133aca1eb"
 WRAPPER_SHA256 = "7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260"
 WRAPPER_PATH = "script/run_swift_build_safely.sh"
 REVIEWED_IMAGES = ["20260715.0248.1", "20260720.0258.1"]
@@ -78,7 +78,7 @@ PACKAGING_ENTRYPOINTS = {
     "run_swift_build_safely.sh",
 }
 AUTHORITY_INITIAL_FILES = frozenset({"hosted-held-entry.py", "hosted-held-contract.json", "hosted-authority-ledger.json"})
-AUTHORITY_COMPLETE_FILES = AUTHORITY_INITIAL_FILES | frozenset({"live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "hosted-live-envelope.json"})
+AUTHORITY_COMPLETE_FILES = AUTHORITY_INITIAL_FILES | frozenset({"live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "preflight.pmset-assertions", "postflight.pmset-assertions", "hosted-live-envelope.json"})
 PACKAGING_ENV = {
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
     "LC_ALL": "C",
@@ -484,14 +484,14 @@ def main():
  child={30:fds["wrapper"],31:fds["common"],32:fds["envelope"],33:fds["profile"],34:fds["safe_file"],35:fds["supervisor"],36:fds["source_manifest"],37:root,38:cfd,39:xfd,40:tw,41:gr}
  for fd in child.values(): os.lseek(fd,0,os.SEEK_SET) if fd in fds.values() else None
  acts=[(os.POSIX_SPAWN_OPEN,0,"/dev/null",os.O_RDONLY,0)]+[(os.POSIX_SPAWN_DUP2,v,k) for k,v in child.items()]+[(os.POSIX_SPAWN_CLOSE,v) for v in set(child.values())]
- env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin","LC_ALL":"C","LIDSWITCH_HELD_ENTRY":"v1","LIDSWITCH_HELD_FD_MAP":"30,31,32,33,34,35,36,37,38,39,40,41","LIDSWITCH_HELD_REPO_ROOT":a.repo,"LIDSWITCH_HELD_CONTROL_ROOT":control,"LIDSWITCH_HELD_EXECUTION_ROOT":execution,"LIDSWITCH_HELD_RELEASE_CANDIDATE":"v1"}
+ env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin","LC_ALL":"C","LIDSWITCH_HELD_ENTRY":"v1","LIDSWITCH_HELD_FD_MAP":"30,31,32,33,34,35,36,37,38,39,40,41","LIDSWITCH_HELD_REPO_ROOT":a.repo,"LIDSWITCH_HELD_CONTROL_ROOT":control,"LIDSWITCH_HELD_EXECUTION_ROOT":execution,"LIDSWITCH_HELD_RELEASE_CANDIDATE":"v1","LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY":"v1"}
  pid=os.posix_spawn("/bin/bash",["/bin/bash","-p","--","/dev/fd/30",*a.args],env,file_actions=acts); close(gr); os.write(gw,b"R"); close(gw); close(tw); _,status=os.waitpid(pid,0); bash(c["bash"])
  for n in ROLES:
   q=role(root,c["roles"][n]["path"],c["roles"][n],c.get("directories",{})); close(q)
  rc=os.WEXITSTATUS(status) if os.WIFEXITED(status) else EX
  try: receipt_fd=os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd)
  except OSError:
-  allowed=("pre-initial.pmset-batt","pre-initial.pmset-live","pre-initial.pmset-custom","pre-initial.launchctl-print","live-preflight-initial.kv","live-preflight.kv","live-postflight.kv","live-state-retained.receipt")
+  allowed=("pre-initial.pmset-batt","pre-initial.pmset-live","pre-initial.pmset-custom","pre-initial.pmset-assertions","pre-initial.launchctl-print","live-preflight-initial.kv","live-preflight.kv","live-postflight.kv","live-state-retained.receipt")
   try: present=tuple(name for name in allowed if name in os.listdir(cfd))
   except OSError: die()
   values={}
@@ -527,7 +527,7 @@ def main():
   release_raw=read(os.open(os.path.join(execution,"release-output","build-receipt.json"),os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC),262144)
   release=json.loads(release_raw.decode("utf-8"))
   if json.dumps(release,sort_keys=True,separators=(",",":")).encode()+b"\n"!=release_raw or tuple(release.get("captures",{}))!=capture_names or any(capture_values[index]!=name+":"+release["captures"][name] for index,name in enumerate(capture_names)): die()
-  def snap(names,want):
+  def snap(names,want,phases):
    for name in names:
     try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
     except OSError: continue
@@ -537,19 +537,30 @@ def main():
      k,v=line.split("=",1)
      if not k or k in vals: die()
      vals[k]=v
-    if vals.get("host_class")!="idle-uninstalled" or vals.get("kernel_build")!="25E246": die()
-    return raw
+    required={"schema":"1","nonce":rows.get("nonce"),"phase":phases[name],"host_class":"idle-uninstalled","power_source":"ac","sleep_disabled":"absent","sleep_proof":"pmset-assertions-system-prevent-system-sleep-0","ac_sleep_minutes":"0","status_presence":"absent","status_state":"none","status_reason":"none","status_reason_class":"none","status_session":"none","status_updated":"none","status_monotonic":"none","status_boot_id":"none","status_schema":"absent","status_evidence":"none","status_meta":"absent","launchd_presence":"absent","launchd_state":"none","launchd_pid":"none","launchd_program":"none","plist_contract":"absent","plist_qualified_build":"absent","plist_meta":"absent","plist_sha256":"absent","helper_path":"absent","helper_meta":"absent","app_meta":"absent","root_support_structure":"absent","private_applied_meta":"absent","private_terminal_meta":"absent","private_reservations_meta":"absent","private_proof_meta":"absent","private_lock_meta":"absent","original_ac_meta":"absent","original_battery_meta":"absent","authority_kind":"none","lease_session":"none","lease_boot":"none","lease_expires":"none","lease_issued_mono":"none","lease_expires_mono":"none","lease_uid":"none","lease_build":"none","lease_meta":"absent","lease_lifetime":"none","user_history_diagnostic_meta":"absent"}
+    if any(vals.get(k)!=v for k,v in required.items()) or vals.get("kernel_build")!="25E246" or set(vals)!=set(required)|{"kernel_boot","kernel_build","kernel_monotonic","captured_epoch"} or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",vals["kernel_boot"]) or not re.fullmatch(r"[0-9]+(?:[.][0-9]+)?",vals["kernel_monotonic"]) or not re.fullmatch(r"[0-9]{9,12}",vals["captured_epoch"]): die()
+    return raw,name
    die()
-  pre=snap(("live-preflight.kv","live-preflight-initial.kv"),rows.get("preflight_sha256","")); post=snap(("live-postflight.kv",),rows.get("postflight_sha256",""))
+  def assertions(name):
+   raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
+   try:
+    lines=raw.decode("utf-8","strict").splitlines(); header=lines.index("Assertion status system-wide:"); listed=lines.index("Listed by owning process:")
+    if header>4 or listed<=header or lines.count("Assertion status system-wide:")!=1 or lines.count("Listed by owning process:")!=1 or any(not line or len(line)>256 or any(ord(ch)<32 or ord(ch)>126 for ch in line) for line in lines[:header]): die()
+    matches=[line for line in lines[header+1:listed] if line.strip().startswith("PreventSystemSleep")]; all_matches=[line for line in lines if line.strip().startswith("PreventSystemSleep")]
+    if len(all_matches)!=1 or matches!=all_matches or re.fullmatch(r"[ \\t]+PreventSystemSleep[ \\t]+0",matches[0]) is None: die()
+   except BaseException: die()
+   return raw
+  pre,pre_name=snap(("live-preflight.kv","live-preflight-initial.kv"),rows.get("preflight_sha256",""),{"live-preflight.kv":"pre","live-preflight-initial.kv":"pre-initial"}); post,post_name=snap(("live-postflight.kv",),rows.get("postflight_sha256",""),{"live-postflight.kv":"post"})
+  pre_assertions=assertions("pre.pmset-assertions" if pre_name=="live-preflight.kv" else "pre-initial.pmset-assertions"); post_assertions=assertions("post.pmset-assertions")
   destination=os.path.dirname(a.hosted_receipt)
   def save(name,data):
    fd=os.open(os.path.join(destination,name),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o400)
    try: os.write(fd,data); os.fsync(fd)
    finally: os.close(fd)
-  save("live-state-retained.receipt",receipt); save("preflight-state.snapshot",pre); save("postflight-state.snapshot",post)
+  save("live-state-retained.receipt",receipt); save("preflight-state.snapshot",pre); save("postflight-state.snapshot",post); save("preflight.pmset-assertions",pre_assertions); save("postflight.pmset-assertions",post_assertions)
  except BaseException: die()
  try:
-  with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v2","receipt_sha256":hashlib.sha256(receipt).hexdigest(),"preflight_sha256":hashlib.sha256(pre).hexdigest(),"postflight_sha256":hashlib.sha256(post).hexdigest(),"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\n")
+  with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v3","receipt_sha256":hashlib.sha256(receipt).hexdigest(),"preflight":{"snapshot_sha256":hashlib.sha256(pre).hexdigest(),"assertions_sha256":hashlib.sha256(pre_assertions).hexdigest(),"sleep_proof":"pmset-assertions-system-prevent-system-sleep-0","phase":"pre" if pre_name=="live-preflight.kv" else "pre-initial"},"postflight":{"snapshot_sha256":hashlib.sha256(post).hexdigest(),"assertions_sha256":hashlib.sha256(post_assertions).hexdigest(),"sleep_proof":"pmset-assertions-system-prevent-system-sleep-0","phase":"post"},"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\n")
  except OSError: die()
  os.write(2,("LIDSWITCH_HOSTED_HELD_RECEIPT\nschema=1\nreceipt_sha256="+hashlib.sha256(receipt).hexdigest()+"\nwrapper_exit="+str(rc)+"\n").encode()); raise SystemExit(rc)
 if __name__=="__main__":
@@ -707,7 +718,7 @@ def build(source: Path, authority: Path, policy_path: Path, expected: dict[str, 
     # Recheck the candidate after the wrapper and bind the actual retained
     # host-state proof into the build receipt rather than a hash-only claim.
     prepare_recheck(source, authority, policy_path, completed=True)
-    retained = {name: descriptor(authority / name, maximum=65536) for name in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "hosted-live-envelope.json")}
+    retained = {name: descriptor(authority / name, maximum=65536) for name in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", "preflight.pmset-assertions", "postflight.pmset-assertions", "hosted-live-envelope.json")}
     print(canonical({"schema": "lidswitch-hosted-build-v2", "source": ledger["source"], "generated": generated,
                      "ledger": descriptor(ledger_path), "entry": descriptor(entry), "contract": descriptor(contract),
                      "retained": retained, "release_output": release_output}).decode(), end="")

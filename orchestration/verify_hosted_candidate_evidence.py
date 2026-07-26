@@ -6,17 +6,18 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import stat
 import types
 from pathlib import Path
 
 SCHEMA = "lidswitch-hosted-evidence-v2"
 # This is the immutable_candidate_core.py blob in the independently pinned
-# source commit 6200836.  Do not execute an evidence supplied Python program
+# source commit 6d095bb.  Do not execute an evidence supplied Python program
 # unless it is this exact reviewed byte sequence.
 AUTHORITATIVE_CORE_SHA256 = "045c46f5fe7ab917d4e700fb4fbc10dbc125247b9eb14e8f8e6500037de14f32"
-SOURCE_COMMIT = "6200836869591acb4bf65edb825eb62e84b56f87"
-SOURCE_TREE = "d86650eccfe3326fc968fc855a07a1e3d06aaf57"
+SOURCE_COMMIT = "6d095bba519a926a1b4131490cb3f6650fe9ab20"
+SOURCE_TREE = "c7e942353a2976c2abf75c4494d009c133aca1eb"
 REVIEWED_IMAGES = ["20260715.0248.1", "20260720.0258.1"]
 PACKAGING_ROLES = {
     "capture_package": "capture_immutable_build_envelope.py",
@@ -36,6 +37,8 @@ FIXED_BINDINGS = {
     "live_receipt": "authority/live-state-retained.receipt",
     "preflight": "authority/preflight-state.snapshot",
     "postflight": "authority/postflight-state.snapshot",
+    "preflight_assertions": "authority/preflight.pmset-assertions",
+    "postflight_assertions": "authority/postflight.pmset-assertions",
     "workflow": "orchestration/workflow.yml",
     "context": "workflow-context.json",
     "prepare": "receipts/prepare.json",
@@ -47,7 +50,8 @@ REQUIRED = {
     "receipts/build.json", "authority/ledger.json", "authority/entry.py",
     "authority/contract.json", "authority/live-envelope.json",
     "authority/live-state-retained.receipt", "authority/preflight-state.snapshot",
-    "authority/postflight-state.snapshot", "workflow-context.json",
+    "authority/postflight-state.snapshot", "authority/preflight.pmset-assertions",
+    "authority/postflight.pmset-assertions", "workflow-context.json",
     "source/source_snapshot_manifest.jsonl", "source/release.env", "package/build-envelope.json",
     *("packaging/" + name for name in PACKAGING_ROLES.values()),
     "packaging/LidSwitchReleaseIdentity.json",
@@ -168,6 +172,56 @@ def parse_kv(path: Path, label: str) -> tuple[tuple[str, ...], dict[str, str]]:
         return tuple(order), rows
     except (UnicodeDecodeError, ValueError):
         raise ValueError(label + " invalid")
+
+
+def exact_idle_uninstalled_snapshot(path: Path, *, phase: str, nonce: str, kernel: str) -> dict[str, str]:
+    _order, fields = parse_kv(path, "hosted snapshot")
+    expected = {
+        "schema": "1", "nonce": nonce, "phase": phase, "host_class": "idle-uninstalled",
+        "power_source": "ac", "sleep_disabled": "absent",
+        "sleep_proof": "pmset-assertions-system-prevent-system-sleep-0",
+        "ac_sleep_minutes": "0", "status_presence": "absent", "status_state": "none",
+        "status_reason": "none", "status_reason_class": "none", "status_session": "none",
+        "status_updated": "none", "status_monotonic": "none", "status_boot_id": "none",
+        "status_schema": "absent", "status_evidence": "none", "status_meta": "absent",
+        "launchd_presence": "absent", "launchd_state": "none", "launchd_pid": "none",
+        "launchd_program": "none", "plist_contract": "absent", "plist_qualified_build": "absent",
+        "plist_meta": "absent", "plist_sha256": "absent", "helper_path": "absent",
+        "helper_meta": "absent", "app_meta": "absent", "root_support_structure": "absent",
+        "private_applied_meta": "absent", "private_terminal_meta": "absent",
+        "private_reservations_meta": "absent", "private_proof_meta": "absent",
+        "private_lock_meta": "absent", "original_ac_meta": "absent",
+        "original_battery_meta": "absent", "authority_kind": "none", "lease_session": "none",
+        "lease_boot": "none", "lease_expires": "none", "lease_issued_mono": "none",
+        "lease_expires_mono": "none", "lease_uid": "none", "lease_build": "none",
+        "lease_meta": "absent", "lease_lifetime": "none", "user_history_diagnostic_meta": "absent",
+    }
+    deny(all(fields.get(key) == value for key, value in expected.items()), "snapshot clean tuple invalid")
+    deny(set(fields) == set(expected) | {"captured_epoch", "kernel_boot", "kernel_build", "kernel_monotonic"}, "snapshot schema drift")
+    deny(fields["kernel_build"] == kernel and len(fields["kernel_boot"]) == 36 and fields["kernel_boot"].count("-") == 4, "snapshot kernel binding invalid")
+    deny(fields["captured_epoch"].isdigit() and 9 <= len(fields["captured_epoch"]) <= 12, "snapshot captured epoch invalid")
+    try:
+        deny(float(fields["kernel_monotonic"]) >= 0, "snapshot kernel monotonic invalid")
+    except ValueError as error:
+        raise ValueError("snapshot kernel monotonic invalid") from error
+    return fields
+
+
+def assertions_prevent_system_sleep_zero(path: Path) -> None:
+    try:
+        lines = path.read_bytes().decode("utf-8", "strict").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError("assertions invalid") from error
+    header = "Assertion status system-wide:"
+    listed = "Listed by owning process:"
+    deny(bool(lines) and lines.count(header) == 1 and lines.count(listed) == 1, "assertions structure invalid")
+    header_index = lines.index(header)
+    marker = lines.index(listed)
+    deny(header_index <= 4 and marker > header_index and all(0 < len(line) <= 256 and all(32 <= ord(char) <= 126 for char in line) for line in lines[:header_index]), "assertions structure invalid")
+    system = lines[header_index + 1:marker]
+    all_matches = [line for line in lines if line.strip().startswith("PreventSystemSleep")]
+    matches = [line for line in system if line.strip().startswith("PreventSystemSleep")]
+    deny(len(all_matches) == 1 and matches == all_matches and re.fullmatch(r"[ \t]+PreventSystemSleep[ \t]+0", matches[0]) is not None, "assertions system sleep invalid")
 
 
 def receipt_captures(value: object) -> dict[str, str]:
@@ -402,7 +456,7 @@ def main() -> int:
         same_descriptor(observed, prepare[name], "prepare/build " + name)
     same_descriptor(prepare["entry"], generated_entry, "prepare/generated entry")
     same_descriptor(prepare["contract"], generated_contract, "prepare/generated contract")
-    retained_map = {"live-state-retained.receipt": "authority/live-state-retained.receipt", "preflight-state.snapshot": "authority/preflight-state.snapshot", "postflight-state.snapshot": "authority/postflight-state.snapshot", "hosted-live-envelope.json": "authority/live-envelope.json"}
+    retained_map = {"live-state-retained.receipt": "authority/live-state-retained.receipt", "preflight-state.snapshot": "authority/preflight-state.snapshot", "postflight-state.snapshot": "authority/postflight-state.snapshot", "preflight.pmset-assertions": "authority/preflight.pmset-assertions", "postflight.pmset-assertions": "authority/postflight.pmset-assertions", "hosted-live-envelope.json": "authority/live-envelope.json"}
     deny(isinstance(build["retained"], dict) and set(build["retained"]) == set(retained_map), "build retained mismatch")
     for name, relative in retained_map.items():
         observed = descriptor_matches(build["retained"][name], files[relative], "retained binding")
@@ -410,12 +464,15 @@ def main() -> int:
     receipt_order, fields = parse_kv(root / "authority/live-state-retained.receipt", "terminal receipt")
     deny(receipt_order == ("schema", "nonce", "outcome", "child_command_exit", "wrapper_exit", "preflight_sha256", "postflight_sha256", "host_preserved", "benchmark_published", "error", "capture_identifiers", "control_root", "execution_root") and fields["schema"] == "3" and fields["nonce"] and fields["child_command_exit"] == "0" and fields["wrapper_exit"] == "0" and fields["outcome"] == "preserved" and fields["host_preserved"] == "true" and fields["benchmark_published"] in ("true", "false") and fields["error"] == "none" and fields["control_root"].startswith("/private/tmp/lidswitch-envelope.") and fields["execution_root"].startswith("/private/tmp/lidswitch-swift.") and fields["preflight_sha256"] == files["authority/preflight-state.snapshot"]["sha256"] and fields["postflight_sha256"] == files["authority/postflight-state.snapshot"]["sha256"], "terminal receipt invalid")
     terminal_captures = receipt_captures(fields["capture_identifiers"])
-    for snapshot in ("preflight", "postflight"):
-        _order, values = parse_kv(root / ("authority/" + snapshot + "-state.snapshot"), "snapshot")
-        deny(values.get("host_class") == "idle-uninstalled" and values.get("kernel_build") == policy["runner"]["kernel"], "snapshot terminal state invalid")
     live = load(root / "authority/live-envelope.json")
-    exact(live, ("postflight_sha256", "preflight_sha256", "receipt_sha256", "schema", "wrapper_exit"), "live envelope")
-    deny(live["schema"] == "lidswitch-hosted-live-envelope-v2" and live["wrapper_exit"] == 0 and live["receipt_sha256"] == files["authority/live-state-retained.receipt"]["sha256"] and live["preflight_sha256"] == fields["preflight_sha256"] == files["authority/preflight-state.snapshot"]["sha256"] and live["postflight_sha256"] == fields["postflight_sha256"] == files["authority/postflight-state.snapshot"]["sha256"], "live envelope binding mismatch")
+    exact(live, ("postflight", "preflight", "receipt_sha256", "schema", "wrapper_exit"), "live envelope")
+    for phase, snapshot, assertions in (("preflight", "authority/preflight-state.snapshot", "authority/preflight.pmset-assertions"), ("postflight", "authority/postflight-state.snapshot", "authority/postflight.pmset-assertions")):
+        phase_binding = exact(live[phase], ("assertions_sha256", "phase", "sleep_proof", "snapshot_sha256"), "live envelope " + phase)
+        allowed_phase = ("pre", "pre-initial") if phase == "preflight" else ("post",)
+        deny(phase_binding["phase"] in allowed_phase and phase_binding["sleep_proof"] == "pmset-assertions-system-prevent-system-sleep-0" and phase_binding["snapshot_sha256"] == files[snapshot]["sha256"] and phase_binding["assertions_sha256"] == files[assertions]["sha256"], "live envelope " + phase + " binding mismatch")
+        exact_idle_uninstalled_snapshot(root / snapshot, phase=phase_binding["phase"], nonce=fields["nonce"], kernel=policy["runner"]["kernel"])
+        assertions_prevent_system_sleep_zero(root / assertions)
+    deny(live["schema"] == "lidswitch-hosted-live-envelope-v3" and live["wrapper_exit"] == 0 and live["receipt_sha256"] == files["authority/live-state-retained.receipt"]["sha256"], "live envelope binding mismatch")
 
     context = load(root / "workflow-context.json")
     exact(context, ("candidate_root", "driver_sha256", "image_version", "orchestration_commit_sha", "package_parent", "policy_sha256", "release_output", "reviewed_orchestration_sha", "run_attempt", "run_id", "schema", "sdk_version", "source_commit", "source_tree", "workflow_file_sha256", "workflow_ref"), "workflow context")
