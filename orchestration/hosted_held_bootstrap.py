@@ -1012,6 +1012,48 @@ def _run_sealed_packaging(entry: Path, held: Path, allowed_modules: list[str], a
         env=PACKAGING_ENV, cwd="/", check=False)
 
 
+ASSEMBLED_CANDIDATE_LEAVES = frozenset({
+    "candidate-manifest.json", "package-manifest.json", "LidSwitch.dmg",
+    "LidSwitch.dmg.sha256", "LidSwitchHelper",
+})
+
+
+def _assembled_candidate_root(output_root: Path) -> Path:
+    """Return the assembler's inner candidate directory after identity checks.
+
+    ``assemble_manual_adhoc_candidate.py`` reserves ``output_root`` for its
+    candidate, extraction, and staging siblings, then publishes the canonical
+    evidence leaves in ``output_root/candidate``.  The collector must receive
+    that inner directory, never the outer assembler workspace.
+    """
+    outer_fd = os.open(output_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        outer = os.fstat(outer_fd)
+        if (not stat.S_ISDIR(outer.st_mode) or outer.st_uid != os.getuid() or outer.st_gid != os.getgid()
+                or stat.S_IMODE(outer.st_mode) != 0o700 or outer.st_nlink < 2):
+            deny("unsafe-assembled-output-root")
+        try:
+            candidate_fd = _open_child_directory(outer_fd, "candidate")
+        except OSError:
+            deny("assembled-candidate-root-missing")
+        try:
+            candidate = os.fstat(candidate_fd)
+            if (not stat.S_ISDIR(candidate.st_mode) or candidate.st_uid != os.getuid() or candidate.st_gid != os.getgid()
+                    or stat.S_IMODE(candidate.st_mode) != 0o700 or candidate.st_nlink < 2):
+                deny("unsafe-assembled-candidate-root")
+            for name in ASSEMBLED_CANDIDATE_LEAVES:
+                try:
+                    info = os.stat(name, dir_fd=candidate_fd, follow_symlinks=False)
+                except OSError:
+                    deny("assembled-candidate-leaf-missing: " + name)
+                _private_leaf_record(candidate_fd, name, mode=stat.S_IMODE(info.st_mode))
+        finally:
+            os.close(candidate_fd)
+    finally:
+        os.close(outer_fd)
+    return output_root / "candidate"
+
+
 def package(source: Path, authority: Path, policy_path: Path, release_output: Path, package_parent: Path) -> dict[str, object]:
     prepared = prepare_recheck(source, authority, policy_path, completed=True)
     contract_path = authority / "hosted-held-contract.json"
@@ -1068,8 +1110,9 @@ def package(source: Path, authority: Path, policy_path: Path, release_output: Pa
     if second.returncode:
         sys.stderr.write(second.stderr); deny("held-packaging-assemble-failed")
     _require_sealed_package_closure(held, names, closure)
+    candidate_root = _assembled_candidate_root(candidate)
     prepare_recheck(source, authority, policy_path, completed=True)
-    return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate), "envelope": descriptor(envelope), "held_packaging": closure}
+    return {"schema": "lidswitch-hosted-package-v1", "package_parent": str(package_parent), "candidate_root": str(candidate_root), "envelope": descriptor(envelope), "held_packaging": closure}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -339,6 +339,39 @@ class HeldPackagingClosureTests(unittest.TestCase):
         self.assertNotIn('parser.add_argument("--icon"', assembler)
         self.assertIn('regular_input(str(ROOT.parent / "Resources" / "LidSwitch.icns"), "app-icon")', assembler)
 
+    def test_assembled_candidate_root_is_the_verified_inner_layout(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        outer = Path(temp.name) / "assembler-output"
+        inner = outer / "candidate"
+        inner.mkdir(parents=True, mode=0o700)
+        os.chmod(outer, 0o700)
+        os.chmod(inner, 0o700)
+        for name in self.bootstrap.ASSEMBLED_CANDIDATE_LEAVES:
+            leaf = inner / name
+            leaf.write_bytes(b"assembled")
+            os.chmod(leaf, 0o400)
+        self.assertEqual(self.bootstrap._assembled_candidate_root(outer), inner)
+        os.chmod(inner, 0o500)
+        inner.rename(outer / "renamed")
+        with self.assertRaisesRegex(self.bootstrap.Denied, "assembled-candidate-root-missing"):
+            self.bootstrap._assembled_candidate_root(outer)
+
+    def test_assembled_candidate_root_rejects_a_missing_canonical_leaf(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        outer = Path(temp.name) / "assembler-output"
+        inner = outer / "candidate"
+        inner.mkdir(parents=True, mode=0o700)
+        os.chmod(outer, 0o700)
+        os.chmod(inner, 0o700)
+        for name in self.bootstrap.ASSEMBLED_CANDIDATE_LEAVES - {"package-manifest.json"}:
+            leaf = inner / name
+            leaf.write_bytes(b"assembled")
+            os.chmod(leaf, 0o400)
+        with self.assertRaisesRegex(self.bootstrap.Denied, "assembled-candidate-leaf-missing: package-manifest.json"):
+            self.bootstrap._assembled_candidate_root(outer)
+
     def test_source_root_path_replacement_is_rejected_before_packaging(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
