@@ -1,6 +1,7 @@
 import ast
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import signal
@@ -329,6 +330,14 @@ class HeldPackagingClosureTests(unittest.TestCase):
         os.chmod(held / "Resources", 0o500)
         with self.assertRaises(self.bootstrap.Denied):
             self.bootstrap._require_sealed_package_closure(held, self.bootstrap.PACKAGING_SCRIPTS, expected)
+
+    def test_held_assembler_uses_its_sealed_sibling_icon_without_an_unsupported_flag(self):
+        package_source = inspect.getsource(self.bootstrap.package)
+        self.assertNotIn('"--icon"', package_source)
+        self.assertIn('str(held / "Resources/LidSwitchReleaseIdentity.json")', package_source)
+        assembler = (ROOT / "script/assemble_manual_adhoc_candidate.py").read_text(encoding="utf-8")
+        self.assertNotIn('parser.add_argument("--icon"', assembler)
+        self.assertIn('regular_input(str(ROOT.parent / "Resources" / "LidSwitch.icns"), "app-icon")', assembler)
 
     def test_source_root_path_replacement_is_rejected_before_packaging(self):
         temp = tempfile.TemporaryDirectory()
