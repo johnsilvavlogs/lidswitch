@@ -65,7 +65,7 @@ jobs:
           test "$(/usr/bin/shasum -a 256 orchestration/hosted_held_bootstrap.py | /usr/bin/awk '{print $1}')" = 81725eb1974edbfba1af56aa527f71d6e1252fdadec574dd857bbc9f8bc3bc5e
           test "$(/usr/bin/shasum -a 256 orchestration/hosted-runner-policy.json | /usr/bin/awk '{print $1}')" = 25f6451c262625cdbecc571178fcd872f44a0f3e19bef41b274a6c7266852b58
           test "$(/usr/bin/shasum -a 256 orchestration/collect_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 65ac111c5b0eb9c5e1494b86d0abec0a59fabb1fe30b3e9793776cb31e9bfcd1
-          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = 0fe846a143088d3ed402e3bcf5fcaf3b9434e44e54a73589155a0355e08de954
+          test "$(/usr/bin/shasum -a 256 orchestration/verify_hosted_candidate_evidence.py | /usr/bin/awk '{print $1}')" = d58e75055d6069e1e8abb5e42c799667d16fdd72cad53768c11d26fbb2ed9e99
           /usr/bin/python3 -m py_compile orchestration/hosted_held_bootstrap.py orchestration/collect_hosted_candidate_evidence.py
       - name: Create runner-specific held authority after exact source verification
         shell: /bin/bash -euo pipefail {0}

@@ -17,6 +17,10 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
 
 
+def source_canonical(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode() + b"\n"
+
+
 def digest(value):
     return hashlib.sha256(value).hexdigest()
 
@@ -159,7 +163,7 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         seal = digest(b"".join((f"{name}|{release_leaves[name]['size']}|{release_leaves[name]['sha256']}\n").encode("ascii") for name in sorted(release_leaves)))
         release = {"seal_sha256": seal, "build_receipt_sha256": meta(root / "release-output/build-receipt.json")["sha256"], "anchor_sha256": anchor["sha256"], "anchor_size": anchor["size"], "source_manifest_sha256": inputs["baseManifestSHA256"], "release_identity_sha256": inputs["releaseIdentitySHA256"], "app": release_receipt["artifacts"]["app"], "helper": release_receipt["artifacts"]["helper"]}
         envelope = {"schema_version": core.ENVELOPE_SCHEMA, "wrapper_sha256": roles["wrapper"]["sha256"], "source_commit": COMMIT, "source_tree_sha256": inputs["baseManifestSHA256"], "toolchain_sha256": "c" * 64, "executables": [{"role": "python3", "path": "/usr/bin/python3", "sha256": "d" * 64}], "environment": {"locale": "C", "timezone": "UTC", "path": "/usr/bin:/bin:/usr/sbin:/sbin"}, "release_output": release}
-        write(root / "package/build-envelope.json", envelope, 0o400)
+        write(root / "package/build-envelope.json", source_canonical(envelope), 0o400)
         envelope_sha = meta(root / "package/build-envelope.json")["sha256"]
         write(root / "candidate/LidSwitchHelper", b"helper-binary", 0o755)
         write(root / "candidate/LidSwitch.dmg", b"dmg-bytes", 0o600)
@@ -180,7 +184,8 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         candidate["receipts"] = receipts(candidate, 6); candidate["helper"]["signature_receipt"] = candidate["receipts"][0]["sha256"]; candidate["app"]["signature_receipt"] = candidate["receipts"][3]["sha256"]; candidate["candidate_id"] = digest(core.canonical({key: value for key, value in candidate.items() if key != "candidate_id"}))
         package_leaf = lambda role, name: {"role": role, "name": name, "sha256": meta(root / "candidate" / name)["sha256"], "size": meta(root / "candidate" / name)["size"], "mode": meta(root / "candidate" / name)["mode"], "uid": 1, "gid": 1, "tree_sha256": meta(root / "candidate" / name)["sha256"], "signature_receipt": "0" * 64}
         package = dict(candidate); package["candidate_id"] = "0" * 64; package["phase"] = "package-captured"; package["package"] = {"dmg": package_leaf("package", "LidSwitch.dmg"), "checksum": package_leaf("checksum", "LidSwitch.dmg.sha256"), "extraction_receipt": "0" * 64, "extracted_tree_sha256": app_artifact["tree_sha256"]}; package["receipts"] = receipts(package, 9); package["helper"]["signature_receipt"] = package["receipts"][0]["sha256"]; package["app"]["signature_receipt"] = package["receipts"][3]["sha256"]; package["package"]["extraction_receipt"] = package["receipts"][8]["sha256"]; package["candidate_id"] = digest(core.canonical({key: value for key, value in package.items() if key != "candidate_id"}))
-        write(root / "candidate/candidate-manifest.json", candidate, 0o600); write(root / "candidate/package-manifest.json", package, 0o600)
+        write(root / "candidate/candidate-manifest.json", source_canonical(candidate), 0o600)
+        write(root / "candidate/package-manifest.json", source_canonical(package), 0o600)
         policy_images = json.loads((root / "orchestration/policy.json").read_text())["runner"]["image_versions"]
         context = {"schema": "lidswitch-hosted-workflow-context-v2", "source_commit": COMMIT, "source_tree": TREE, "orchestration_commit_sha": "1" * 40, "workflow_file_sha256": meta(root / "orchestration/workflow.yml")["sha256"], "workflow_ref": "refs/heads/main", "reviewed_orchestration_sha": "1" * 40, "run_id": "1", "run_attempt": "1", "image_version": image_version or policy_images[0], "policy_sha256": meta(root / "orchestration/policy.json")["sha256"], "release_output": release_output_path, "package_parent": "/private/tmp/lidswitch-package.fixture", "candidate_root": "/private/tmp/lidswitch-package.fixture/candidate", "sdk_version": "26", "driver_sha256": envelope["toolchain_sha256"]}
         write(root / "workflow-context.json", context, 0o400)
@@ -298,9 +303,61 @@ class HostedEvidenceFixtureTests(unittest.TestCase):
         self.assertEqual(authority["generated"]["entry"]["mode"], 0o500)
         self.assertEqual(contract["roles"]["candidate_core"]["mode"], 0o644)
         self.assertEqual(authority["system"]["python"]["nlink"], 2)
+        self.assertNotEqual((root / "package/build-envelope.json").read_bytes(), canonical(json.loads((root / "package/build-envelope.json").read_text())))
+        self.assertNotEqual((root / "candidate/candidate-manifest.json").read_bytes(), canonical(json.loads((root / "candidate/candidate-manifest.json").read_text())))
+        self.assertNotEqual((root / "candidate/package-manifest.json").read_bytes(), canonical(json.loads((root / "candidate/package-manifest.json").read_text())))
         result = self.verify(root)
         temp.cleanup()
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_captured_build_envelope_requires_source_canonical_bytes_and_semantics(self):
+        def reordered(payload, key):
+            value = json.loads(payload)
+            return source_canonical({key: value.pop(key), **value})
+
+        def reordered_release(payload, keys):
+            value = json.loads(payload)
+            value["release_output"] = {key: value["release_output"][key] for key in keys}
+            return source_canonical(value)
+
+        def reordered_executable(payload):
+            value = json.loads(payload)
+            value["executables"] = [{key: value["executables"][0][key] for key in ("path", "role", "sha256")}]
+            return source_canonical(value)
+
+        cases = {
+            "whitespace": (lambda payload: payload.replace(b',"wrapper_sha256"', b', "wrapper_sha256"'), "invalid captured source json"),
+            "source": (lambda payload: source_canonical({**json.loads(payload), "source_commit": "0" * 40}), "build envelope mismatch"),
+            "top-order": (lambda payload: reordered(payload, "wrapper_sha256"), "build envelope schema mismatch"),
+            "executable-order": (reordered_executable, "build executable schema mismatch"),
+            "release-order": (lambda payload: reordered_release(payload, ("anchor_sha256", "seal_sha256", "build_receipt_sha256", "anchor_size", "source_manifest_sha256", "release_identity_sha256", "app", "helper")), "release output schema mismatch"),
+        }
+        for label, (transform, message) in cases.items():
+            with self.subTest(label=label):
+                temp, root = self.make_fixture()
+                self.rewrite_leaf_and_reledger(root, "package/build-envelope.json", transform((root / "package/build-envelope.json").read_bytes()))
+                result = self.verify(root)
+                temp.cleanup()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+
+    def test_captured_candidate_manifest_rejects_noncanonical_bytes_after_reledgering(self):
+        def reordered(payload):
+            value = json.loads(payload)
+            return source_canonical({"candidate_id": value.pop("candidate_id"), **value})
+
+        for relative in ("candidate/candidate-manifest.json", "candidate/package-manifest.json"):
+            for label, transform, message in (
+                ("whitespace", lambda payload: payload.replace(b',"candidate_id"', b', "candidate_id"'), "invalid captured source json"),
+                ("top-order", reordered, "candidate manifest invalid"),
+            ):
+                with self.subTest(relative=relative, label=label):
+                    temp, root = self.make_fixture()
+                    self.rewrite_leaf_and_reledger(root, relative, transform((root / relative).read_bytes()))
+                    result = self.verify(root)
+                    temp.cleanup()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
 
     def test_reledgered_writable_evidence_copy_is_rejected(self):
         temp, root = self.make_fixture()
