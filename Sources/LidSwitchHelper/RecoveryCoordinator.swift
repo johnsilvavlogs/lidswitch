@@ -65,10 +65,12 @@ final class RecoveryCoordinator {
         // An administrator one-shot may be the only live helper process when
         // launchd is disabled during install/recovery. Do not rely on its
         // asynchronous queue surviving process exit: synchronously retire only
-        // an already-ambiguous receipt whose exact members and PGID/SID are
-        // stably absent. No signal or second mutation is reachable here.
+        // a terminal/kill/ambiguous receipt whose previous owner lease has
+        // expired and whose exact members and PGID/SID are stably absent. No
+        // signal, reap retry, or
+        // second power mutation is reachable here.
         if intent != .startup && !allowReconnect {
-            _ = Self.reconcileExtinctAmbiguousContainment(store: store)
+            _ = Self.reconcileExtinctExpiredContainment(store: store)
         }
         guard let outcome = store.withTransaction({ transaction in
             self.withContainmentReceipt(store: store, transaction: transaction) {
@@ -1107,12 +1109,13 @@ final class RecoveryCoordinator {
     /// after releasing it, then compare-and-swap the same token back under the
     /// lock. A queued task is therefore never allowed to wedge XPC or status.
     @discardableResult
-    static func reconcileExtinctAmbiguousContainment(store: RecoveryAuthorityStore) -> Bool {
+    static func reconcileExtinctExpiredContainment(store: RecoveryAuthorityStore) -> Bool {
         let now = UInt64(max(0, MonotonicClock.seconds()) * 1_000_000_000)
         let owner = UUID()
         guard let receipt = store.withTransaction({ transaction -> ContainedProcessReceipt? in
             guard case let .valid(current) = store.containmentReceiptRecord(),
-                  current.phase == .ambiguous else { return nil }
+                  current.phase == .term || current.phase == .kill || current.phase == .ambiguous
+            else { return nil }
             return store.claimContainmentReceipt(
                 token: current.token,
                 owner: owner,

@@ -238,6 +238,92 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.power.setCalls, [])
     }
 
+    func testAdministratorOneShotSynchronouslyRetiresExactExpiredTerminalContainmentWithoutSecondMutation() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let identity = ContainedProcessIdentity(
+            pid: Int32.max - 3,
+            startSeconds: 10,
+            startMicroseconds: 1
+        )
+        let priorOwner = UUID()
+        // Production-shaped v4 residue: the old owner reached TERM, made no
+        // signal/reap claim, and every original deadline is already expired.
+        let terminal = ContainedProcessReceipt(
+            token: UUID(),
+            executable: "/usr/bin/pmset",
+            commandFingerprint: "0123456789abcdef",
+            leader: identity,
+            members: [.init(identity: identity, executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef")],
+            processGroupID: identity.pid,
+            sessionID: Int32.max - 4,
+            rootDeadlineNanoseconds: 10,
+            cleanupDeadlineNanoseconds: 20,
+            phase: .term,
+            termSignalIssued: false,
+            killSignalIssued: false,
+            leaderReaped: false,
+            reapAttemptCount: 3,
+            cleanupOwnerToken: priorOwner,
+            ownerDeadlineNanoseconds: 30
+        )
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.publishInitialContainmentReceipt(terminal, $0)
+        }))
+
+        XCTAssertEqual(
+            fixture.coordinator.recover(intent: .install, allowReconnect: false),
+            .pristineIdle
+        )
+        XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testAdministratorOneShotSynchronouslyRetiresExactExpiredKillContainmentWithoutSecondMutation() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let identity = ContainedProcessIdentity(pid: Int32.max - 5, startSeconds: 10, startMicroseconds: 1)
+        let receipt = ContainedProcessReceipt(
+            token: UUID(), executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef",
+            leader: identity, members: [.init(identity: identity, executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef")],
+            processGroupID: identity.pid, sessionID: Int32.max - 6,
+            rootDeadlineNanoseconds: 10, cleanupDeadlineNanoseconds: 20,
+            phase: .kill, termSignalIssued: true, killSignalIssued: true,
+            leaderReaped: false, reapAttemptCount: 3,
+            cleanupOwnerToken: UUID(), ownerDeadlineNanoseconds: 30
+        )
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.publishInitialContainmentReceipt(receipt, $0)
+        }))
+        XCTAssertEqual(fixture.coordinator.recover(intent: .install, allowReconnect: false), .pristineIdle)
+        XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testAdministratorOneShotKeepsTerminalContainmentWhenOwnerIsNotExpired() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let identity = ContainedProcessIdentity(pid: Int32.max - 7, startSeconds: 10, startMicroseconds: 1)
+        let receipt = ContainedProcessReceipt(
+            token: UUID(), executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef",
+            leader: identity, members: [.init(identity: identity, executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef")],
+            processGroupID: identity.pid, sessionID: Int32.max - 8,
+            rootDeadlineNanoseconds: 10, cleanupDeadlineNanoseconds: 20,
+            phase: .term, termSignalIssued: false, killSignalIssued: false,
+            leaderReaped: false, reapAttemptCount: 3,
+            cleanupOwnerToken: UUID(), ownerDeadlineNanoseconds: .max
+        )
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.publishInitialContainmentReceipt(receipt, $0)
+        }))
+        XCTAssertEqual(
+            fixture.coordinator.recover(intent: .install, allowReconnect: false),
+            .recoveryRequired("containment-pending")
+        )
+        XCTAssertEqual(fixture.store.containmentReceiptRecord(), .valid(receipt))
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
     /// Exercises the production connected timer entrypoint.  It deliberately
     /// enters through BEGIN, privateAuthorityMatches and tickLocked rather
     /// than calling the recovery-budget helper directly.
