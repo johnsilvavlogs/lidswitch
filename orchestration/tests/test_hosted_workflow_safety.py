@@ -69,7 +69,7 @@ class HostedWorkflowSafetyTests(unittest.TestCase):
         self.assertNotIn("authority-ledger-self-reference-invalid", self.bootstrap)
 
     def test_terminal_receipt_and_packaging_closure_are_bound(self):
-        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "LIDSWITCH_HOSTED_WRAPPER_FAILURE", "LIDSWITCH_HOSTED_PREFLIGHT_FAILURE", "control_files=", "status_reason_class", "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "held-terminal-receipt-missing", "hosted-authority-inventory=", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
+        for token in ("live-state-retained.receipt", "preflight-state.snapshot", "postflight-state.snapshot", 'rows.get("host_preserved")!="true"', 'rows.get("error")!="none"', "LIDSWITCH_HOSTED_WRAPPER_FAILURE", "LIDSWITCH_HOSTED_PREFLIGHT_FAILURE", "pre-initial.pmset-batt", "drawing", "live_sleep_disabled", "custom_ac_sleep", "control_files=", "status_reason_class", "capture_names=(\"app-bin-path\"", 'rows.get("control_root")!=control', "capture_package", "assemble_package", "candidate_core", "source-drift-before-build", "source-root-replacement-before-build", "held-terminal-receipt-missing", "hosted-authority-inventory=", "_sealed_package_closure", "held-packaging-inventory-drift", "held-packaging-closure-drift", "PACKAGING_PYTHON_BOOTSTRAP"):
             self.assertIn(token, self.bootstrap)
 
     def test_verifier_closes_the_complete_evidence_inventory(self):
@@ -414,3 +414,46 @@ class HeldPackagingClosureTests(unittest.TestCase):
         marker = next(value for value in constants if isinstance(value, str) and value.startswith("LIDSWITCH_HOSTED_HELD_RECEIPT"))
         self.assertIn("\n", marker)
         self.assertNotIn("\\n", marker)
+
+    def test_generated_power_diagnostic_is_bounded_for_all_stage_shapes(self):
+        scope = {"__name__": "held_entry_test"}
+        exec(compile(self.bootstrap.ENTRY, "held-entry.py", "exec"), scope, scope)
+        diagnose = scope["power_diagnostic"]
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        self.addCleanup(os.close, root_fd)
+        names = ("pre-initial.pmset-batt", "pre-initial.pmset-live", "pre-initial.pmset-custom")
+
+        self.assertEqual(diagnose(root_fd, ()), {
+            "drawing": "missing", "live_sleep_disabled": "missing", "custom_ac_sleep": "missing",
+        })
+
+        for name in names:
+            (root / name).write_bytes(b"")
+        self.assertEqual(diagnose(root_fd, names), {
+            "drawing": "unparsed", "live_sleep_disabled": "unparsed", "custom_ac_sleep": "unparsed",
+        })
+
+        (root / names[0]).write_bytes(b"\xff")
+        (root / names[1]).write_text("SleepDisabled maybe\n")
+        (root / names[2]).write_text("AC Power:\n sleep " + "9" * 100 + "\n")
+        self.assertEqual(diagnose(root_fd, names), {
+            "drawing": "unreadable", "live_sleep_disabled": "unparsed", "custom_ac_sleep": "unparsed",
+        })
+
+        (root / names[0]).write_text("Now drawing from 'AC Power'\nNow drawing from 'Battery Power'\n")
+        (root / names[1]).write_text("SleepDisabled 0\nSleepDisabled 1\n")
+        (root / names[2]).write_text("AC Power:\n sleep 0\n sleep 1\n")
+        self.assertEqual(diagnose(root_fd, names), {
+            "drawing": "unparsed", "live_sleep_disabled": "unparsed", "custom_ac_sleep": "unparsed",
+        })
+
+        (root / names[0]).write_text("Now drawing from 'AC Power'\n")
+        (root / names[1]).write_text(" SleepDisabled 0\n")
+        (root / names[2]).write_text("Battery Power:\n sleep 1\nAC Power:\n sleep 0\n")
+        self.assertEqual(diagnose(root_fd, names), {
+            "drawing": "ac", "live_sleep_disabled": "0", "custom_ac_sleep": "0",
+        })
+        for result in diagnose(root_fd, names).values():
+            self.assertRegex(result, r"^(?:missing|unreadable|unparsed|ac|battery|0|[1-9][0-9]{0,3})$")

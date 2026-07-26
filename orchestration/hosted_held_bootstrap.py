@@ -424,6 +424,50 @@ def bash(spec):
   fd=os.open("/bin/bash",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC); raw=read(fd,16*1024*1024); s=os.fstat(fd); os.close(fd)
   if ident(s)+(hashlib.sha256(raw).hexdigest(),)!=tuple(spec.get(k) for k in ("dev","inode","uid","gid","mode","nlink","size","sha256")): die()
  except OSError: die()
+def power_diagnostic(root,present):
+ def load(name):
+  if name not in present: return "missing",None
+  fd=None
+  try:
+   fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=root); before=os.fstat(fd)
+   if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size<0 or before.st_size>65536: return "unreadable",None
+   data=bytearray()
+   while len(data)<before.st_size:
+    chunk=os.read(fd,min(131072,before.st_size-len(data)))
+    if not chunk: return "unreadable",None
+    data.extend(chunk)
+   if os.read(fd,1) or ident(os.fstat(fd))!=ident(before): return "unreadable",None
+   return "ok",bytes(data).decode("utf-8","strict")
+  except (OSError,UnicodeError): return "unreadable",None
+  finally:
+   if fd is not None:
+    try: os.close(fd)
+    except OSError: pass
+ result={}
+ state,batt=load("pre-initial.pmset-batt")
+ if state!="ok": result["drawing"]=state
+ else:
+  matches=[]
+  for line in batt.splitlines():
+   if line.strip()=="Now drawing from 'AC Power'": matches.append("ac")
+   elif line.strip()=="Now drawing from 'Battery Power'": matches.append("battery")
+  result["drawing"]=matches[0] if len(matches)==1 else "unparsed"
+ state,live=load("pre-initial.pmset-live")
+ if state!="ok": result["live_sleep_disabled"]=state
+ else:
+  matches=[parts[1] for line in live.splitlines() if len(parts:=line.split())==2 and parts[0]=="SleepDisabled" and parts[1] in ("0","1")]
+  result["live_sleep_disabled"]=matches[0] if len(matches)==1 else "unparsed"
+ state,custom=load("pre-initial.pmset-custom")
+ if state!="ok": result["custom_ac_sleep"]=state
+ else:
+  in_ac=False; matches=[]
+  for line in custom.splitlines():
+   if line=="AC Power:": in_ac=True; continue
+   if line and not line[0].isspace(): in_ac=False
+   parts=line.split()
+   if in_ac and len(parts)==2 and parts[0]=="sleep" and 1<=len(parts[1])<=4 and all("0"<=ch<="9" for ch in parts[1]): matches.append(parts[1])
+  result["custom_ac_sleep"]=matches[0] if len(matches)==1 else "unparsed"
+ return result
 def main():
  p=argparse.ArgumentParser(allow_abbrev=False); p.add_argument("--repo",required=True); p.add_argument("--contract-fd",required=True,type=int); p.add_argument("--contract-sha256",required=True); p.add_argument("--contract-size",required=True,type=int); p.add_argument("--hosted-receipt",required=True); p.add_argument("--release-candidate",action="store_true"); p.add_argument("wrapper",choices=("build",)); p.add_argument("args",nargs=argparse.REMAINDER); a=p.parse_args()
  if not a.release_candidate or len(a.contract_sha256)!=64 or a.contract_size<=0: die()
@@ -447,7 +491,7 @@ def main():
  rc=os.WEXITSTATUS(status) if os.WIFEXITED(status) else EX
  try: receipt_fd=os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd)
  except OSError:
-  allowed=("live-preflight-initial.kv","live-preflight.kv","live-postflight.kv","live-state-retained.receipt")
+  allowed=("pre-initial.pmset-batt","pre-initial.pmset-live","pre-initial.pmset-custom","pre-initial.launchctl-print","live-preflight-initial.kv","live-preflight.kv","live-postflight.kv","live-state-retained.receipt")
   try: present=tuple(name for name in allowed if name in os.listdir(cfd))
   except OSError: die()
   values={}
@@ -461,8 +505,9 @@ def main():
      if key in ("host_class","kernel_build","power_source","sleep_disabled","launchd_presence","status_presence","authority_kind","status_reason_class") and 0<len(value)<=128 and all(ch.isalnum() or ch in "-._" for ch in value): values[key]=value
    except BaseException: die()
    break
+  power=power_diagnostic(cfd,present)
   fields=("host_class","kernel_build","power_source","sleep_disabled","launchd_presence","status_presence","authority_kind","status_reason_class")
-  os.write(2,("LIDSWITCH_HOSTED_PREFLIGHT_FAILURE\nschema=1\ncontrol_files="+(",".join(present) if present else "none")+"\n"+"".join(key+"="+values.get(key,"missing")+"\n" for key in fields)).encode()); die()
+  os.write(2,("LIDSWITCH_HOSTED_PREFLIGHT_FAILURE\nschema=2\ncontrol_files="+(",".join(present) if present else "none")+"\n"+"".join(key+"="+power[key]+"\n" for key in ("drawing","live_sleep_disabled","custom_ac_sleep"))+"".join(key+"="+values.get(key,"missing")+"\n" for key in fields)).encode()); die()
  receipt=read(receipt_fd,65536)
  try:
   rows={};
