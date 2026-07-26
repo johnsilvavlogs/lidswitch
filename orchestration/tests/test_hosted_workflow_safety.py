@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import stat
 import subprocess
 import tempfile
@@ -469,3 +470,72 @@ class HeldPackagingClosureTests(unittest.TestCase):
         })
         for result in diagnose(root_fd, names).values():
             self.assertRegex(result, r"^(?:missing|unreadable|unparsed|ac|battery|0|[1-9][0-9]{0,3})$")
+
+    def test_generated_entry_post_child_failure_blocks_are_exact_bounded_and_single(self):
+        scope = {"__name__": "held_entry_test"}
+        exec(compile(self.bootstrap.ENTRY, "held-entry.py", "exec"), scope, scope)
+        stages = scope["POST_CHILD_STAGES"]
+        self.assertIn("internal", stages)
+        self.assertEqual(len(stages), len(set(stages)))
+        self.assertTrue(all(isinstance(stage, str) and stage.isascii() for stage in stages))
+        self.assertEqual(set(scope["ROLE_REASSERT_STAGES"]), set(scope["ROLES"]))
+        self.assertTrue(set(scope["ROLE_REASSERT_STAGES"].values()).issubset(set(stages)))
+
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        missing = root / "missing"; present = root / "present"; unknown = root / "unknown"
+        missing.mkdir(); present.mkdir(); unknown.mkdir()
+        (present / "live-state-retained.receipt").write_bytes(b"metadata only")
+        os.symlink("target", unknown / "live-state-retained.receipt")
+        fds = {
+            "absent": os.open(missing, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
+            "present": os.open(present, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
+            "unknown": os.open(unknown, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC),
+        }
+        for fd in fds.values():
+            self.addCleanup(os.close, fd)
+        statuses = {"zero": 0, "nonzero": 5 << 8, "signaled": signal.SIGTERM, "unknown": 0x7F}
+
+        for stage in stages:
+            for rc_class, status in statuses.items():
+                for presence, control_fd in fds.items():
+                    block = scope["hosted_entry_failure_block"](stage, status, control_fd)
+                    self.assertLessEqual(len(block), 256)
+                    self.assertTrue(block.endswith(b"\n"))
+                    self.assertTrue(block.isascii())
+                    self.assertEqual(block.count(b"LIDSWITCH_HOSTED_ENTRY_FAILURE"), 1)
+                    self.assertEqual(block.decode("ascii").splitlines(), [
+                        "LIDSWITCH_HOSTED_ENTRY_FAILURE",
+                        "schema=1",
+                        "stage=" + stage,
+                        "child_rc_class=" + rc_class,
+                        "receipt_presence=" + presence,
+                    ])
+                    for forbidden in (b"/", b"sha", b"hash", b"code=", b"PATH", b"raw", b"error="):
+                        self.assertNotIn(forbidden, block)
+
+        self.assertIn(b"stage=internal\n", scope["hosted_entry_failure_block"]("not-a-stage", 0, fds["absent"]))
+        emitted = [False]
+        with mock.patch.object(scope["os"], "write", return_value=1) as write:
+            self.assertTrue(scope["emit_hosted_entry_failure"](emitted, "bash-reassert", 0, fds["absent"]))
+            self.assertFalse(scope["emit_hosted_entry_failure"](emitted, "bash-reassert", 0, fds["absent"]))
+        self.assertEqual(write.call_count, 1)
+
+    def test_generated_entry_imports_re_for_success_validation_and_success_is_unarmed(self):
+        scope = {"__name__": "held_entry_test"}
+        exec(compile(self.bootstrap.ENTRY, "held-entry.py", "exec"), scope, scope)
+        self.assertIn("re", scope)
+        self.assertTrue(callable(scope["re"].fullmatch))
+        self.assertTrue(scope["success_snapshot_scalars_valid"]({
+            "kernel_build": "25E246",
+            "kernel_boot": "12345678-1234-4123-8123-123456789abc",
+            "kernel_monotonic": "12.5",
+            "captured_epoch": "1785042635",
+        }))
+        self.assertFalse(scope["success_snapshot_scalars_valid"]({
+            "kernel_build": "25E246", "kernel_boot": "not-a-uuid",
+            "kernel_monotonic": "12.5", "captured_epoch": "1785042635",
+        }))
+        self.assertIn('raise SystemExit(rc)', self.bootstrap.ENTRY)
+        self.assertIn('if emitted[0]: return False', self.bootstrap.ENTRY)
+        self.assertNotIn('emit_hosted_entry_failure(emitted,stage,status,cfd)\n raise SystemExit(rc)', self.bootstrap.ENTRY)

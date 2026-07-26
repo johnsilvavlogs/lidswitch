@@ -369,8 +369,10 @@ def verify_manifest(source: Path) -> tuple[dict[str, object], str]:
 
 
 ENTRY = r'''#!/usr/bin/python3
-import argparse, fcntl, hashlib, json, os, stat, sys, tempfile
+import argparse, errno, fcntl, hashlib, json, os, re, stat, sys, tempfile
 EX=74; ROLES={"wrapper":30,"common":31,"envelope":32,"profile":33,"safe_file":34,"supervisor":35,"source_manifest":36,"capture_package":42,"assemble_package":43,"candidate_core":44,"build_manifest":45,"package_manifest":46,"validate_candidate":47,"validate_dmg":48,"release_identity":49,"icon":50}
+POST_CHILD_STAGES=("internal","bash-reassert","role-reassert-wrapper","role-reassert-common","role-reassert-envelope","role-reassert-profile","role-reassert-safe_file","role-reassert-supervisor","role-reassert-source_manifest","role-reassert-capture_package","role-reassert-assemble_package","role-reassert-candidate_core","role-reassert-build_manifest","role-reassert-package_manifest","role-reassert-validate_candidate","role-reassert-validate_dmg","role-reassert-release_identity","role-reassert-icon","child-status-classify","receipt-open","receipt-read","receipt-parse","receipt-success-validate","release-receipt-open-read","release-receipt-parse-validate","pre-snapshot-select","pre-snapshot-tuple","post-snapshot-select","post-snapshot-tuple","pre-assertion-parse","post-assertion-parse","save-live-state-retained-receipt","save-preflight-state-snapshot","save-postflight-state-snapshot","save-preflight-pmset-assertions","save-postflight-pmset-assertions","live-envelope-write")
+ROLE_REASSERT_STAGES={"wrapper":"role-reassert-wrapper","common":"role-reassert-common","envelope":"role-reassert-envelope","profile":"role-reassert-profile","safe_file":"role-reassert-safe_file","supervisor":"role-reassert-supervisor","source_manifest":"role-reassert-source_manifest","capture_package":"role-reassert-capture_package","assemble_package":"role-reassert-assemble_package","candidate_core":"role-reassert-candidate_core","build_manifest":"role-reassert-build_manifest","package_manifest":"role-reassert-package_manifest","validate_candidate":"role-reassert-validate_candidate","validate_dmg":"role-reassert-validate_dmg","release_identity":"role-reassert-release_identity","icon":"role-reassert-icon"}
 def die(): raise SystemExit(EX)
 def ident(s): return (s.st_dev,s.st_ino,s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode),s.st_nlink,s.st_size)
 def read(fd,limit=8*1024*1024):
@@ -392,6 +394,39 @@ def dup(fd):
 def close(fd):
  try: os.close(fd)
  except OSError: die()
+def child_rc_class(status):
+ if os.WIFEXITED(status): return "zero" if os.WEXITSTATUS(status)==0 else "nonzero"
+ if os.WIFSIGNALED(status): return "signaled"
+ return "unknown"
+def retained_receipt_presence(control_fd):
+ fd=None
+ try:
+  fd=os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=control_fd)
+ except OSError as error:
+  return "absent" if error.errno==errno.ENOENT else "unknown"
+ try:
+  meta=os.fstat(fd)
+  return "present" if stat.S_ISREG(meta.st_mode) and meta.st_nlink==1 else "unknown"
+ except OSError: return "unknown"
+ finally:
+  if fd is not None:
+   try: os.close(fd)
+   except OSError: pass
+def hosted_entry_failure_block(stage,status,control_fd):
+ if stage not in POST_CHILD_STAGES: stage="internal"
+ block=("LIDSWITCH_HOSTED_ENTRY_FAILURE\nschema=1\nstage="+stage+"\nchild_rc_class="+child_rc_class(status)+"\nreceipt_presence="+retained_receipt_presence(control_fd)+"\n").encode("ascii")
+ if len(block)>256: die()
+ return block
+def emit_hosted_entry_failure(emitted,stage,status,control_fd):
+ if emitted[0]: return False
+ emitted[0]=True
+ try: os.write(2,hosted_entry_failure_block(stage,status,control_fd))
+ except BaseException: pass
+ return True
+def success_snapshot_scalars_valid(vals):
+ try:
+  return vals.get("kernel_build")=="25E246" and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",vals["kernel_boot"]) is not None and re.fullmatch(r"[0-9]+(?:[.][0-9]+)?",vals["kernel_monotonic"]) is not None and re.fullmatch(r"[0-9]{9,12}",vals["captured_epoch"]) is not None
+ except (KeyError,TypeError): return False
 def role(root,rel,want,dirs):
  if not isinstance(rel,str) or rel.startswith("/") or ".." in rel.split("/"): die()
  parent=root; opened=[]
@@ -485,10 +520,19 @@ def main():
  for fd in child.values(): os.lseek(fd,0,os.SEEK_SET) if fd in fds.values() else None
  acts=[(os.POSIX_SPAWN_OPEN,0,"/dev/null",os.O_RDONLY,0)]+[(os.POSIX_SPAWN_DUP2,v,k) for k,v in child.items()]+[(os.POSIX_SPAWN_CLOSE,v) for v in set(child.values())]
  env={"PATH":"/usr/bin:/bin:/usr/sbin:/sbin","LC_ALL":"C","LIDSWITCH_HELD_ENTRY":"v1","LIDSWITCH_HELD_FD_MAP":"30,31,32,33,34,35,36,37,38,39,40,41","LIDSWITCH_HELD_REPO_ROOT":a.repo,"LIDSWITCH_HELD_CONTROL_ROOT":control,"LIDSWITCH_HELD_EXECUTION_ROOT":execution,"LIDSWITCH_HELD_RELEASE_CANDIDATE":"v1","LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY":"v1"}
- pid=os.posix_spawn("/bin/bash",["/bin/bash","-p","--","/dev/fd/30",*a.args],env,file_actions=acts); close(gr); os.write(gw,b"R"); close(gw); close(tw); _,status=os.waitpid(pid,0); bash(c["bash"])
+ pid=os.posix_spawn("/bin/bash",["/bin/bash","-p","--","/dev/fd/30",*a.args],env,file_actions=acts); close(gr); os.write(gw,b"R"); close(gw); close(tw); _,status=os.waitpid(pid,0)
+ stage="internal"; original_die=die; emitted=[False]
+ def guarded_die():
+  emit_hosted_entry_failure(emitted,stage,status,cfd)
+  original_die()
+ globals()["die"]=guarded_die
+ stage="bash-reassert"; bash(c["bash"])
  for n in ROLES:
+  stage=ROLE_REASSERT_STAGES[n]
   q=role(root,c["roles"][n]["path"],c["roles"][n],c.get("directories",{})); close(q)
+ stage="child-status-classify"
  rc=os.WEXITSTATUS(status) if os.WIFEXITED(status) else EX
+ stage="receipt-open"
  try: receipt_fd=os.open("live-state-retained.receipt",os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd)
  except OSError:
   allowed=("pre-initial.pmset-batt","pre-initial.pmset-live","pre-initial.pmset-custom","pre-initial.pmset-assertions","pre-initial.launchctl-print","live-preflight-initial.kv","live-preflight.kv","live-postflight.kv","live-state-retained.receipt")
@@ -508,7 +552,8 @@ def main():
   power=power_diagnostic(cfd,present)
   fields=("host_class","kernel_build","power_source","sleep_disabled","launchd_presence","status_presence","authority_kind","status_reason_class")
   os.write(2,("LIDSWITCH_HOSTED_PREFLIGHT_FAILURE\nschema=2\ncontrol_files="+(",".join(present) if present else "none")+"\n"+"".join(key+"="+power[key]+"\n" for key in ("drawing","live_sleep_disabled","custom_ac_sleep"))+"".join(key+"="+values.get(key,"missing")+"\n" for key in fields)).encode()); die()
- receipt=read(receipt_fd,65536)
+ stage="receipt-read"; receipt=read(receipt_fd,65536)
+ stage="receipt-parse"
  try:
   rows={};
   for line in receipt.decode("utf-8","strict").splitlines():
@@ -516,6 +561,7 @@ def main():
    if not k or k in rows: die()
    rows[k]=v
   expected_keys={"schema","nonce","outcome","child_command_exit","wrapper_exit","preflight_sha256","postflight_sha256","host_preserved","benchmark_published","error","capture_identifiers","control_root","execution_root"}
+  stage="receipt-success-validate"
   if rc!=0:
    outcome=rows.get("outcome",""); error=rows.get("error",""); child_exit=rows.get("child_command_exit",""); wrapper_exit=rows.get("wrapper_exit","")
    safe=lambda value: 0<len(value)<=128 and all(ch.isalnum() or ch in "-._" for ch in value)
@@ -524,24 +570,31 @@ def main():
   capture_names=("app-bin-path","app-build","helper-bin-path","helper-build","helper-identity","helper-sign","helper-verify")
   capture_values=rows.get("capture_identifiers","").split(",")
   if set(rows)!=expected_keys or rows.get("schema")!="3" or not rows.get("nonce") or rows.get("child_command_exit")!="0" or rows.get("wrapper_exit")!="0" or rows.get("outcome")!="preserved" or rows.get("host_preserved")!="true" or rows.get("benchmark_published") not in ("true","false") or rows.get("error")!="none" or rows.get("control_root")!=control or rows.get("execution_root")!=execution or any(len(rows.get(name,""))!=64 or any(ch not in "0123456789abcdef" for ch in rows[name]) for name in ("preflight_sha256","postflight_sha256")) or len(capture_values)!=len(capture_names) or any(not value.startswith(name+":") or len(value)!=len(name)+130 or any(ch not in "0123456789abcdef:" for ch in value[len(name)+1:]) or value[len(name)+65]!=":" for name,value in zip(capture_names,capture_values)) or rc!=0: die()
+  stage="release-receipt-open-read"
   release_raw=read(os.open(os.path.join(execution,"release-output","build-receipt.json"),os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC),262144)
+  stage="release-receipt-parse-validate"
   release=json.loads(release_raw.decode("utf-8"))
   if json.dumps(release,sort_keys=True,separators=(",",":")).encode()+b"\n"!=release_raw or tuple(release.get("captures",{}))!=capture_names or any(capture_values[index]!=name+":"+release["captures"][name] for index,name in enumerate(capture_names)): die()
-  def snap(names,want,phases):
+  def snap(names,want,phases,select_stage,tuple_stage):
+   nonlocal stage
    for name in names:
+    stage=select_stage
     try: raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
     except OSError: continue
     if hashlib.sha256(raw).hexdigest()!=want: continue
+    stage=tuple_stage
     vals={}
     for line in raw.decode("utf-8","strict").splitlines():
      k,v=line.split("=",1)
      if not k or k in vals: die()
      vals[k]=v
     required={"schema":"1","nonce":rows.get("nonce"),"phase":phases[name],"host_class":"idle-uninstalled","power_source":"ac","sleep_disabled":"absent","sleep_proof":"pmset-assertions-system-prevent-system-sleep-0","ac_sleep_minutes":"0","status_presence":"absent","status_state":"none","status_reason":"none","status_reason_class":"none","status_session":"none","status_updated":"none","status_monotonic":"none","status_boot_id":"none","status_schema":"absent","status_evidence":"none","status_meta":"absent","launchd_presence":"absent","launchd_state":"none","launchd_pid":"none","launchd_program":"none","plist_contract":"absent","plist_qualified_build":"absent","plist_meta":"absent","plist_sha256":"absent","helper_path":"absent","helper_meta":"absent","app_meta":"absent","root_support_structure":"absent","private_applied_meta":"absent","private_terminal_meta":"absent","private_reservations_meta":"absent","private_proof_meta":"absent","private_lock_meta":"absent","original_ac_meta":"absent","original_battery_meta":"absent","authority_kind":"none","lease_session":"none","lease_boot":"none","lease_expires":"none","lease_issued_mono":"none","lease_expires_mono":"none","lease_uid":"none","lease_build":"none","lease_meta":"absent","lease_lifetime":"none","user_history_diagnostic_meta":"absent"}
-    if any(vals.get(k)!=v for k,v in required.items()) or vals.get("kernel_build")!="25E246" or set(vals)!=set(required)|{"kernel_boot","kernel_build","kernel_monotonic","captured_epoch"} or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",vals["kernel_boot"]) or not re.fullmatch(r"[0-9]+(?:[.][0-9]+)?",vals["kernel_monotonic"]) or not re.fullmatch(r"[0-9]{9,12}",vals["captured_epoch"]): die()
+    if any(vals.get(k)!=v for k,v in required.items()) or set(vals)!=set(required)|{"kernel_boot","kernel_build","kernel_monotonic","captured_epoch"} or not success_snapshot_scalars_valid(vals): die()
     return raw,name
    die()
-  def assertions(name):
+  def assertions(name,assertion_stage):
+   nonlocal stage
+   stage=assertion_stage
    raw=read(os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=cfd),65536)
    try:
     lines=raw.decode("utf-8","strict").splitlines(); header=lines.index("Assertion status system-wide:"); listed=lines.index("Listed by owning process:")
@@ -550,15 +603,22 @@ def main():
     if len(all_matches)!=1 or matches!=all_matches or re.fullmatch(r"[ \\t]+PreventSystemSleep[ \\t]+0",matches[0]) is None: die()
    except BaseException: die()
    return raw
-  pre,pre_name=snap(("live-preflight.kv","live-preflight-initial.kv"),rows.get("preflight_sha256",""),{"live-preflight.kv":"pre","live-preflight-initial.kv":"pre-initial"}); post,post_name=snap(("live-postflight.kv",),rows.get("postflight_sha256",""),{"live-postflight.kv":"post"})
-  pre_assertions=assertions("pre.pmset-assertions" if pre_name=="live-preflight.kv" else "pre-initial.pmset-assertions"); post_assertions=assertions("post.pmset-assertions")
+  pre,pre_name=snap(("live-preflight.kv","live-preflight-initial.kv"),rows.get("preflight_sha256",""),{"live-preflight.kv":"pre","live-preflight-initial.kv":"pre-initial"},"pre-snapshot-select","pre-snapshot-tuple")
+  post,post_name=snap(("live-postflight.kv",),rows.get("postflight_sha256",""),{"live-postflight.kv":"post"},"post-snapshot-select","post-snapshot-tuple")
+  pre_assertions=assertions("pre.pmset-assertions" if pre_name=="live-preflight.kv" else "pre-initial.pmset-assertions","pre-assertion-parse")
+  post_assertions=assertions("post.pmset-assertions","post-assertion-parse")
   destination=os.path.dirname(a.hosted_receipt)
   def save(name,data):
    fd=os.open(os.path.join(destination,name),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o400)
    try: os.write(fd,data); os.fsync(fd)
    finally: os.close(fd)
-  save("live-state-retained.receipt",receipt); save("preflight-state.snapshot",pre); save("postflight-state.snapshot",post); save("preflight.pmset-assertions",pre_assertions); save("postflight.pmset-assertions",post_assertions)
+  stage="save-live-state-retained-receipt"; save("live-state-retained.receipt",receipt)
+  stage="save-preflight-state-snapshot"; save("preflight-state.snapshot",pre)
+  stage="save-postflight-state-snapshot"; save("postflight-state.snapshot",post)
+  stage="save-preflight-pmset-assertions"; save("preflight.pmset-assertions",pre_assertions)
+  stage="save-postflight-pmset-assertions"; save("postflight.pmset-assertions",post_assertions)
  except BaseException: die()
+ stage="live-envelope-write"
  try:
   with open(a.hosted_receipt,"xb") as out: out.write(json.dumps({"schema":"lidswitch-hosted-live-envelope-v3","receipt_sha256":hashlib.sha256(receipt).hexdigest(),"preflight":{"snapshot_sha256":hashlib.sha256(pre).hexdigest(),"assertions_sha256":hashlib.sha256(pre_assertions).hexdigest(),"sleep_proof":"pmset-assertions-system-prevent-system-sleep-0","phase":"pre" if pre_name=="live-preflight.kv" else "pre-initial"},"postflight":{"snapshot_sha256":hashlib.sha256(post).hexdigest(),"assertions_sha256":hashlib.sha256(post_assertions).hexdigest(),"sleep_proof":"pmset-assertions-system-prevent-system-sleep-0","phase":"post"},"wrapper_exit":rc},sort_keys=True,separators=(",",":")).encode()+b"\n")
  except OSError: die()
