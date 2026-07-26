@@ -182,7 +182,7 @@ live_envelope_directory_structure() {
 }
 
 live_envelope_capture_power() {
-  local scratch="$1" phase="$2" drawing live custom
+  local scratch="$1" phase="$2" drawing live custom assertions sleep_row assertion_result
   drawing="$(live_envelope_control_target "${phase}.pmset-batt")" || return 74
   /usr/bin/pmset -g batt > "$drawing" 2>/dev/null || return 74
   live="$(live_envelope_control_target "${phase}.pmset-live")" || return 74
@@ -198,16 +198,84 @@ live_envelope_capture_power() {
     }
     END { if (count != 1 || value == "unknown" || value == "") exit 65; print value }
   ' "$drawing")" || return 74
-  LIVE_SLEEP_DISABLED="$(/usr/bin/awk '
-    $1 == "SleepDisabled" { count += 1; value=$2 }
-    END { if (count != 1 || (value != "0" && value != "1")) exit 65; print value }
+  # A missing row is not silently coerced to a safe value.  Keep it distinct
+  # from malformed/duplicate/noncanonical rows so the only exceptional path
+  # can require the held hosted-runner authority and a complete uninstalled
+  # inventory below.
+  sleep_row="$(/usr/bin/awk '
+    $1 == "SleepDisabled" {
+      count += 1
+      if (NF != 2 || ($2 != "0" && $2 != "1")) invalid = 1
+      value = $2
+    }
+    END {
+      if (count == 0) { print "absent"; exit 0 }
+      if (count != 1 || invalid) exit 65
+      print value
+    }
   ' "$live")" || return 74
+  case "$sleep_row" in
+    0|1)
+      LIVE_SLEEP_DISABLED="$sleep_row"
+      LIVE_SLEEP_PROOF="pmset-live"
+      ;;
+    absent)
+      LIVE_SLEEP_DISABLED="absent"
+      # A hosted runner that omits SleepDisabled must still prove that it has
+      # no system-sleep prevention assertion.  Retain the raw observation in
+      # the execution root so the manager can independently reparse it.
+      assertions="$(live_envelope_control_target "${phase}.pmset-assertions")" || return 74
+      /usr/bin/pmset -g assertions > "$assertions" 2>/dev/null || return 74
+      assertion_result="$(/usr/bin/awk '
+        /^Assertion status system-wide:$/ {
+          if (header++) invalid = 1
+          in_system = 1
+          next
+        }
+        /^Listed by owning process:$/ {
+          if (!in_system || listed++) invalid = 1
+          in_system = 0
+          next
+        }
+        $1 == "PreventSystemSleep" {
+          rows += 1
+          if (!in_system || $0 !~ /^[[:space:]]+PreventSystemSleep[[:space:]]+0$/) invalid = 1
+          else system_rows += 1
+        }
+        END {
+          if (header != 1 || listed != 1 || rows != 1 || system_rows != 1 || invalid) exit 65
+          print "pmset-assertions-system-prevent-system-sleep-0"
+        }
+      ' "$assertions")" || return 74
+      [[ "$assertion_result" == "pmset-assertions-system-prevent-system-sleep-0" ]] || return 74
+      LIVE_SLEEP_PROOF="$assertion_result"
+      ;;
+    *) return 74 ;;
+  esac
   LIVE_AC_SLEEP="$(/usr/bin/awk '
     /^AC Power:/ { ac=1; next }
     /^[^[:space:]]/ && $0 !~ /^AC Power:/ { ac=0 }
     ac && $1 == "sleep" { count += 1; value=$2 }
     END { if (count != 1 || value !~ /^[0-9]+$/) exit 65; print value }
   ' "$custom")" || return 74
+}
+
+live_envelope_hosted_absent_sleep_is_exact_idle_uninstalled() {
+  local real_home="$1" root_struct="$2" applied="$3" terminal="$4" reservations="$5" proof="$6" lock="$7" original_ac="$8" original_battery="$9" history="${10}"
+  [[ "${LIDSWITCH_HELD_ENTRY:-}" == "v1" ]] || return 74
+  [[ "${LIDSWITCH_HELD_FD_MAP:-}" == "30,31,32,33,34,35,36,37,38,39,40,41" ]] || return 74
+  [[ "${LIDSWITCH_HELD_RELEASE_CANDIDATE:-}" == "v1" ]] || return 74
+  [[ "${LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY:-}" == "v1" ]] || return 74
+  [[ "$LIVE_POWER_SOURCE" == "ac" && "$LIVE_AC_SLEEP" == "0" ]] || return 74
+  [[ "$LIVE_SLEEP_PROOF" == "pmset-assertions-system-prevent-system-sleep-0" ]] || return 74
+  [[ "$LIVE_STATUS_PRESENCE" == "absent" ]] || return 74
+  [[ "$LIVE_LAUNCHD_PRESENCE" == "absent" && "$LIVE_LAUNCHD_STATE" == "none" && "$LIVE_LAUNCHD_PID" == "none" && "$LIVE_LAUNCHD_PROGRAM" == "none" ]] || return 74
+  [[ "$LIVE_PLIST_CONTRACT" == "absent" && "$LIVE_PLIST_META" == "absent" && "$LIVE_PLIST_SHA256" == "absent" && "$LIVE_PLIST_QUALIFIED_BUILD" == "absent" ]] || return 74
+  [[ "$LIVE_HELPER_PATH" == "absent" && "$LIVE_HELPER_META" == "absent" && "$LIVE_APP_META" == "absent" ]] || return 74
+  [[ "$root_struct" == "absent" && "$applied" == "absent" && "$terminal" == "absent" && "$reservations" == "absent" && "$proof" == "absent" && "$lock" == "absent" && "$original_ac" == "absent" && "$original_battery" == "absent" ]] || return 74
+  [[ "$history" == "absent" ]] || return 74
+  live_envelope_capture_idle_lease "$real_home" || return 74
+  [[ "$LIVE_LEASE_META" == "absent" && "$LIVE_LEASE_SESSION" == "none" && "$LIVE_LEASE_BOOT" == "none" && "$LIVE_LEASE_EXPIRES" == "none" && "$LIVE_LEASE_ISSUED_MONO" == "none" && "$LIVE_LEASE_EXPIRES_MONO" == "none" && "$LIVE_LEASE_UID" == "none" && "$LIVE_LEASE_BUILD" == "none" && "$LIVE_LEASE_LIFETIME" == "none" ]] || return 74
 }
 
 live_envelope_reason_in_list() {
@@ -649,6 +717,11 @@ live_envelope_capture() {
   epoch="$(/bin/date +%s)" || return 74
   live_envelope_kernel_truth || return 74
 
+  case "$LIVE_SLEEP_DISABLED:$LIVE_SLEEP_PROOF" in
+    0:pmset-live|1:pmset-live|absent:pmset-assertions-system-prevent-system-sleep-0) ;;
+    *) return 74 ;;
+  esac
+
   if [[ "$LIVE_STATUS_BOOT_ID" != "none" ]]; then
     [[ "$LIVE_STATUS_BOOT_ID" == "$LIVE_KERNEL_BOOT" ]] || return 74
     /usr/bin/awk -v status="$LIVE_STATUS_MONOTONIC" -v current="$LIVE_KERNEL_MONOTONIC" \
@@ -712,6 +785,14 @@ live_envelope_capture() {
       live_envelope_capture_idle_lease "$real_home" || return 74
     fi
     LIVE_AUTHORITY_KIND="none"
+  elif [[ "$LIVE_SLEEP_DISABLED" == "absent" ]]; then
+    # Official hosted macOS runners can omit the SleepDisabled row.  This is
+    # accepted only under an explicit held authority, and only after proving
+    # that this is a genuinely idle, wholly uninstalled host with no retained
+    # LidSwitch authority or public/runtime evidence.
+    live_envelope_hosted_absent_sleep_is_exact_idle_uninstalled "$real_home" "$root_struct" "$applied" "$terminal" "$reservations" "$proof" "$lock" "$original_ac" "$original_battery" "$history" || return 74
+    LIVE_AUTHORITY_KIND="none"
+    host_class="idle-uninstalled"
   else
     return 74
   fi
@@ -721,7 +802,7 @@ live_envelope_capture() {
   {
     printf 'schema=1\nnonce=%s\nphase=%s\ncaptured_epoch=%s\n' "$nonce" "$phase" "$epoch"
     printf 'kernel_boot=%s\nkernel_build=%s\nkernel_monotonic=%s\n' "$LIVE_KERNEL_BOOT" "$LIVE_KERNEL_BUILD" "$LIVE_KERNEL_MONOTONIC"
-    printf 'host_class=%s\npower_source=%s\nsleep_disabled=%s\nac_sleep_minutes=%s\n' "$host_class" "$LIVE_POWER_SOURCE" "$LIVE_SLEEP_DISABLED" "$LIVE_AC_SLEEP"
+    printf 'host_class=%s\npower_source=%s\nsleep_disabled=%s\nsleep_proof=%s\nac_sleep_minutes=%s\n' "$host_class" "$LIVE_POWER_SOURCE" "$LIVE_SLEEP_DISABLED" "$LIVE_SLEEP_PROOF" "$LIVE_AC_SLEEP"
     printf 'status_presence=%s\nstatus_state=%s\nstatus_reason=%s\nstatus_reason_class=%s\n' "$LIVE_STATUS_PRESENCE" "$LIVE_STATUS_STATE" "$LIVE_STATUS_REASON" "$LIVE_STATUS_REASON_CLASS"
     printf 'status_session=%s\nstatus_updated=%s\nstatus_monotonic=%s\nstatus_boot_id=%s\nstatus_schema=%s\nstatus_evidence=%s\nstatus_meta=%s\n' "$LIVE_STATUS_SESSION" "$LIVE_STATUS_UPDATED" "$LIVE_STATUS_MONOTONIC" "$LIVE_STATUS_BOOT_ID" "$LIVE_STATUS_SCHEMA" "$LIVE_STATUS_EVIDENCE_SIGNATURE" "$LIVE_STATUS_META"
     printf 'launchd_presence=%s\nlaunchd_state=%s\nlaunchd_pid=%s\nlaunchd_program=%s\n' "$LIVE_LAUNCHD_PRESENCE" "$LIVE_LAUNCHD_STATE" "$LIVE_LAUNCHD_PID" "$LIVE_LAUNCHD_PROGRAM"
@@ -744,7 +825,7 @@ live_envelope_numeric_strictly_increased() {
 
 live_envelope_compare() {
   local before="$1" after="$2" key left right host_class before_epoch after_epoch before_mono after_mono strict=false
-  for key in schema nonce host_class kernel_boot kernel_build power_source sleep_disabled ac_sleep_minutes launchd_presence launchd_state launchd_pid launchd_program plist_contract plist_qualified_build plist_meta plist_sha256 helper_path helper_meta app_meta root_support_structure private_terminal_meta private_reservations_meta private_proof_meta private_lock_meta original_ac_meta original_battery_meta; do
+  for key in schema nonce host_class kernel_boot kernel_build power_source sleep_disabled sleep_proof ac_sleep_minutes launchd_presence launchd_state launchd_pid launchd_program plist_contract plist_qualified_build plist_meta plist_sha256 helper_path helper_meta app_meta root_support_structure private_terminal_meta private_reservations_meta private_proof_meta private_lock_meta original_ac_meta original_battery_meta user_history_diagnostic_meta; do
     left="$(live_envelope_kv_get "$key" "$before")" || return 74
     right="$(live_envelope_kv_get "$key" "$after")" || return 74
     [[ "$left" == "$right" ]] || return 74

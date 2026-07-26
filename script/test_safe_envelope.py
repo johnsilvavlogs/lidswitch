@@ -24,6 +24,7 @@ import plistlib
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import types
 import unittest
@@ -81,13 +82,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("b7f0e2c5f18bf50182d18cb3c6cad00655aa858114a1e6822fd932d5fedbfa70", 59707),
+    "script/live_state_envelope.sh": ("37391ffdc823473c65a6b7a717c336a842018aae7e5b6e5e2a8f45170981a58b", 64298),
     "script/swift_sandbox_common.sh": ("30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985", 68188),
     "script/swift_test_sandbox.sb.in": ("851794f1b655898dd2618ee880c8f9e393687b5362a3a9e81f79ef99f69e23c7", 10822),
     "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("fae6f7abdd354b97fd7886f2d506d293433e904040db61e14b255b731fc1cbfb", 3578),
+    "script/source_snapshot_manifest.jsonl": ("f58d58c106a42eb4ae90374b4ca19fd7f21608c9403603742ac02f4becc5d5df", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1377,7 +1378,7 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertRegex(expected_self_digest, r"^[0-9a-f]{64}$")
         self.assertIn(f"script/test_safe_envelope.py {expected_self_digest}", validation)
         self.assertIn("Property-to-proof coverage", validation)
-        self.assertIn("An authentic gate run prints each of those 16 test names", validation)
+        self.assertIn("An authentic gate run prints each of those 17 test names", validation)
         for method in EXPECTED_TEST_METHODS:
             self.assertIn(method, validation)
         self.assertIn("does **not** dynamically prove Swift, real Darwin process", validation)
@@ -1700,12 +1701,162 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertIn("not offline-verifiable", normalized_validation)
         self.assertIn("root-owned collector or externally anchored verifier key", normalized_validation)
 
+    def test_hosted_absent_sleepdisabled_is_limited_to_exact_idle_uninstalled_proof(self):
+        envelope = verified_static_text("script/live_state_envelope.sh")
+        start = envelope.index('sleep_row="$(/usr/bin/awk \'')
+        end = envelope.index("  ' \"$live\")\" || return 74", start)
+        sleep_parser = envelope[start:end].split("\n", 1)[1]
+
+        def parse_sleep_disabled(payload: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["/usr/bin/awk", sleep_parser],
+                input=payload,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        # The host runner's genuinely omitted row remains distinguishable from
+        # a present row, while every lexical row must be a unique canonical 0/1.
+        self.assertEqual(parse_sleep_disabled("PowerNap 1\n").returncode, 0)
+        self.assertEqual(parse_sleep_disabled("PowerNap 1\n").stdout, "absent\n")
+        self.assertEqual(parse_sleep_disabled("SleepDisabled 0\n").stdout, "0\n")
+        self.assertEqual(parse_sleep_disabled("SleepDisabled 1\n").stdout, "1\n")
+        for malformed in (
+            "SleepDisabled\n",
+            "SleepDisabled 2\n",
+            "SleepDisabled 0 extra\n",
+            "SleepDisabled 0\nSleepDisabled 0\n",
+            "SleepDisabled 0\nSleepDisabled 1\n",
+        ):
+            self.assertNotEqual(parse_sleep_disabled(malformed).returncode, 0)
+
+        assertion_start = envelope.index('assertion_result="$(/usr/bin/awk \'')
+        assertion_end = envelope.index("      ' \"$assertions\")\" || return 74", assertion_start)
+        assertion_parser = envelope[assertion_start:assertion_end].split("\n", 1)[1]
+
+        def parse_assertions(payload: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["/usr/bin/awk", assertion_parser],
+                input=payload,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        valid_assertions = (
+            "Assertion status system-wide:\n"
+            "   PreventSystemSleep             0\n"
+            "Listed by owning process:\n"
+        )
+        self.assertEqual(parse_assertions(valid_assertions).returncode, 0)
+        self.assertEqual(
+            parse_assertions(valid_assertions).stdout,
+            "pmset-assertions-system-prevent-system-sleep-0\n",
+        )
+        for malformed_assertions in (
+            "Assertion status system-wide:\nListed by owning process:\n",
+            "Assertion status system-wide:\n PreventSystemSleep 1\nListed by owning process:\n",
+            "Assertion status system-wide:\n PreventSystemSleep 0 extra\nListed by owning process:\n",
+            "Assertion status system-wide:\n PreventSystemSleep 0\n PreventSystemSleep 0\nListed by owning process:\n",
+            "Assertion status system-wide:\n PreventSystemSleep 0\n",
+            "PreventSystemSleep 0\nAssertion status system-wide:\n PreventSystemSleep 0\nListed by owning process:\n",
+        ):
+            self.assertNotEqual(parse_assertions(malformed_assertions).returncode, 0)
+
+        def hosted_idle_predicate(overrides: dict[str, str] | None = None, *, history: str = "absent") -> subprocess.CompletedProcess[str]:
+            # Source through the exact envelope FD and stub only the lease
+            # reader: this exercises the real predicate without reading or
+            # mutating live LidSwitch/root state.
+            command = r'''
+exec 32<"$1" || exit 74
+source /dev/fd/32 || exit $?
+live_envelope_capture_idle_lease() {
+  LIVE_LEASE_SESSION=none; LIVE_LEASE_BOOT=none; LIVE_LEASE_EXPIRES=none
+  LIVE_LEASE_ISSUED_MONO=none; LIVE_LEASE_EXPIRES_MONO=none; LIVE_LEASE_UID=none
+  LIVE_LEASE_BUILD=none; LIVE_LEASE_META=absent; LIVE_LEASE_LIFETIME=none
+}
+LIVE_POWER_SOURCE=ac; LIVE_AC_SLEEP=0
+LIVE_SLEEP_PROOF=pmset-assertions-system-prevent-system-sleep-0
+LIVE_STATUS_PRESENCE=absent
+LIVE_LAUNCHD_PRESENCE=absent; LIVE_LAUNCHD_STATE=none; LIVE_LAUNCHD_PID=none; LIVE_LAUNCHD_PROGRAM=none
+LIVE_PLIST_CONTRACT=absent; LIVE_PLIST_META=absent; LIVE_PLIST_SHA256=absent; LIVE_PLIST_QUALIFIED_BUILD=absent
+LIVE_HELPER_PATH=absent; LIVE_HELPER_META=absent; LIVE_APP_META=absent
+live_envelope_hosted_absent_sleep_is_exact_idle_uninstalled /nonexistent absent absent absent absent absent absent absent absent "$2"
+'''
+            environment = dict(os.environ)
+            environment.update({
+                "LIDSWITCH_HELD_ENTRY": "v1",
+                "LIDSWITCH_HELD_COMMON_LOADED": "1",
+                "LIDSWITCH_HELD_FD_MAP": "30,31,32,33,34,35,36,37,38,39,40,41",
+                "LIDSWITCH_HELD_RELEASE_CANDIDATE": "v1",
+                "LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY": "v1",
+            })
+            environment.update(overrides or {})
+            return subprocess.run(
+                ["/bin/bash", "-p", "-c", command, "bash", str(ROOT / "live_state_envelope.sh"), history],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=environment,
+            )
+
+        self.assertEqual(hosted_idle_predicate().returncode, 0)
+        self.assertEqual(hosted_idle_predicate(history="present").returncode, 74)
+        for missing_gate in (
+            "LIDSWITCH_HELD_ENTRY",
+            "LIDSWITCH_HELD_FD_MAP",
+            "LIDSWITCH_HELD_RELEASE_CANDIDATE",
+            "LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY",
+        ):
+            self.assertNotEqual(hosted_idle_predicate({missing_gate: ""}).returncode, 0)
+
+        proof = envelope[
+            envelope.index("live_envelope_hosted_absent_sleep_is_exact_idle_uninstalled()") :
+            envelope.index("live_envelope_capture()")
+        ]
+        self.assertIn('[[ "${LIDSWITCH_HELD_ENTRY:-}" == "v1" ]] || return 74', proof)
+        self.assertIn('[[ "${LIDSWITCH_HELD_FD_MAP:-}" == "30,31,32,33,34,35,36,37,38,39,40,41" ]] || return 74', proof)
+        self.assertIn('[[ "${LIDSWITCH_HELD_RELEASE_CANDIDATE:-}" == "v1" ]] || return 74', proof)
+        self.assertIn('[[ "${LIDSWITCH_HELD_HOSTED_RUNNER_AUTHORITY:-}" == "v1" ]] || return 74', proof)
+        self.assertIn('[[ "$LIVE_POWER_SOURCE" == "ac" && "$LIVE_AC_SLEEP" == "0" ]] || return 74', proof)
+        self.assertIn('[[ "$LIVE_STATUS_PRESENCE" == "absent" ]] || return 74', proof)
+        self.assertIn('[[ "$LIVE_LAUNCHD_PRESENCE" == "absent" && "$LIVE_LAUNCHD_STATE" == "none" && "$LIVE_LAUNCHD_PID" == "none" && "$LIVE_LAUNCHD_PROGRAM" == "none" ]] || return 74', proof)
+        self.assertIn('[[ "$LIVE_PLIST_CONTRACT" == "absent" && "$LIVE_PLIST_META" == "absent" && "$LIVE_PLIST_SHA256" == "absent" && "$LIVE_PLIST_QUALIFIED_BUILD" == "absent" ]] || return 74', proof)
+        self.assertIn('[[ "$LIVE_HELPER_PATH" == "absent" && "$LIVE_HELPER_META" == "absent" && "$LIVE_APP_META" == "absent" ]] || return 74', proof)
+        self.assertIn('"$root_struct" == "absent" && "$applied" == "absent" && "$terminal" == "absent" && "$reservations" == "absent" && "$proof" == "absent" && "$lock" == "absent" && "$original_ac" == "absent" && "$original_battery" == "absent"', proof)
+        self.assertIn('[[ "$history" == "absent" ]] || return 74', proof)
+        self.assertIn('live_envelope_capture_idle_lease "$real_home" || return 74', proof)
+        self.assertIn('[[ "$LIVE_SLEEP_PROOF" == "pmset-assertions-system-prevent-system-sleep-0" ]] || return 74', proof)
+        self.assertIn('"${phase}.pmset-assertions"', envelope)
+        self.assertIn('/usr/bin/pmset -g assertions > "$assertions" 2>/dev/null || return 74', envelope)
+        self.assertIn('LIVE_SLEEP_PROOF="$assertion_result"', envelope)
+        pairing_start = envelope.index('case "$LIVE_SLEEP_DISABLED:$LIVE_SLEEP_PROOF" in')
+        pairing = envelope[pairing_start : envelope.index('if [[ "$LIVE_STATUS_BOOT_ID" != "none" ]]', pairing_start)]
+        self.assertIn('0:pmset-live|1:pmset-live|absent:pmset-assertions-system-prevent-system-sleep-0)', pairing)
+
+        active = envelope[envelope.index('if [[ "$LIVE_STATUS_PRESENCE" == "present" && "$LIVE_STATUS_STATE" == "active" ]]') : envelope.index('elif [[ "$LIVE_SLEEP_DISABLED" == "0" ]]')]
+        self.assertIn('"$LIVE_SLEEP_DISABLED" == "1"', active)
+        idle_installed = envelope[envelope.index('elif [[ "$LIVE_SLEEP_DISABLED" == "0" ]]') : envelope.index('elif [[ "$LIVE_SLEEP_DISABLED" == "absent" ]]')]
+        self.assertIn('host_class="idle-installed"', idle_installed)
+        absent = envelope[envelope.index('elif [[ "$LIVE_SLEEP_DISABLED" == "absent" ]]') : envelope.index('  else\n    return 74\n  fi', envelope.index('elif [[ "$LIVE_SLEEP_DISABLED" == "absent" ]]'))]
+        self.assertIn('live_envelope_hosted_absent_sleep_is_exact_idle_uninstalled', absent)
+        self.assertIn('host_class="idle-uninstalled"', absent)
+        self.assertIn('sleep_proof=%s', envelope)
+        compare = envelope[envelope.index("live_envelope_compare()") : envelope.index("live_envelope_write_receipt()")]
+        self.assertIn('sleep_disabled sleep_proof ac_sleep_minutes', compare)
+        self.assertIn('original_battery_meta user_history_diagnostic_meta', compare)
+
 
 EXPECTED_TEST_METHODS = (
     "test_benchmark_app_intake_uses_the_production_private_tmp_capability",
     "test_benchmark_private_tmp_name_boundaries_and_public_intake_are_exact",
     "test_bootstrap_early_eof_and_interruption_regressions",
     "test_explicit_runner_rejects_private_namespace_zero_discovery_and_result_classes",
+    "test_hosted_absent_sleepdisabled_is_limited_to_exact_idle_uninstalled_proof",
     "test_production_artifact_capabilities_reject_tree_swaps_and_false_rows",
     "test_production_capture_verifier_round_trip_and_adversarial_mutations",
     "test_production_cleanup_fd_plan_executes_verified_bytes_after_path_swap",
