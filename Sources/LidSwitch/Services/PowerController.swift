@@ -907,12 +907,29 @@ final class PowerController: ObservableObject {
     var isCancelRestoring: Bool { operationPhase == .cancelRestoring }
     var isEndingRestoring: Bool { operationPhase == .endingRestoring }
 
+    /// A detached cleanup owner is never an idle/ready state. Keep the visible
+    /// status and action safe even if a recovery completion forgets to publish
+    /// `.recoveryRequired` after retaining that owner.
+    private var effectiveOperationPhase: PowerControllerOperationPhase {
+        if operationPhase == .idle,
+           activeSessionID == nil,
+           cleanupOwnership?.requiresSafetyResolution == true
+        {
+            return .recoveryRequired
+        }
+        return operationPhase
+    }
+
     var displayedStatus: PowerControllerDisplayContract {
-        .make(snapshot: snapshot, operationPhase: operationPhase, isChecking: isChecking)
+        .make(
+            snapshot: snapshot,
+            operationPhase: effectiveOperationPhase,
+            isChecking: isChecking
+        )
     }
 
     var primaryAction: PowerControllerPrimaryAction {
-        .resolve(snapshot: snapshot, operationPhase: operationPhase)
+        .resolve(snapshot: snapshot, operationPhase: effectiveOperationPhase)
     }
 
     nonisolated private static let refreshInterval: TimeInterval = 30
@@ -1627,7 +1644,7 @@ final class PowerController: ObservableObject {
                     self.alert = .rollbackVerificationFailure(reason: "pending-start-cancelled")
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
                 }
-                self.operationPhase = .idle
+                self.operationPhase = restored ? .idle : .recoveryRequired
                 self.isBusy = false
                 self.resolveTerminationReply(restored, expectedID: terminationReplyID)
                 if terminationReplyID == nil, next.installationInventoryPending {
@@ -1699,7 +1716,7 @@ final class PowerController: ObservableObject {
                     self.alert = .operationFailure(message: "LidSwitch could not verify that the macOS sleep override is off. \(detail) Keep LidSwitch open and try Restore Sleep again.")
                     self.announce(self.errorMessage ?? "System sleep restoration could not be verified.")
                 }
-                self.operationPhase = .idle
+                self.operationPhase = restored ? .idle : .recoveryRequired
                 self.isBusy = false
                 self.resolveTerminationReply(restored, expectedID: terminationReplyID)
                 if terminationReplyID == nil { self.refresh(forceFresh: true) }
@@ -1943,7 +1960,7 @@ final class PowerController: ObservableObject {
                     self.announce(self.errorMessage ?? "Restore required before quitting.")
                     if terminationReplyID == nil { self.refresh(forceFresh: true) }
                 }
-                self.operationPhase = .idle
+                self.operationPhase = restored ? .idle : .recoveryRequired
                 self.isBusy = false
                 self.resolveTerminationReply(restored, expectedID: terminationReplyID)
             }
@@ -2307,7 +2324,9 @@ final class PowerController: ObservableObject {
         if Self.isVerifiedSafeIdle(next) {
             releaseCleanupOwnership(cleanupOwnership, afterSafeSnapshot: next)
         }
-        operationPhase = .idle
+        operationPhase = cleanupOwnership?.requiresSafetyResolution == true
+            ? .recoveryRequired
+            : .idle
         isBusy = false
         if next.installationInventoryPending { refresh(forceFresh: true) }
     }
