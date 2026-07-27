@@ -1306,6 +1306,53 @@ final class NativeUXStateFixtureTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedExplicitRestoreCannotPublishReadyWhileCleanupOwnerBlocksStart() async throws {
+        let events = UXLockedBox([String]())
+        let genericSafeIdle = makeSnapshot()
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in genericSafeIdle },
+            sideEffects: .lifecycleFixture(
+                { event in events.mutate { $0.append(event) } },
+                issueLease: { _ in .authorityMayRemain("fixture-indeterminate-begin") },
+                terminateLease: { _, intent in
+                    events.mutate {
+                        $0.append(intent == .end ? "remote-end" : "remote-restore")
+                    }
+                },
+                makeHeartbeat: { _, _, _, _ in nil }
+            ),
+            safeRollbackWaiter: { genericSafeIdle },
+            restoreVerificationWaiter: { genericSafeIdle },
+            announcementHandler: { _ in }
+        )
+
+        controller.startSession()
+        await assertEventually {
+            !controller.isBusy && controller.operationPhase == .recoveryRequired
+        }
+        let retainedSessionID = try XCTUnwrap(controller.cleanupOwnerSessionIDForTesting)
+
+        controller.restoreNow()
+        await assertEventually {
+            !controller.isBusy
+                && events.read { $0.contains("restore-sleep") }
+        }
+
+        XCTAssertEqual(controller.cleanupOwnerSessionIDForTesting, retainedSessionID)
+        XCTAssertEqual(controller.operationPhase, .recoveryRequired)
+        XCTAssertEqual(controller.displayedStatus.title, "Recovery required")
+        XCTAssertEqual(controller.primaryAction, .restoreSleep)
+        XCTAssertTrue(controller.requiresTerminationCleanup)
+        XCTAssertTrue(controller.errorMessage?.contains("try Restore Sleep again") == true)
+
+        controller.startSession()
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(events.read { $0.filter { $0 == "lease-issue" }.count }, 1)
+        XCTAssertEqual(controller.cleanupOwnerSessionIDForTesting, retainedSessionID)
+    }
+
+    @MainActor
     func testAuthenticatedTerminalBeginResolutionClearsOnlyNoAuthorityOwnerWithoutPowerClaim() async {
         let waiterCalls = UXLockedBox(0)
         let events = UXLockedBox([String]())
