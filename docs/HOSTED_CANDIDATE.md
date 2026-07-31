@@ -55,7 +55,7 @@ install, mount, launch, or execute candidate bytes:
 ```bash
 run_id=REVIEWED_RUN_ID
 out="$(/usr/bin/mktemp -d /private/tmp/lidswitch-hosted-evidence.XXXXXX)"
-gh run download "$run_id" --name "lidswitch-v0.2.13-build8-hosted-candidate-${run_id}-1" --dir "$out"
+gh run download "$run_id" --name "lidswitch-v0.2.14-build9-hosted-candidate-${run_id}-1" --dir "$out"
 /usr/bin/python3 -I -S -B orchestration/verify_hosted_candidate_evidence.py --evidence "$out"
 ```
 

@@ -348,6 +348,18 @@ final class RecoveryAuthorityStore {
         "Previous",
     ]
 
+    private static let publicationTemporaryMaximumBytes: [String: Int] = [
+        appliedBasename: 4_096,
+        terminalBasename: TerminalGenerationLedger.maximumBytes,
+        reservationBasename: TerminalGenerationLedger.maximumBytes,
+        proofBasename: 512,
+        containmentReceiptBasename: 4_096,
+        statusProjectionBasename: StatusProjectionTask.maximumBytes,
+        statusProjectionGenerationBasename: 32,
+        recoveryBudgetBasename: RecoveryBudgetState.maximumBytes,
+        journalBasename: LegacyRecoveryJournal.maximumBytes,
+    ]
+
     private let directory: VerifiedRootStateDirectory
     private let expectedOwnerUID: uid_t
     private let expectedGroupID: gid_t
@@ -427,6 +439,9 @@ final class RecoveryAuthorityStore {
         _ transaction: VerifiedRootStateDirectory.Transaction,
         allowRecoveryRequiredLegacyRetry: Bool = false
     ) -> RecoveryProvisionOutcome {
+        guard reconcileAbandonedPublicationTemporaries(transaction) else {
+            return .recoveryRequired("unsafe-authority-root-inventory")
+        }
         guard let inventory = classifiedDirectoryInventory() else {
             // Unknown, unsafe, over-bounded, or concurrently changing leaves
             // are evidence. Preserve the directory byte-for-byte and perform
@@ -1110,7 +1125,76 @@ final class RecoveryAuthorityStore {
 
     private enum DirectoryInventory: Equatable { case fresh, recognizedHistory }
 
-    private func classifiedDirectoryInventory() -> DirectoryInventory? {
+    private enum PublicationTemporaryClassification {
+        case unrelated
+        case canonical(basename: String, maximumBytes: Int)
+        case malformed
+    }
+
+    private func publicationTemporaryClassification(_ name: String) -> PublicationTemporaryClassification {
+        for (basename, maximumBytes) in Self.publicationTemporaryMaximumBytes.sorted(by: { $0.key < $1.key }) {
+            let prefix = ".\(basename).new."
+            guard name.hasPrefix(prefix) else { continue }
+            let raw = String(name.dropFirst(prefix.count))
+            guard let identifier = UUID(uuidString: raw),
+                  identifier.uuidString.lowercased() == raw,
+                  name == prefix + raw
+            else { return .malformed }
+            return .canonical(basename: basename, maximumBytes: maximumBytes)
+        }
+        return .unrelated
+    }
+
+    /// A hard process death can bypass `publishLocked`'s defer after its
+    /// exclusive temp is created. Reconcile only exact known-authority temps,
+    /// only under the fixed root lock, and only after proving the rest of the
+    /// root is independently classifiable. Unknown evidence remains immutable.
+    private func reconcileAbandonedPublicationTemporaries(
+        _ transaction: VerifiedRootStateDirectory.Transaction
+    ) -> Bool {
+        guard let names = directory.boundedEntryNames() else { return false }
+        var candidates: [(name: String, basename: String, maximumBytes: Int)] = []
+        for name in names {
+            switch publicationTemporaryClassification(name) {
+            case .unrelated:
+                continue
+            case .malformed:
+                return false
+            case let .canonical(basename, maximumBytes):
+                candidates.append((name, basename, maximumBytes))
+            }
+        }
+        guard !candidates.isEmpty else { return true }
+        let ignored = Set(candidates.map(\.name))
+        guard classifiedDirectoryInventory(ignoringAbandonedPublicationTemporaries: ignored) != nil else {
+            return false
+        }
+        guard candidates.allSatisfy({ candidate in
+            transaction.abandonedPublicationTemporaryIsSafe(
+                candidate.name,
+                for: candidate.basename,
+                maximumBytes: candidate.maximumBytes
+            )
+        }) else { return false }
+        for candidate in candidates {
+            switch transaction.removeAbandonedPublicationTemporary(
+                candidate.name,
+                for: candidate.basename,
+                maximumBytes: candidate.maximumBytes
+            ) {
+            case .removed, .alreadyAbsent:
+                continue
+            case .removalUnverified, .unsafeEntry, .recoveryRequired,
+                 .transactionInactive, .reentrant:
+                return false
+            }
+        }
+        return true
+    }
+
+    private func classifiedDirectoryInventory(
+        ignoringAbandonedPublicationTemporaries ignored: Set<String> = []
+    ) -> DirectoryInventory? {
         guard let names = directory.boundedEntryNames() else { return nil }
         let authorityNames: Set<String> = [
             RootStateLock.authorizationBasename,
@@ -1131,6 +1215,10 @@ final class RecoveryAuthorityStore {
         ]
         var recognizedHistory = false
         for name in names {
+            if ignored.contains(name) {
+                guard case .canonical = publicationTemporaryClassification(name) else { return nil }
+                continue
+            }
             if authorityNames.contains(name) {
                 // The public projection capability has exactly two durable
                 // transaction artifacts.  They are not a broad prefix: each
