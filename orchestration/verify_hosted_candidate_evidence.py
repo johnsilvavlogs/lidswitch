@@ -13,11 +13,11 @@ from pathlib import Path
 
 SCHEMA = "lidswitch-hosted-evidence-v2"
 # This is the immutable_candidate_core.py blob in the independently pinned
-# source commit cc63481.  Do not execute an evidence supplied Python program
+# source commit 809312b.  Do not execute an evidence supplied Python program
 # unless it is this exact reviewed byte sequence.
 AUTHORITATIVE_CORE_SHA256 = "045c46f5fe7ab917d4e700fb4fbc10dbc125247b9eb14e8f8e6500037de14f32"
-SOURCE_COMMIT = "cc63481b6823e864fbe217a6182972474a6a8c8d"
-SOURCE_TREE = "b31374650c7cd789c91ea53567a0e47112badb06"
+SOURCE_COMMIT = "809312b2d6278901a7355311fc2707e5d7f5bd25"
+SOURCE_TREE = "dfec55e29d24074b354b257743fbe7635c0d75d7"
 REVIEWED_IMAGES = ["20260715.0248.1", "20260720.0258.1"]
 PACKAGING_ROLES = {
     "capture_package": "capture_immutable_build_envelope.py",
