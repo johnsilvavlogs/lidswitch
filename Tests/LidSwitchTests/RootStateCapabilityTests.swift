@@ -251,6 +251,60 @@ final class RootStateCapabilityTests: XCTestCase {
         XCTAssertEqual(transact(lockedDirectory(fixture)) { $0.publish(payload, to: "parser", parser: { _ in false }) }, .publishedButUnverified(.parser))
     }
 
+    func testAbandonedPublicationTemporaryRequiresCanonicalNameAndStablePrivateIdentity() throws {
+        let fixture = try stateFixture(label: "abandoned-publication")
+        let directory = lockedDirectory(fixture)
+        let identifier = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let canonical = ".state.new.\(identifier)"
+        let malformed = ".state.new.\(identifier.uppercased())"
+        try createPrivateFile(in: directory, name: canonical, bytes: Data("partial".utf8))
+
+        XCTAssertEqual(
+            transact(directory) {
+                $0.removeAbandonedPublicationTemporary(canonical, for: "state", maximumBytes: 64)
+            },
+            .removed
+        )
+        XCTAssertEqual(directory.entryState(canonical), .absent)
+        try createPrivateFile(in: directory, name: malformed, bytes: Data())
+        XCTAssertEqual(
+            transact(directory) {
+                $0.removeAbandonedPublicationTemporary(malformed, for: "state", maximumBytes: 64)
+            },
+            .unsafeEntry
+        )
+        XCTAssertEqual(directory.entryState(malformed), .present)
+    }
+
+    func testAbandonedPublicationTemporaryPreservesReplacementAtDestructiveBoundary() throws {
+        let fixture = try stateFixture(label: "abandoned-publication-race")
+        let name = ".state.new.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let initial = lockedDirectory(fixture)
+        try createPrivateFile(in: initial, name: name, bytes: Data("partial".utf8))
+        let racing = lockedDirectory(fixture, operations: .init(
+            fileBarrier: { _ in true }, directoryEntryBarrier: { _ in true },
+            rename: { oldFD, oldName, newFD, newName in Darwin.renameat(oldFD, oldName, newFD, newName) },
+            unlink: { fd, leaf in Darwin.unlinkat(fd, leaf, 0) },
+            beforeQuarantineUnlink: { fd, leaf in
+                _ = Darwin.renameat(fd, leaf, fd, "prior-publication-temp")
+                let replacement = openat(fd, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                guard replacement >= 0 else { return }
+                let bytes = Array("replacement".utf8)
+                _ = bytes.withUnsafeBytes { Darwin.write(replacement, $0.baseAddress, bytes.count) }
+                _ = Darwin.fchmod(replacement, 0o600)
+                Darwin.close(replacement)
+            }
+        ))
+
+        XCTAssertEqual(
+            transact(racing) {
+                $0.removeAbandonedPublicationTemporary(name, for: "state", maximumBytes: 64)
+            },
+            .removalUnverified
+        )
+        XCTAssertEqual(try String(contentsOf: fixture.appendingPathComponent(name)), "replacement")
+    }
+
     func testRemovalProvesAbsenceAndPreservesUncertainty() throws {
         let fixture = try stateFixture(label: "remove")
         let durable = lockedDirectory(fixture)

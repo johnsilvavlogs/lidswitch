@@ -2,12 +2,12 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.13` build `8` repairs the indeterminate-BEGIN recovery edge: after one fresh authenticated RECONNECT proves the exact requested generation remained idle, the app spends exactly one new BEGIN instead of surfacing a false start failure. Active, foreign, recovery-required, malformed, terminal, or still-indeterminate evidence remains fail-closed, and helper peer authentication is unchanged. Power source and policy truth still come from IOKit and macOS's native power-preference domain; explicit END/RESTORE remains one authenticated atomic helper operation, and the serial heartbeat remains the sole authority for an owned active generation.
+Version `0.2.14` build `9` recovers only exact, metadata-bound publication temporaries left by a hard helper interruption. Recovery runs under the fixed root-state lock, validates the complete candidate set before removing any member, and preserves malformed, oversized, replaced, or otherwise ambiguous evidence fail-closed. Power source and policy truth still come from IOKit and macOS's native power-preference domain; explicit END/RESTORE remains one authenticated atomic helper operation, and the serial heartbeat remains the sole authority for an owned active generation.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `8` into the root-owned `Current` release directory and removes old startup artifacts. It does not enable a session.
+- **Prepare Safe Helper** installs helper version `9` into the root-owned `Current` release directory and removes old startup artifacts. It does not enable a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app begins one authenticated process-bound raw-XPC session. The helper chooses its same-boot monotonic deadline, capped at 30 seconds, and the app renews every 8 seconds.
 - The compiled helper validates the enrolled caller identity, exact live process tuple, session UUID, private recovery authority, power source, build, and native power-preference state.

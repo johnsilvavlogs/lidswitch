@@ -279,6 +279,47 @@ final class LegacyMigrationFixtureTests: XCTestCase {
         XCTAssertEqual(receiptOnly.power.setCalls, [])
     }
 
+    func testExactAbandonedPublicationTemporaryIsRecoveredButAmbiguousRootRemainsImmutable() throws {
+        let identifier = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        let temporary = ".\(RecoveryAuthorityStore.containmentReceiptBasename).new.\(identifier)"
+
+        let recoverable = try LegacyFixture(disabled: false, ac: 1, battery: 1)
+        defer { recoverable.dispose() }
+        try recoverable.installRegular(name: temporary, bytes: "", mode: 0o600)
+        XCTAssertEqual(recoverable.store.provisionLock(), .ready)
+        XCTAssertEqual(recoverable.store.prepareAuthorityAfterWriterQuiescence(), .ready)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoverable.path(temporary)))
+        XCTAssertEqual(recoverable.store.proof()?.kind, .pristine)
+        XCTAssertEqual(recoverable.power.setCalls, [])
+
+        let ambiguous = try LegacyFixture(disabled: false, ac: 1, battery: 1)
+        defer { ambiguous.dispose() }
+        try ambiguous.installRegular(name: temporary, bytes: "", mode: 0o600)
+        try ambiguous.installRegular(name: "surprise", bytes: "x", mode: 0o600)
+        XCTAssertTrue(ambiguous.prepareMustFailWithoutSetter())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ambiguous.path(temporary)))
+        XCTAssertEqual(try ambiguous.read("surprise"), "x")
+        XCTAssertNil(ambiguous.store.proof())
+
+        let invalidCandidateSet = try LegacyFixture(disabled: false, ac: 1, battery: 1)
+        defer { invalidCandidateSet.dispose() }
+        let oversized = ".\(RecoveryAuthorityStore.proofBasename).new.bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        try invalidCandidateSet.installRegular(name: temporary, bytes: "", mode: 0o600)
+        try invalidCandidateSet.installRegular(name: oversized, bytes: String(repeating: "x", count: 513), mode: 0o600)
+        XCTAssertTrue(invalidCandidateSet.prepareMustFailWithoutSetter())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: invalidCandidateSet.path(temporary)))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: invalidCandidateSet.path(oversized)))
+        XCTAssertNil(invalidCandidateSet.store.proof())
+
+        let malformed = try LegacyFixture(disabled: false, ac: 1, battery: 1)
+        defer { malformed.dispose() }
+        let malformedName = ".\(RecoveryAuthorityStore.containmentReceiptBasename).new.\(identifier.uppercased())"
+        try malformed.installRegular(name: malformedName, bytes: "", mode: 0o600)
+        XCTAssertTrue(malformed.prepareMustFailWithoutSetter())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: malformed.path(malformedName)))
+        XCTAssertNil(malformed.store.proof())
+    }
+
     func testHistoricalGroupContractAcceptsWheelAndAdminOnlyForRoot() {
         XCTAssertTrue(RecoveryAuthorityStore.historicalGroupIsAccepted(
             ownerUID: 0, expectedGroupID: 0, actualGroupID: 0
@@ -1256,6 +1297,10 @@ private final class LegacyFixture {
 
     func read(_ name: String) throws -> String {
         try String(contentsOf: sandbox.url.appendingPathComponent(name), encoding: .utf8)
+    }
+
+    func path(_ name: String) -> String {
+        sandbox.url.appendingPathComponent(name).path
     }
 
     private static func directory(

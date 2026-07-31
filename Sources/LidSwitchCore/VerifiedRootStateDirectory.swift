@@ -303,6 +303,99 @@ public final class VerifiedRootStateDirectory {
             ) { removeLocked(basename, expected: (maximumBytes, parser)) }
         }
 
+        /// Validates one exact crash-abandoned publication temporary while the
+        /// fixed root-state lock is held. Callers use this non-mutating pass to
+        /// prove an entire recovery set before removing any member.
+        public func abandonedPublicationTemporaryIsSafe(
+            _ temporary: String,
+            for basename: String,
+            maximumBytes: Int
+        ) -> Bool {
+            guard maximumBytes >= 0, maximumBytes <= 64 * 1_024 else { return false }
+            return withOperation(inactive: false, reentrant: false) {
+                guard lockDescriptor >= 0,
+                      VerifiedRootStateDirectory.isCanonicalPublicationTemporary(temporary, for: basename),
+                      let held = directory.openForRead(temporary),
+                      let directoryFD = directory.directoryDescriptor
+                else { return false }
+                defer { Darwin.close(held) }
+                var initial = stat()
+                guard fstat(held, &initial) == 0,
+                      initial.st_size <= off_t(maximumBytes),
+                      directory.operations.fileBarrier(held)
+                else { return false }
+                var stable = stat()
+                var bound = stat()
+                return fstat(held, &stable) == 0
+                    && VerifiedRootStateDirectory.sameMetadata(initial, stable)
+                    && fstatat(directoryFD, temporary, &bound, AT_SYMLINK_NOFOLLOW) == 0
+                    && VerifiedRootStateDirectory.sameMetadata(initial, bound)
+            }
+        }
+
+        /// Removes one exact crash-abandoned publication temporary while the
+        /// fixed root-state lock is held. The caller must identify both the
+        /// complete canonical temporary name and its fixed authority basename;
+        /// a prefix or noncanonical UUID is never accepted.
+        public func removeAbandonedPublicationTemporary(
+            _ temporary: String,
+            for basename: String,
+            maximumBytes: Int
+        ) -> RemovalResult {
+            guard maximumBytes >= 0, maximumBytes <= 64 * 1_024 else { return .unsafeEntry }
+            return withOperation(
+                inactive: .transactionInactive,
+                reentrant: .reentrant
+            ) {
+                removeAbandonedPublicationTemporaryLocked(
+                    temporary,
+                    for: basename,
+                    maximumBytes: maximumBytes
+                )
+            }
+        }
+
+        private func removeAbandonedPublicationTemporaryLocked(
+            _ temporary: String,
+            for basename: String,
+            maximumBytes: Int
+        ) -> RemovalResult {
+            guard lockDescriptor >= 0,
+                  VerifiedRootStateDirectory.isCanonicalPublicationTemporary(temporary, for: basename),
+                  let directoryFD = directory.directoryDescriptor
+            else { return .unsafeEntry }
+
+            guard let held = directory.openForRead(temporary) else {
+                guard directory.entryState(temporary) == .absent,
+                      directory.operations.directoryEntryBarrier(directoryFD)
+                else { return .unsafeEntry }
+                return .alreadyAbsent
+            }
+            defer { Darwin.close(held) }
+
+            var initial = stat()
+            guard fstat(held, &initial) == 0,
+                  initial.st_size <= off_t(maximumBytes),
+                  directory.operations.fileBarrier(held)
+            else { return .unsafeEntry }
+            var stable = stat()
+            var bound = stat()
+            guard fstat(held, &stable) == 0,
+                  VerifiedRootStateDirectory.sameMetadata(initial, stable),
+                  fstatat(directoryFD, temporary, &bound, AT_SYMLINK_NOFOLLOW) == 0,
+                  VerifiedRootStateDirectory.sameMetadata(initial, bound)
+            else { return .removalUnverified }
+
+            directory.operations.beforeQuarantineUnlink(directoryFD, temporary)
+            var destructiveBoundary = stat()
+            guard fstatat(directoryFD, temporary, &destructiveBoundary, AT_SYMLINK_NOFOLLOW) == 0,
+                  VerifiedRootStateDirectory.sameMetadata(initial, destructiveBoundary)
+            else { return .removalUnverified }
+            guard directory.operations.unlink(directoryFD, temporary) == 0 else { return .removalUnverified }
+            guard directory.operations.directoryEntryBarrier(directoryFD) else { return .removalUnverified }
+            return directory.entryState(temporary) == .absent ? .removed : .removalUnverified
+        }
+
         private func removeLocked(
             _ basename: String,
             expected: (maximumBytes: Int, parser: (Data) -> Bool)?
@@ -711,6 +804,17 @@ public final class VerifiedRootStateDirectory {
         guard isSafeBasename(basename) else { return nil }
         let name = ".\(basename)\(quarantineSuffix)"
         return name.utf8.count <= Int(NAME_MAX) ? name : nil
+    }
+
+    private static func isCanonicalPublicationTemporary(_ temporary: String, for basename: String) -> Bool {
+        guard isSafeBasename(temporary), isSafeBasename(basename), hasBoundedStateNames(basename) else {
+            return false
+        }
+        let prefix = ".\(basename).new."
+        guard temporary.hasPrefix(prefix) else { return false }
+        let raw = String(temporary.dropFirst(prefix.count))
+        guard let identifier = UUID(uuidString: raw) else { return false }
+        return identifier.uuidString.lowercased() == raw && temporary == prefix + raw
     }
 
     private static func hasBoundedStateNames(_ basename: String) -> Bool {
