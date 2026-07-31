@@ -9,8 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 VERIFY = ROOT / "orchestration/verify_hosted_candidate_evidence.py"
-COMMIT = "cc63481b6823e864fbe217a6182972474a6a8c8d"
-TREE = "b31374650c7cd789c91ea53567a0e47112badb06"
+COMMIT = "809312b2d6278901a7355311fc2707e5d7f5bd25"
+TREE = "dfec55e29d24074b354b257743fbe7635c0d75d7"
 
 
 def canonical(value):

@@ -2,9 +2,9 @@
 
 `hosted-immutable-candidate.yml` is intentionally an orchestration artifact,
 not candidate source.  It checks out the workflow revision to `orchestration/`
-and checks out `cc63481b6823e864fbe217a6182972474a6a8c8d` separately to
+and checks out `809312b2d6278901a7355311fc2707e5d7f5bd25` separately to
 `source/`.  The latter must remain detached, clean, and at tree
-`b31374650c7cd789c91ea53567a0e47112badb06` throughout the held build.
+`dfec55e29d24074b354b257743fbe7635c0d75d7` throughout the held build.
 
 The workflow is manual only, has `contents: read`, uses no repository secrets
 or caches, and fails before authority creation unless the runner is arm64,
