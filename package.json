@@ -23,6 +23,6 @@
     "validate:site": "npm run site:check && npm run site:test"
   },
   "devDependencies": {
-    "@playwright/test": "^1.57.0"
+    "@playwright/test": "^1.62.0"
   }
 }
