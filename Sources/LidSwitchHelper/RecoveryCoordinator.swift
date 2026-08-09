@@ -112,6 +112,16 @@ final class RecoveryCoordinator {
         return outcome
     }
 
+    /// Runs only after an uninstall one-shot has returned exact safe-idle.
+    /// This uses the same root lock and parser-bound store operations as normal
+    /// recovery; it cannot turn a failed cleanup into a successful uninstall.
+    func retireUninstallMutableResidue() -> Bool {
+        guard let store = storeFactory(configuration.supportDirectory) else { return false }
+        return store.withTransaction { transaction in
+            store.retireUninstallMutableResidue(transaction)
+        } ?? false
+    }
+
     func recoverWithinTransaction(
         store: RecoveryAuthorityStore,
         transaction: VerifiedRootStateDirectory.Transaction,

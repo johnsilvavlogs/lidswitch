@@ -414,7 +414,63 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         }
     }
 
-    func testTerminalProofConsumesOneTerminalEffect() {
+    func testDetachedRestoreUsesOnlyTheInstalledHelperZeroSessionRoute() throws {
+        let terminal = HelperControlReply(
+            reason: "detached-user-restore",
+            sessionID: UUID(),
+            expiryMonotonic: 0,
+            state: .terminal,
+            power: .ac,
+            sleepDisabled: false,
+            acSleepMinutes: 5
+        )
+        var operations: [UInt32] = []
+
+        let restored = try RawHelperControlClient.restoreThroughInstalledHelperForTesting { operation, sessionID in
+            operations.append(operation)
+            XCTAssertEqual(operation, UInt32(LS_OPERATION_RESTORE.rawValue))
+            XCTAssertEqual(sessionID, Self.zeroUUID)
+            return .accepted(terminal)
+        }
+
+        XCTAssertEqual(restored, terminal)
+        XCTAssertEqual(operations, [UInt32(LS_OPERATION_RESTORE.rawValue)])
+        XCTAssertFalse(operations.contains(UInt32(LS_OPERATION_BEGIN.rawValue)))
+        XCTAssertFalse(operations.contains(UInt32(LS_OPERATION_RECONNECT.rawValue)))
+    }
+
+    func testDetachedRestoreAcceptsKnownBatterySafeIdleButRejectsUnknownPower() throws {
+        let batteryIdle = HelperControlReply(
+            reason: "detached-user-restore",
+            sessionID: UUID(),
+            expiryMonotonic: 0,
+            state: .terminal,
+            power: .disconnected,
+            sleepDisabled: false,
+            acSleepMinutes: 5
+        )
+        let unknownIdle = HelperControlReply(
+            reason: "detached-user-restore",
+            sessionID: UUID(),
+            expiryMonotonic: 0,
+            state: .terminal,
+            power: .unknown,
+            sleepDisabled: false,
+            acSleepMinutes: 5
+        )
+
+        XCTAssertEqual(
+            try RawHelperControlClient.restoreThroughInstalledHelperForTesting { _, _ in .accepted(batteryIdle) },
+            batteryIdle
+        )
+        XCTAssertTrue(PowerController.installedHelperSafeIdleForTesting(batteryIdle))
+        XCTAssertThrowsError(
+            try RawHelperControlClient.restoreThroughInstalledHelperForTesting { _, _ in .accepted(unknownIdle) }
+        )
+        XCTAssertFalse(PowerController.installedHelperSafeIdleForTesting(unknownIdle))
+    }
+
+    func testTerminalReconnectProofConsumesNoAdditionalTerminalEffect() {
         let sessionID = UUID()
         let terminal = reply(
             reason: "expired",

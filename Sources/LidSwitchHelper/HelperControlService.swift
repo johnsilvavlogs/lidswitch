@@ -8,8 +8,13 @@ typealias HelperTimerStarter = (@escaping HelperTimerHandler) -> AnyObject?
 
 enum HelperDaemonPreparation: Equatable {
     case ready
+    /// Durable recovery is fail-closed for autonomous activity, but the
+    /// installed authenticated helper must keep its XPC listener available so
+    /// the user can request a prompt-free, restore-only convergence.
+    case recoveryListenerOnly
     /// Recovery reached a durable fail-closed state. Exiting successfully keeps
     /// launchd's SuccessfulExit=false policy from respawning a write loop.
+    /// Kept for legacy callers that intentionally cannot expose a listener.
     case handledRecoveryRequired
     /// Store/lock/timer/preflight infrastructure failed without a durable stop.
     case transientFailure
@@ -374,7 +379,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                   return proof.kind == .recoveryRequired && proof.reason == expectedReason
               })
         else { return .transientFailure }
-        return persisted ? .handledRecoveryRequired : .transientFailure
+        return persisted ? .recoveryListenerOnly : .transientFailure
     }
 
     private func startTimerOnly() -> Bool {
@@ -401,12 +406,11 @@ final class HelperSessionAuthority: @unchecked Sendable {
             return snapshot(result: 77, reason: "peer-process-unavailable", requested: sessionID)
         }
         let snapshotOperation = operation == UInt32(LS_OPERATION_SNAPSHOT.rawValue)
+        let detachedRestoreOperation = operation == UInt32(LS_OPERATION_RESTORE.rawValue)
+            && sessionID == Self.zeroUUID
         // A containment receipt is a hard mutation fence. Snapshot remains
-        // responsive, but RESTORE is a power mutation and must wait for exact
-        // cleanup/extinction plus an explicit administrator recovery path.
-        guard !recoveryRequired || (snapshotOperation && activeSession != nil) else {
-            return snapshot(result: 75, reason: "recovery-required", requested: sessionID)
-        }
+        // responsive, and detached RESTORE can proceed only after exact
+        // cleanup/extinction through the installed helper.
         if operation == UInt32(LS_OPERATION_RESTORE.rawValue) {
             guard sessionID == Self.zeroUUID else { return snapshot(result: 64, reason: "restore-session-forbidden", requested: sessionID) }
         } else if operation != UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID == Self.zeroUUID {
@@ -415,6 +419,15 @@ final class HelperSessionAuthority: @unchecked Sendable {
         guard let store = recoveryStoreFactory(configuration.supportDirectory) else {
             registerAuthorityUnavailableIfActive()
             return snapshot(result: 75, reason: "unsafe-root-state-directory", requested: sessionID)
+        }
+        // A detached RESTORE is the app's prompt-free recovery path. It may
+        // only retire an already-ambiguous containment receipt after exact
+        // extinction proof; it never sends a signal or retries a power setter.
+        if detachedRestoreOperation {
+            _ = RecoveryCoordinator.reconcileExtinctExpiredContainment(store: store)
+        }
+        guard !recoveryRequired || (snapshotOperation && activeSession != nil) || detachedRestoreOperation else {
+            return snapshot(result: 75, reason: "recovery-required", requested: sessionID)
         }
         guard let reply = store.withTransaction({ transaction in
             self.handleLocked(
@@ -488,12 +501,10 @@ final class HelperSessionAuthority: @unchecked Sendable {
             }
             return snapshot(result: 0, reason: "verified", requested: sessionID)
         case UInt32(LS_OPERATION_RESTORE.rawValue):
-            return restore(
-                connection: connection,
-                peer: peer,
-                store: store,
-                transaction: transaction
-            )
+            if activeSession == nil {
+                return restoreDetachedState(store: store, transaction: transaction)
+            }
+            return restore(connection: connection, peer: peer, store: store, transaction: transaction)
         default:
             return snapshot(result: 64, reason: "unknown-operation", requested: sessionID)
         }
@@ -1106,6 +1117,43 @@ final class HelperSessionAuthority: @unchecked Sendable {
         return snapshot(result: terminalResult, reason: terminalReason, requested: session)
     }
 
+    /// An authenticated app that has no bound generation can ask its installed
+    /// helper to converge *only* durable, detached recovery state. This is not
+    /// a second owner path: a live session remains protected by the existing
+    /// connection/peer checks above, and every failed assessment stays
+    /// recovery-required.
+    private func restoreDetachedState(
+        store: RecoveryAuthorityStore,
+        transaction: VerifiedRootStateDirectory.Transaction
+    ) -> AuthorityReply {
+        let outcome = recoveryCoordinatorFactory().recoverWithinTransaction(
+            store: store,
+            transaction: transaction,
+            intent: .userRestore,
+            allowReconnect: false,
+            terminalReason: "detached-user-restore",
+            permitRecoveryRequiredRetry: true
+        )
+        switch outcome {
+        case let .terminalIdle(session, reason):
+            recoveryRequired = false
+            hydrateTerminal(session: session, reason: reason)
+            return snapshot(result: 0, reason: reason, requested: session)
+        case .pristineIdle:
+            recoveryRequired = false
+            return snapshot(result: 0, reason: "idle", requested: Self.zeroUUID)
+        case let .migratedIdle(reason):
+            recoveryRequired = false
+            return snapshot(result: 0, reason: reason, requested: Self.zeroUUID)
+        case let .recoveryRequired(reason):
+            recoveryRequired = true
+            return snapshot(result: 75, reason: reason, requested: Self.zeroUUID)
+        case .legacyRestoreOnly, .reconnectCandidate:
+            recoveryRequired = true
+            return snapshot(result: 75, reason: "detached-recovery-unverified", requested: Self.zeroUUID)
+        }
+    }
+
     private func registerAuthorityUnavailableIfActive() {
         guard activeSession != nil else { return }
         registerRollbackFailure(
@@ -1309,7 +1357,11 @@ struct HelperControlServiceOperations: @unchecked Sendable {
         },
         recover: { configuration, intent in
             RecoveryCoordinator(configuration: configuration, power: SystemPowerSystem())
-                .recover(intent: intent, allowReconnect: false)
+                .recover(
+                    intent: intent,
+                    allowReconnect: false,
+                    hydrateStatusProjection: intent != .uninstall
+                )
         },
         daemon: { configuration in HelperControlService.runDaemon(configuration: configuration) }
     )
@@ -1401,7 +1453,7 @@ enum HelperControlService {
         listener: () -> Int32
     ) -> Int32 {
         switch authority.prepareBeforeListening() {
-        case .ready:
+        case .ready, .recoveryListenerOnly:
             return listener() == 0 ? 0 : 78
         case .handledRecoveryRequired:
             return 0

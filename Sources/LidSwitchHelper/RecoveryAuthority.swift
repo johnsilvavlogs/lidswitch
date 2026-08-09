@@ -1879,6 +1879,71 @@ final class RecoveryAuthorityStore {
         }
     }
 
+    /// Uninstall is a terminal boundary, not merely a stopped daemon. Once the
+    /// helper has published safe-idle proof, retire every mutable reservation
+    /// and projection artifact by its exact, parsed basename. The terminal
+    /// ledger and the one safe-idle proof deliberately remain as bounded audit
+    /// evidence; unknown, quarantined, or malformed state refuses cleanup.
+    func retireUninstallMutableResidue(
+        _ transaction: VerifiedRootStateDirectory.Transaction
+    ) -> Bool {
+        func removed(_ result: VerifiedRootStateDirectory.RemovalResult) -> Bool {
+            result == .removed || result == .alreadyAbsent
+        }
+        switch ledger(Self.reservationBasename) {
+        case .absent:
+            break
+        case let .privateAuthority(_, bytes):
+            guard removed(transaction.removeOrResume(
+                Self.reservationBasename,
+                maximumBytes: TerminalGenerationLedger.maximumBytes
+            ) { data in
+                guard let raw = String(data: data, encoding: .utf8) else { return false }
+                return raw == bytes && TerminalGenerationLedger.parse(raw) != nil
+            }) else { return false }
+        case .legacyReadable, .invalid:
+            return false
+        }
+
+        switch statusProjectionTaskRecord() {
+        case .absent:
+            break
+        case let .valid(task):
+            guard removeStatusProjectionTask(expected: task, transaction) else { return false }
+        case .invalid:
+            return false
+        }
+        switch directory.entryState(Self.statusProjectionGenerationBasename) {
+        case .absent:
+            break
+        case .unknown:
+            return false
+        case .present:
+            guard removed(transaction.removeOrResume(
+                Self.statusProjectionGenerationBasename,
+                maximumBytes: 32
+            ) { data in
+                guard let raw = String(data: data, encoding: .utf8),
+                      let generation = UInt64(raw.trimmingCharacters(in: .newlines))
+                else { return false }
+                return raw == "\(generation)\n"
+            }) else { return false }
+        }
+
+        for (basename, maximumBytes) in [
+            ("helper-status.projection.lock", 0),
+            ("helper-status.projection-temp", 4_096),
+        ] {
+            guard removed(transaction.removeOrResume(basename, maximumBytes: maximumBytes) { data in
+                basename == "helper-status.projection.lock" ? data.isEmpty : StatusProjectionTask.parse(String(data: data, encoding: .utf8) ?? "") != nil
+            }) else { return false }
+        }
+        return appliedRecord() == .missing
+            && containmentReceiptRecord() == .absent
+            && recoveryBudgetRecord() == .absent
+            && journalRecord() == .absent
+    }
+
     func containmentReceiptRecord() -> ContainmentReceiptRecord {
         switch directory.entryState(Self.containmentReceiptBasename) {
         case .absent:

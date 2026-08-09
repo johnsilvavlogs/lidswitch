@@ -21,6 +21,35 @@ enum PowerSource: Equatable, Sendable {
         if case .ac = self { return true }
         return false
     }
+
+    /// Safe-idle proof may be reported on either known power source. Only a
+    /// new protected session requires AC; treating battery idle as unknown
+    /// would strand a correctly restored helper in recovery-required state.
+    var isKnown: Bool {
+        if case .unknown = self { return false }
+        return true
+    }
+}
+
+enum HelperPreparationCTA: Equatable, Sendable {
+    case prepare
+    case repair
+
+    var title: String {
+        switch self {
+        case .prepare: "Prepare Safe Helper"
+        case .repair: "Repair Helper"
+        }
+    }
+
+    var accessibilityHint: String {
+        switch self {
+        case .prepare:
+            "Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off."
+        case .repair:
+            "Repairs the unavailable installed helper with one administrator-approved repair transaction. Protection stays off."
+        }
+    }
 }
 
 /// Non-authoritative user-local persistence truth. The presentation fields
@@ -248,6 +277,16 @@ struct PowerSnapshot: Equatable, Sendable {
             && helperArtifactsPresent
             && helperLaunchdState == .present
             && !helperNeedsUpdate
+    }
+
+    /// No installed/helper-launchd residue is a clean first install. Any
+    /// existing, unloaded, invalid, or outdated helper shape is an explicit
+    /// repair boundary; it must never be reached through routine Restore.
+    var helperPreparationCTA: HelperPreparationCTA {
+        if helperArtifactsPresent || helperLoaded || helperNeedsUpdate || helperLaunchdState == .present {
+            return .repair
+        }
+        return .prepare
     }
 
     var legacyResiduePresent: Bool {
@@ -522,7 +561,7 @@ struct PowerSnapshot: Equatable, Sendable {
             }
             return "LidSwitch could not verify AC power. Starting a session is blocked."
         }
-        return "Prepare the crash-safe helper. Protection remains off until you explicitly start a session."
+        return "Helper Repair is required because the installed helper is unavailable. This one-time repair verifies safe idle and reinstalls the helper; protection remains off until you explicitly start a session."
     }
 
     var systemSummary: String {

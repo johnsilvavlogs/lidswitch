@@ -2,10 +2,11 @@ import Darwin
 import Foundation
 import LidSwitchCore
 
-/// App-side entry point for every administrator recovery operation. Power
+/// App-side entry point for administrator enrollment boundaries only. Routine
+/// Start, Restore, relaunch, and detached recovery use the already-installed
+/// authenticated helper XPC service; they must never reach this layer. Power
 /// state, applied authority, ledgers, proof, and status are owned exclusively
-/// by the verified helper one-shot; this layer never carries a shell recovery
-/// implementation.
+/// by the verified helper one-shot.
 enum PrivilegedHelperManager {
     /// Leaves ample room below Darwin's one-megabyte argv/environment ceiling.
     /// The transaction wrapper is expected to be tens of kilobytes; a future
@@ -30,7 +31,9 @@ enum PrivilegedHelperManager {
         try SecureHelperInstaller.perform(.uninstall)
     }
 
-    static func restoreSleepNow() throws -> AdministratorOperationResult {
+    /// A one-time repair boundary for a missing or unloaded helper. This is
+    /// deliberately not exposed as the ordinary Restore Sleep action.
+    static func repairMissingHelperAndRestore() throws -> AdministratorOperationResult {
         try SecureHelperInstaller.perform(.userRestore)
     }
 
@@ -64,11 +67,11 @@ enum PrivilegedHelperManager {
 
     static func administratorCommand(_ script: String) -> String {
         let encodedScript = Data(script.utf8).base64EncodedString()
-        // -f prevents the privileged operation from sourcing user startup
-        // files. Only the generated, audited transaction wrapper executes;
-        // that wrapper acquires the shared administrator-operation lock before
-        // any launchd, authority, power, or installation mutation.
-        return "/bin/echo \(shellQuote(encodedScript)) | /usr/bin/base64 --decode | /bin/zsh -f"
+        // Both the GUI-side osascript spawn and the root shell use a closed
+        // environment. `-f` prevents startup files; env -i also forbids a
+        // caller-controlled interpreter, dynamic-loader, or shell-init
+        // variable from crossing the authorization boundary.
+        return "/bin/echo \(shellQuote(encodedScript)) | /usr/bin/base64 --decode | /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C PERL5OPT= PERL5LIB= DYLD_LIBRARY_PATH= DYLD_FRAMEWORK_PATH= DYLD_INSERT_LIBRARIES= ENV= BASH_ENV= ZDOTDIR= /bin/zsh -f"
     }
 
     private static func shellQuote(_ value: String) -> String {

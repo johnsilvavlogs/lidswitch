@@ -238,43 +238,57 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.power.setCalls, [])
     }
 
-    func testAdministratorOneShotSynchronouslyRetiresExactExpiredTerminalContainmentWithoutSecondMutation() throws {
+    func testRecoveryListenerRetiresExactContainmentThenPerformsDetachedRestore() throws {
         let fixture = try Fixture()
         defer { fixture.dispose() }
         let identity = ContainedProcessIdentity(
-            pid: Int32.max - 3,
+            pid: Int32.max - 1,
             startSeconds: 10,
             startMicroseconds: 1
         )
         let priorOwner = UUID()
-        // Production-shaped v4 residue: the old owner reached TERM, made no
-        // signal/reap claim, and every original deadline is already expired.
-        let terminal = ContainedProcessReceipt(
+        let base = ContainedProcessReceipt(
             token: UUID(),
             executable: "/usr/bin/pmset",
             commandFingerprint: "0123456789abcdef",
             leader: identity,
             members: [.init(identity: identity, executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef")],
             processGroupID: identity.pid,
-            sessionID: Int32.max - 4,
+            sessionID: Int32.max - 2,
             rootDeadlineNanoseconds: 10,
-            cleanupDeadlineNanoseconds: 20,
-            phase: .term,
-            termSignalIssued: false,
-            killSignalIssued: false,
-            leaderReaped: false,
-            reapAttemptCount: 3,
-            cleanupOwnerToken: priorOwner,
-            ownerDeadlineNanoseconds: 30
+            cleanupDeadlineNanoseconds: 20
         )
+        let claimed = try XCTUnwrap(base.claimed(by: priorOwner, until: 30))
+        let receipt = try XCTUnwrap(claimed.advancing(to: .ambiguous, owner: priorOwner, deadline: 30))
         XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
-            fixture.store.publishInitialContainmentReceipt(terminal, $0)
+            fixture.store.publishInitialContainmentReceipt(receipt, $0)
+        }))
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.markRecoveryRequired("containment-pending", $0).isVerified
         }))
 
-        XCTAssertEqual(
-            fixture.coordinator.recover(intent: .install, allowReconnect: false),
-            .pristineIdle
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
         )
+        XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let restored = authority.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+        )
+
+        XCTAssertEqual(restored.result, 0)
+        XCTAssertEqual(restored.state, 0)
         XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
         XCTAssertEqual(fixture.power.setCalls, [])
     }
@@ -323,7 +337,6 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.store.containmentReceiptRecord(), .valid(receipt))
         XCTAssertEqual(fixture.power.setCalls, [])
     }
-
     /// Exercises the production connected timer entrypoint.  It deliberately
     /// enters through BEGIN, privateAuthorityMatches and tickLocked rather
     /// than calling the recovery-budget helper directly.
@@ -1815,7 +1828,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             listenerCalls.increment()
             return 0
         }, 0)
-        XCTAssertEqual(listenerCalls.value, 0)
+        XCTAssertEqual(listenerCalls.value, 1, "durable recovery keeps only the authenticated restore listener alive")
         guard case let .terminalIdle(actual, reason) = fixture.coordinator.recover(intent: .userRestore, allowReconnect: false) else {
             return XCTFail("operator one-shot must receive one restore-only retry")
         }

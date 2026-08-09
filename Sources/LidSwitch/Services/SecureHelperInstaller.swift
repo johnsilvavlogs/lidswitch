@@ -27,6 +27,13 @@ enum SecureHelperInstaller {
     /// length, and digest before the staged bytes can become executable.
     struct FrozenHelperTransfer: Equatable {
         let sourcePath: String
+        let stageParentPath: String
+        let stageName: String
+        let stageDevice: UInt64
+        let stageInode: UInt64
+        let stageOwnerUID: UInt32
+        let stageOwnerGID: UInt32
+        let stageMode: UInt32
         let sourceDevice: UInt64
         let sourceInode: UInt64
         let sourceOwnerUID: UInt32
@@ -42,7 +49,16 @@ enum SecureHelperInstaller {
             sourcePath.hasPrefix("/")
                 && !sourcePath.utf8.contains(0)
                 && sourcePath.utf8.count < Int(PATH_MAX)
+                && stageParentPath.hasPrefix("/")
+                && !stageParentPath.utf8.contains(0)
+                && stageParentPath.utf8.count < Int(PATH_MAX)
+                && UUID(uuidString: stageName)?.uuidString.lowercased() == stageName
+                && URL(fileURLWithPath: sourcePath).deletingLastPathComponent().lastPathComponent == stageName
+                && URL(fileURLWithPath: sourcePath).deletingLastPathComponent().deletingLastPathComponent().path == stageParentPath
                 && URL(fileURLWithPath: sourcePath).lastPathComponent == "LidSwitchHelper"
+                && stageDevice > 0 && stageInode > 0
+                && stageMode & UInt32(S_IFMT) == UInt32(S_IFDIR)
+                && stageMode & 0o7777 == 0o700
                 && sourceDevice > 0 && sourceInode > 0
                 && sourceMode & UInt32(S_IFMT) == UInt32(S_IFREG)
                 && sourceMode & 0o7777 == 0o700
@@ -79,7 +95,8 @@ enum SecureHelperInstaller {
         _ operation: AdministratorOperation,
         using adapter: some FrozenEnrollmentAdapter
     ) throws -> AdministratorOperationResult {
-        try authorizeThenRun(freeze: adapter.freeze) { enrollment in
+        let enrollment = try adapter.freeze()
+        let result = try authorizeThenRun(freeze: { enrollment }) { enrollment in
         let transactionID = UUID()
         let receiptPath = AppPaths.administratorReceiptPath(transactionID: transactionID)
         let script = transactionScript(
@@ -105,6 +122,14 @@ enum SecureHelperInstaller {
             receiptPath: receiptPath
         )
         }
+        // A running or unreadable receipt means the privileged child may still
+        // need its frozen source. Every terminal result proves that it no
+        // longer does, so retire exactly that user-owned stage immediately.
+        // This is descriptor-bound and inventory-checked; never use a broad
+        // recursive deletion against a pathname assembled from mutable state.
+        if case .completionIndeterminate = result { return result }
+        try retireFrozenStage(enrollment.transfer)
+        return result
     }
 
     static func diagnosticScript(for operation: AdministratorOperation) -> String {
@@ -125,7 +150,11 @@ enum SecureHelperInstaller {
         let transactionID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
         return transactionScript(
             enrollment: .init(
-                transfer: .init(sourcePath: "/private/tmp/lidswitch-diagnostic/LidSwitchHelper",
+                transfer: .init(sourcePath: "/private/tmp/lidswitch-diagnostic/00000000-0000-4000-8000-000000000002/LidSwitchHelper",
+                                stageParentPath: "/private/tmp/lidswitch-diagnostic", stageName: "00000000-0000-4000-8000-000000000002",
+                                stageDevice: 1, stageInode: 1,
+                                stageOwnerUID: UInt32(getuid()), stageOwnerGID: UInt32(getgid()),
+                                stageMode: UInt32(S_IFDIR | 0o700),
                                 sourceDevice: 1, sourceInode: 1,
                                 sourceOwnerUID: UInt32(getuid()), sourceOwnerGID: UInt32(getgid()),
                                 sourceMode: UInt32(S_IFREG | 0o700), sourceLinks: 1,
@@ -296,6 +325,13 @@ enum SecureHelperInstaller {
         }
         let transfer = FrozenHelperTransfer(
             sourcePath: stagedURL.path,
+            stageParentPath: stage.parentPath,
+            stageName: stage.name,
+            stageDevice: UInt64(truncatingIfNeeded: stage.initial.device),
+            stageInode: UInt64(truncatingIfNeeded: stage.initial.inode),
+            stageOwnerUID: UInt32(stage.initial.owner),
+            stageOwnerGID: UInt32(stage.initial.group),
+            stageMode: UInt32(stage.initial.mode),
             sourceDevice: UInt64(truncatingIfNeeded: staged.initial.device),
             sourceInode: UInt64(truncatingIfNeeded: staged.initial.inode),
             sourceOwnerUID: UInt32(staged.initial.owner),
@@ -534,6 +570,63 @@ enum SecureHelperInstaller {
         precondition(close(stage.parentDescriptor) == 0, "stage parent close failed")
     }
 
+    /// Retires only the exact private candidate created by `freezeEnrollment`.
+    /// The parent and stage are reopened without following links, rechecked
+    /// against the frozen inode receipts, and required to contain precisely the
+    /// frozen helper leaf before either descriptor-relative unlink is allowed.
+    private static func retireFrozenStage(_ transfer: FrozenHelperTransfer) throws {
+        guard transfer.isSelfConsistent else {
+            throw HelperControlError.rejected("frozen-stage-retirement-receipt-invalid")
+        }
+        let expectedUID = getuid()
+        let expectedGID = getgid()
+        guard transfer.stageOwnerUID == UInt32(expectedUID),
+              transfer.stageOwnerGID == UInt32(expectedGID),
+              transfer.sourceOwnerUID == UInt32(expectedUID),
+              transfer.sourceOwnerGID == UInt32(expectedGID)
+        else { throw HelperControlError.rejected("frozen-stage-retirement-owner-mismatch") }
+
+        let parent = try openDirectory(transfer.stageParentPath, expectedUID: expectedUID, expectedGID: expectedGID)
+        defer { precondition(close(parent) == 0, "stage retirement parent close failed") }
+        let stage = openat(parent, transfer.stageName, immutableDirectoryOpenFlags)
+        guard stage >= 0 else { throw HelperControlError.rejected("frozen-stage-retirement-open-failed") }
+        defer { precondition(close(stage) == 0, "stage retirement descriptor close failed") }
+
+        var stageDescriptorStat = stat(); var stageNameStat = stat()
+        guard fstat(stage, &stageDescriptorStat) == 0,
+              fstatat(parent, transfer.stageName, &stageNameStat, AT_SYMLINK_NOFOLLOW) == 0
+        else { throw HelperControlError.rejected("frozen-stage-retirement-fstat-failed") }
+        let expectedStage = (transfer.stageDevice, transfer.stageInode,
+                             transfer.stageOwnerUID, transfer.stageOwnerGID,
+                             transfer.stageMode)
+        func stageMatches(_ value: stat) -> Bool {
+            (UInt64(truncatingIfNeeded: value.st_dev), UInt64(truncatingIfNeeded: value.st_ino),
+             UInt32(value.st_uid), UInt32(value.st_gid), UInt32(value.st_mode)) == expectedStage
+        }
+        guard stageMatches(stageDescriptorStat), stageMatches(stageNameStat),
+              directoryInventoryMatches(stage, expectedLeaf: "LidSwitchHelper")
+        else { throw HelperControlError.rejected("frozen-stage-retirement-stage-mismatch") }
+
+        let leaf = openat(stage, "LidSwitchHelper", O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard leaf >= 0 else { throw HelperControlError.rejected("frozen-stage-retirement-leaf-open-failed") }
+        var leafStat = stat()
+        let leafValid = fstat(leaf, &leafStat) == 0
+            && UInt64(truncatingIfNeeded: leafStat.st_dev) == transfer.sourceDevice
+            && UInt64(truncatingIfNeeded: leafStat.st_ino) == transfer.sourceInode
+            && UInt32(leafStat.st_uid) == transfer.sourceOwnerUID
+            && UInt32(leafStat.st_gid) == transfer.sourceOwnerGID
+            && UInt32(leafStat.st_mode) == transfer.sourceMode
+            && UInt64(leafStat.st_nlink) == transfer.sourceLinks
+            && UInt64(leafStat.st_size) == transfer.size
+        guard close(leaf) == 0, leafValid,
+              directoryInventoryMatches(stage, expectedLeaf: "LidSwitchHelper"),
+              unlinkat(stage, "LidSwitchHelper", 0) == 0,
+              fsync(stage) == 0,
+              unlinkat(parent, transfer.stageName, AT_REMOVEDIR) == 0,
+              fsync(parent) == 0
+        else { throw HelperControlError.rejected("frozen-stage-retirement-failed") }
+    }
+
     private static func transactionScript(
         enrollment: FrozenEnrollment,
         transactionID: UUID,
@@ -630,6 +723,35 @@ enum SecureHelperInstaller {
           /bin/rm -rf "$stage"
         }
 
+        remove_verified_runtime_directory() {
+          candidate="$1"
+          # Current/Previous are exact root-owned installation generations.
+          # Reject unknown inventory and unlink only the three known leaves;
+          # never recursively delete an authority-root child by pathname.
+          /usr/bin/perl -MFcntl=:DEFAULT,:mode -MIO::Handle -e '
+            use strict; use warnings;
+            my ($root, $candidate) = @ARGV;
+            my @root_stat = lstat($root); die "runtime-root" unless @root_stat && S_ISDIR($root_stat[2]) && $root_stat[4] == 0 && $root_stat[5] == 0 && ($root_stat[2] & 0777) == 0755;
+            my @candidate_stat = lstat($candidate); die "runtime-directory" unless @candidate_stat && S_ISDIR($candidate_stat[2]) && $candidate_stat[4] == 0 && $candidate_stat[5] == 0 && ($candidate_stat[2] & 0777) == 0755 && $candidate_stat[0] == $root_stat[0];
+            my ($parent, $leaf) = $candidate =~ m{\\A(.+)/([^/]+)\\z}; die "runtime-path" unless defined($parent) && $parent eq $root && ($leaf eq "Current" || $leaf eq "Previous");
+            opendir(my $dir, $candidate) or die "runtime-open";
+            my %expected = ("LidSwitchHelper" => 0755, "enrollment-policy" => 0644, "helper-version" => 0644);
+            my @names = grep { $_ ne "." && $_ ne ".." } readdir($dir);
+            closedir($dir) or die "runtime-close";
+            die "runtime-inventory" unless @names == 3 && !grep { !exists($expected{$_}) } @names;
+            for my $name (sort keys %expected) {
+              my $path = $candidate . "/" . $name; my @entry = lstat($path);
+              die "runtime-leaf" unless @entry && S_ISREG($entry[2]) && $entry[3] == 1 && $entry[4] == 0 && $entry[5] == 0 && ($entry[2] & 0777) == $expected{$name} && $entry[7] > 0;
+              unlink($path) or die "runtime-unlink";
+            }
+            sysopen(my $directory, $candidate, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "runtime-directory-open";
+            $directory->sync or die "runtime-directory-fsync"; close($directory) or die "runtime-directory-close";
+            rmdir($candidate) or die "runtime-rmdir";
+            sysopen(my $root_directory, $root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "runtime-root-open";
+            $root_directory->sync or die "runtime-root-fsync"; close($root_directory) or die "runtime-root-close";
+          ' "$root" "$candidate"
+        }
+
         validate_root() {
           if [ -e "$root" ] || [ -L "$root" ]; then
             root_is_valid || return 65
@@ -673,6 +795,52 @@ enum SecureHelperInstaller {
             die "receipt-bytes" unless $actual eq $payload && sysread($final, my $extra, 1) == 0;
             $final->sync or die "receipt-final-fsync";
             close($final) or die "receipt-final-close";
+            # Receipt files are the only historical administrator residue
+            # under the authority root. Fully parse each exact canonical name
+            # before retaining a small bounded receipt ring; any old running
+            # receipt is abandoned because this process owns the global lock.
+            # Unknown or malformed entries stay fail-closed rather than being
+            # swept by a glob.
+            opendir(my $dir, $root) or die "receipt-inventory-open";
+            my @terminal;
+            my @abandoned_running;
+            my $current_is_running = 0;
+            while (defined(my $name = readdir($dir))) {
+              next if $name eq "." || $name eq "..";
+              next unless $name =~ /\\Aadministrator-transaction-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\.receipt\\z/;
+              my $transaction = $1;
+              my $path = "$root/$name";
+              my @entry = lstat($path);
+              die "receipt-ring-metadata" unless @entry && S_ISREG($entry[2]) && $entry[3] == 1
+                && $entry[4] == 0 && $entry[5] == 0 && ($entry[2] & 0777) == 0644
+                && $entry[7] > 0 && $entry[7] <= 1024;
+              sysopen(my $in, $path, O_RDONLY | O_NOFOLLOW) or die "receipt-ring-open";
+              my $raw = ""; while (length($raw) < $entry[7]) { my $read = sysread($in, my $chunk, $entry[7] - length($raw)); die "receipt-ring-read" unless defined($read) && $read > 0; $raw .= $chunk; }
+              die "receipt-ring-extra" unless sysread($in, my $extra, 1) == 0;
+              close($in) or die "receipt-ring-close";
+              die "receipt-ring-parse" unless $raw =~ /\\Aschema=1\ntransaction=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\noperation=(install|uninstall|user-restore)\nstate=(running|terminal)\noutcome=(pending|safe-idle|recovery-required|operation-failed|installed-but-stopped)\nsession=(none|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\nreason=([a-z0-9-]{1,96})\n\\z/
+                && $1 eq $transaction;
+              if ($name eq substr($receipt, length($root) + 1)) {
+                $current_is_running = $3 eq "running" ? 1 : 0;
+                push @terminal, [$entry[9], $name] if $3 eq "terminal";
+              } elsif ($3 eq "running") {
+                push @abandoned_running, $name;
+              } else {
+                push @terminal, [$entry[9], $name];
+              }
+            }
+            closedir($dir) or die "receipt-inventory-close";
+            for my $name (@abandoned_running) {
+              unlink($root . "/" . $name) or die "receipt-ring-running-unlink";
+            }
+            @terminal = sort { $a->[0] <=> $b->[0] || $a->[1] cmp $b->[1] } @terminal;
+            my $terminal_limit = $current_is_running ? 7 : 8;
+            while (@terminal > $terminal_limit) {
+              my $oldest = shift @terminal;
+              my $oldest_path = $root . "/" . $oldest->[1];
+              die "receipt-ring-current" if $oldest_path eq $receipt;
+              unlink($oldest_path) or die "receipt-ring-unlink";
+            }
             sysopen(my $directory, $root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or die "receipt-directory";
             $directory->sync or die "receipt-directory-fsync";
             close($directory) or die "receipt-directory-close";
@@ -707,7 +875,7 @@ enum SecureHelperInstaller {
             outcome=operation-failed
             rollback_ok=1
             if [ "$new_current_published" = 1 ]; then
-              /bin/rm -rf "$current" || rollback_ok=0
+              remove_verified_runtime_directory "$current" || rollback_ok=0
             fi
             if [ "$old_current_rotated" = 1 ] && [ -d "$previous" ]; then
               /bin/mv "$previous" "$current" || rollback_ok=0
@@ -914,7 +1082,9 @@ enum SecureHelperInstaller {
         switch operation {
         case .install:
             return """
-            /bin/rm -rf "$previous"
+            if [ -e "$previous" ] || [ -L "$previous" ]; then
+              remove_verified_runtime_directory "$previous"
+            fi
             if [ "$had_current" = 1 ]; then
               /bin/mv "$current" "$previous"
               old_current_rotated=1
@@ -942,7 +1112,11 @@ enum SecureHelperInstaller {
             # private ledgers, proof, locks, and administrator receipts remain
             # intact for audit and future fail-closed recovery.
             /bin/rm -f "$status_path" "$plist" \(q(AppPaths.legacyV4RootHelperPath)) \(q(AppPaths.legacyRootHelperPath)) \(q(AppPaths.legacyV4RootHelperVersionPath))
-            /bin/rm -rf "$current" "$previous"
+            for runtime_directory in "$current" "$previous"; do
+              if [ -e "$runtime_directory" ] || [ -L "$runtime_directory" ]; then
+                remove_verified_runtime_directory "$runtime_directory"
+              fi
+            done
             /bin/sync
             """
         case .userRestore:

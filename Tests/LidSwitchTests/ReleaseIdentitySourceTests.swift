@@ -40,7 +40,7 @@ final class ReleaseIdentitySourceTests: XCTestCase {
             Array(LaunchDaemonContract.programArguments(ownerUID: 501).dropFirst())
                 + ["--mode", "provision-root-state-lock"]
         )
-        XCTAssertEqual(ReleaseIdentity.xpcProtocolVersion, 2)
+        XCTAssertEqual(ReleaseIdentity.xpcProtocolVersion, 10)
         XCTAssertEqual(ReleaseIdentity.enrollmentPolicyProtocolVersion, 1)
     }
 }
