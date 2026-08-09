@@ -1102,6 +1102,46 @@ final class RecoveryCoordinator {
                 return required(store, transaction, "detached-history-conflict")
             }
             return .detachedIdle(proof.reason)
+        case .detachedTransitionPending:
+            // This is the sole retryable transition fence. Its parser accepts
+            // only the four dispositions emitted by the helper after a
+            // verified safe-idle conclusion, and each disposition must still
+            // satisfy the exact ledger shape that produced it. A generic
+            // recovery-required proof never takes this path.
+            guard permitDetachedContainmentRecovery,
+                  let disposition = proof.detachedTransitionDisposition
+            else { return .recoveryRequired(proof.reason) }
+
+            let assessment: RecoveryAssessment
+            switch disposition {
+            case .pristine:
+                guard terminalEntries.isEmpty, reservationEntries.isEmpty else {
+                    return required(store, transaction, "detached-transition-pristine-history-conflict")
+                }
+                assessment = .pristineIdle
+            case .migrated:
+                guard terminalEntries.isEmpty, reservationEntries.isEmpty else {
+                    return required(store, transaction, "detached-transition-migrated-history-conflict")
+                }
+                assessment = .migratedIdle("legacy-transition-retry")
+            case .detached:
+                guard terminalEntries.isEmpty, reservationEntries.isEmpty else {
+                    return required(store, transaction, "detached-transition-detached-history-conflict")
+                }
+                assessment = .detachedIdle("containment-extinguished-detached-safe-idle")
+            case .terminal:
+                guard let session = proof.sessionID, terminalEntries.last == session else {
+                    return required(store, transaction, "detached-transition-terminal-ledger-mismatch")
+                }
+                assessment = .terminalIdle(session, "detached-transition-retry")
+            }
+            // Keep the typed fence durable while the caller establishes its
+            // reconciliation timer and persists the public-status task.  The
+            // installed helper publishes the restored proof last, under this same
+            // root transaction; a process death before that point therefore
+            // relaunches recovery-listener-only instead of silently becoming
+            // ready from a partially completed transition.
+            return assessment
         case .recoveryRequired:
             // Only an installed-helper detached RESTORE may clear the exact
             // extinction fence written below. It still requires the same
@@ -1117,9 +1157,9 @@ final class RecoveryCoordinator {
                 sessionID: nil,
                 reason: "containment-extinguished-detached-safe-idle"
             )
-            guard store.publishProof(detached, transaction).isVerified else {
-                return required(store, transaction, "detached-safe-idle-proof-unverified")
-            }
+            // This exact containment fence is consumed only after the helper
+            // has started normal reconciliation and durably enqueued status.
+            // Until that final publication, relaunch remains recovery-only.
             return .detachedIdle(detached.reason)
         }
     }
@@ -1369,7 +1409,7 @@ final class RecoveryCoordinator {
             return terminalEntries.last == prior
         case .migrated, .detachedSafeIdle:
             return terminalEntries.isEmpty
-        case .recoveryRequired:
+        case .detachedTransitionPending, .recoveryRequired:
             return false
         }
     }

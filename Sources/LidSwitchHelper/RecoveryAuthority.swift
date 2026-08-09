@@ -23,12 +23,61 @@ struct RecoveryProof: Equatable {
         case migrated
         case detachedSafeIdle = "detached-safe-idle"
         case terminal
+        /// The installed helper reached a typed safe-idle/terminal conclusion,
+        /// but could not complete the timer plus public-status transition.
+        /// It is fail-closed until that same helper retries detached RESTORE.
+        case detachedTransitionPending = "detached-transition-pending"
         case recoveryRequired = "recovery-required"
+    }
+
+    /// The transition retry must retain its pre-failure authority class. In
+    /// particular, a terminal ledger can never be retried as empty/pristine.
+    enum DetachedTransitionDisposition: String, CaseIterable {
+        case pristine
+        case migrated
+        case detached
+        case terminal
+
+        var reason: String { "detached-transition-pending-\(rawValue)" }
+
+        init?(sessionID: UUID?, reason: String) {
+            guard reason == "detached-transition-pending-pristine"
+                    || reason == "detached-transition-pending-migrated"
+                    || reason == "detached-transition-pending-detached"
+                    || reason == "detached-transition-pending-terminal"
+            else { return nil }
+            switch (reason, sessionID) {
+            case ("detached-transition-pending-pristine", nil): self = .pristine
+            case ("detached-transition-pending-migrated", nil): self = .migrated
+            case ("detached-transition-pending-detached", nil): self = .detached
+            case ("detached-transition-pending-terminal", .some): self = .terminal
+            default: return nil
+            }
+        }
     }
 
     let kind: Kind
     let sessionID: UUID?
     let reason: String
+
+    var detachedTransitionDisposition: DetachedTransitionDisposition? {
+        guard kind == .detachedTransitionPending else { return nil }
+        return .init(sessionID: sessionID, reason: reason)
+    }
+
+    static func detachedTransitionPending(
+        _ disposition: DetachedTransitionDisposition,
+        terminalSession: UUID? = nil
+    ) -> RecoveryProof? {
+        switch disposition {
+        case .pristine, .migrated, .detached:
+            guard terminalSession == nil else { return nil }
+            return .init(kind: .detachedTransitionPending, sessionID: nil, reason: disposition.reason)
+        case .terminal:
+            guard let terminalSession else { return nil }
+            return .init(kind: .detachedTransitionPending, sessionID: terminalSession, reason: disposition.reason)
+        }
+    }
 
     var payload: String {
         [
@@ -69,6 +118,24 @@ struct RecoveryProof: Equatable {
         case .detachedSafeIdle:
             guard session == "none", reason == "containment-extinguished-detached-safe-idle" else { return nil }
             proof = .init(kind: kind, sessionID: nil, reason: reason)
+        case .detachedTransitionPending:
+            let pendingSession: UUID?
+            if reason == DetachedTransitionDisposition.terminal.reason {
+                guard let terminalSession = UUID(uuidString: session) else { return nil }
+                pendingSession = terminalSession
+            } else {
+                // Nonterminal retry classes deliberately carry no session.
+                // Do not collapse malformed session text to nil: that would
+                // make an arbitrary payload parse as a pristine transition.
+                guard session == "none" else { return nil }
+                pendingSession = nil
+            }
+            guard let disposition = DetachedTransitionDisposition(sessionID: pendingSession, reason: reason) else { return nil }
+            proof = .init(
+                kind: kind,
+                sessionID: disposition == .terminal ? pendingSession : nil,
+                reason: reason
+            )
         case .recoveryRequired:
             guard session == "none" else { return nil }
             proof = .init(kind: kind, sessionID: nil, reason: reason)
@@ -1668,6 +1735,63 @@ final class RecoveryAuthorityStore {
             return .notPublished(.parser)
         }
         return publish(proof.payload, Self.proofBasename, transaction, parser: { RecoveryProof.parse($0) == proof })
+    }
+
+    /// The only sessionless migration transition that may replace a completed
+    /// safe proof. This is not a general proof writer: it admits only the
+    /// helper's typed post-recovery fence, from the matching already-verified
+    /// safe class, while no applied authority or conflicting history exists.
+    /// In particular, ordinary migration remains immutable across crashes,
+    /// legacy repair, and generic recovery-required handling.
+    func publishDetachedTransitionPending(
+        _ disposition: RecoveryProof.DetachedTransitionDisposition,
+        terminalSession: UUID? = nil,
+        _ transaction: VerifiedRootStateDirectory.Transaction
+    ) -> RecoveryPublicationOutcome {
+        guard let pending = RecoveryProof.detachedTransitionPending(
+            disposition,
+            terminalSession: terminalSession
+        ) else { return .notPublished(.parser) }
+        if proofRecord() == .valid(pending) { return .alreadyVerified }
+        guard appliedRecord() == .missing,
+              case let .privateAuthority(terminalEntries, _) = ledger(Self.terminalBasename),
+              case let .privateAuthority(reservationEntries, _) = ledger(Self.reservationBasename),
+              case let .valid(current) = proofRecord()
+        else { return .notPublished(.parser) }
+
+        switch disposition {
+        case .pristine:
+            guard current.kind == .pristine,
+                  current.sessionID == nil,
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .notPublished(.parser) }
+        case .migrated:
+            guard current.kind == .migrated,
+                  current.sessionID == nil,
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .notPublished(.parser) }
+        case .detached:
+            let isDetachedSafe = current.kind == .detachedSafeIdle
+                && current.sessionID == nil
+            let isExactContainmentFence = current.kind == .recoveryRequired
+                && current.sessionID == nil
+                && current.reason == "containment-extinguished-explicit-recovery-required"
+            guard (isDetachedSafe || isExactContainmentFence),
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .notPublished(.parser) }
+        case .terminal:
+            guard let terminalSession,
+                  current.kind == .terminal,
+                  current.sessionID == terminalSession,
+                  terminalEntries.last == terminalSession
+            else { return .notPublished(.parser) }
+        }
+        return publish(pending.payload, Self.proofBasename, transaction) {
+            RecoveryProof.parse($0) == pending
+        }
     }
 
     /// The only admissible successor to a completed migration. It is bound to
