@@ -47,12 +47,14 @@ publishers plus their descriptor validation. Legacy `build_dmg.sh` and
 
 ## Validation boundary
 
-The published release was produced through the held build and immutable
-packaging path above, installed transactionally, and accepted only after the
-controlled native canary proved active ownership, peer-process-invalid
-rollback, `SleepDisabled=0`, and no automatic rearm. The release asset and the
-`releases/latest/download/LidSwitch.dmg` response were downloaded independently
-and matched the published digest above.
+This source identity is not a published or release-qualified asset. A candidate
+may be accepted only after the held build and immutable packaging receipts are
+reviewed together, the exact app is installed transactionally, and a controlled
+native canary proves active ownership, peer-process-invalid rollback,
+`SleepDisabled=0`, and no automatic rearm. A future published asset must also be
+downloaded independently from both its versioned release URL and
+`releases/latest/download/LidSwitch.dmg`; both bytes must match the reviewed
+candidate digest before that publication can be claimed here.
 
 Public hygiene is available only as an **observational source scan**:
 

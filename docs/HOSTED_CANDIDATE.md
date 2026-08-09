@@ -1,5 +1,11 @@
 # Hosted immutable candidate authority
 
+> Historical boundary: this workflow remains pinned to the last reviewed
+> v0.2.14/build9 hosted source and is not release authority for v0.2.15. The
+> v0.2.15/build10 lifecycle repair is built and qualified through the local
+> descriptor-held path until a separate two-phase hosted-source rollover is
+> reviewed and merged.
+
 `hosted-immutable-candidate.yml` is intentionally an orchestration artifact,
 not candidate source.  It checks out the workflow revision to `orchestration/`
 and checks out `809312b2d6278901a7355311fc2707e5d7f5bd25` separately to

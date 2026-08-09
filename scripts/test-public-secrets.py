@@ -303,12 +303,12 @@ def test_dmg_source_binding_proof() -> None:
 
 def test_distribution_release_truth() -> None:
     source = (SCRIPT_DIR.parent / "docs" / "DISTRIBUTION.md").read_text(encoding="utf-8")
-    require("current public manual release" in source and "v0.2.12" in source, "distribution docs must state the current release")
-    require("57d44b5bd566fd768a12705f2778fbb2d2f45375" in source, "distribution docs must bind the release tag to its exact source")
-    require("0c2d03cafc88ee8d947b4f3551e72e046ce50955fb2946eb56bc8b344669dc00" in source, "distribution docs must bind the release asset digest")
+    require("LidSwitch `0.2.15` build `10`" in source, "distribution docs must state the current candidate identity")
+    require("source-bound candidate identity" in source and "not installed or release-qualified proof" in source, "distribution docs must retain the candidate boundary")
+    require("not a published or release-qualified asset" in source, "distribution docs must not claim an unpublished asset")
     require("peer-process-invalid" in source and "SleepDisabled=0" in source and "no automatic rearm" in source, "distribution docs must state native canary acceptance")
     require("ad-hoc signing" in source and "no Developer ID" in source and "no notarization" in source, "distribution docs must retain the manual trust boundary")
-    forbidden = ("blocked release candidate", "not a built, distributed", "intended future tier", "full-release", "checks are green", "Publish `dist/", "Packaging commands:", "./script/build_dmg.sh", "./script/validate_dmg.sh")
+    forbidden = ("current public manual release", "v0.2.12", "57d44b5bd566fd768a12705f2778fbb2d2f45375", "0c2d03cafc88ee8d947b4f3551e72e046ce50955fb2946eb56bc8b344669dc00", "blocked release candidate", "not a built, distributed", "intended future tier", "full-release", "checks are green", "Publish `dist/", "Packaging commands:", "./script/build_dmg.sh", "./script/validate_dmg.sh")
     require(not any(token in source for token in forbidden), "distribution docs must not retain blocked, green, or legacy packaging claims")
 
 

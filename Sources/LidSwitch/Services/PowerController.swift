@@ -102,9 +102,13 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
     ) -> Self {
         if operationPhase == .recoveryRequired {
             return Self(
-                title: "Recovery required",
-                detail: "LidSwitch could not prove a detached safe-idle state. Protection is not being reported active; Restore Sleep remains available.",
-                accessibilityState: "LidSwitch, recovery required. Protection is not being reported active because a detached safe-idle state was not proved. Restore Sleep remains available.",
+                title: snapshot.helperReady ? "Restore required" : "Helper repair required",
+                detail: snapshot.helperReady
+                    ? "LidSwitch could not prove a detached safe-idle state. Protection is not being reported active; Restore Sleep remains available."
+                    : "LidSwitch could not prove a detached safe-idle state and the installed helper is unavailable. Prepare or repair the helper before restoring.",
+                accessibilityState: snapshot.helperReady
+                    ? "LidSwitch, restore required. Protection is not being reported active because a detached safe-idle state was not proved. Restore Sleep remains available."
+                    : "LidSwitch, helper repair required. Protection is not being reported active because a detached safe-idle state was not proved and the helper is unavailable. Prepare or repair the helper before restoring.",
                 menuBarSymbol: "exclamationmark.triangle.fill",
                 panelSymbol: "exclamationmark.triangle.fill",
                 tone: .warning

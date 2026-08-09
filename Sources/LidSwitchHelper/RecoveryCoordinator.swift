@@ -275,7 +275,12 @@ final class RecoveryCoordinator {
 
         switch store.appliedRecord() {
         case .missing:
-            let idle = assessIdle(store, transaction)
+            let idle = assessIdle(
+                store,
+                transaction,
+                permitDetachedContainmentRecovery: permitRecoveryRequiredRetry
+                    && execution == .currentHelperTransaction
+            )
             // An administrator one-shot is the only path allowed to quiesce
             // and migrate historical writers. Once that transaction has
             // proved exact safe idle, publish the corresponding canonical
@@ -291,6 +296,8 @@ final class RecoveryCoordinator {
                 case .pristineIdle:
                     projection = ("inactive", "pristine", nil)
                 case let .migratedIdle(reason):
+                    projection = ("inactive", reason, nil)
+                case let .detachedIdle(reason):
                     projection = ("inactive", reason, nil)
                 case let .terminalIdle(session, reason):
                     projection = ("terminal", reason, session)
@@ -1050,7 +1057,8 @@ final class RecoveryCoordinator {
 
     private func assessIdle(
         _ store: RecoveryAuthorityStore,
-        _ transaction: VerifiedRootStateDirectory.Transaction
+        _ transaction: VerifiedRootStateDirectory.Transaction,
+        permitDetachedContainmentRecovery: Bool = false
     ) -> RecoveryAssessment {
         guard case let .privateAuthority(terminalEntries, _) = store.ledger(RecoveryAuthorityStore.terminalBasename),
               case let .privateAuthority(reservationEntries, _) = store.ledger(RecoveryAuthorityStore.reservationBasename)
@@ -1089,8 +1097,30 @@ final class RecoveryCoordinator {
                 return required(store, transaction, "migrated-history-conflict")
             }
             return .migratedIdle(proof.reason)
+        case .detachedSafeIdle:
+            guard terminalEntries.isEmpty, reservationEntries.isEmpty else {
+                return required(store, transaction, "detached-history-conflict")
+            }
+            return .detachedIdle(proof.reason)
         case .recoveryRequired:
-            return .recoveryRequired(proof.reason)
+            // Only an installed-helper detached RESTORE may clear the exact
+            // extinction fence written below. It still requires the same
+            // fresh, known-power safe-idle snapshot and empty session ledgers;
+            // no generic recovery-required proof is reclassified.
+            guard permitDetachedContainmentRecovery,
+                  proof.reason == "containment-extinguished-explicit-recovery-required",
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .recoveryRequired(proof.reason) }
+            let detached = RecoveryProof(
+                kind: .detachedSafeIdle,
+                sessionID: nil,
+                reason: "containment-extinguished-detached-safe-idle"
+            )
+            guard store.publishProof(detached, transaction).isVerified else {
+                return required(store, transaction, "detached-safe-idle-proof-unverified")
+            }
+            return .detachedIdle(detached.reason)
         }
     }
 
@@ -1176,6 +1206,11 @@ final class RecoveryCoordinator {
         // reconnect/begin path can auto-rearm.
         switch store.proofRecord() {
         case .absent, .invalid:
+            guard store.markRecoveryRequired(
+                "containment-extinguished-explicit-recovery-required",
+                transaction
+            ).isVerified else { return false }
+        case let .valid(current) where current.kind == .recoveryRequired:
             guard store.markRecoveryRequired(
                 "containment-extinguished-explicit-recovery-required",
                 transaction
@@ -1332,7 +1367,7 @@ final class RecoveryCoordinator {
         case .terminal:
             guard let prior = proof.sessionID, prior != state.sessionID else { return false }
             return terminalEntries.last == prior
-        case .migrated:
+        case .migrated, .detachedSafeIdle:
             return terminalEntries.isEmpty
         case .recoveryRequired:
             return false

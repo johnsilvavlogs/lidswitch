@@ -290,6 +290,14 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(restored.result, 0)
         XCTAssertEqual(restored.state, 0)
         XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(.init(
+                kind: .detachedSafeIdle,
+                sessionID: nil,
+                reason: "containment-extinguished-detached-safe-idle"
+            ))
+        )
         XCTAssertEqual(fixture.power.setCalls, [])
     }
 
@@ -1907,7 +1915,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             return 0
         }, 0)
         XCTAssertEqual(handledTimer.value, 0)
-        XCTAssertEqual(handledListener.value, 0)
+        XCTAssertEqual(handledListener.value, 1)
 
         let transientAuthority = HelperSessionAuthority(
             configuration: handled.configuration,

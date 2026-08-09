@@ -2591,7 +2591,7 @@ final class SessionSafetyTests: XCTestCase {
             "unexpected error: \(controller.errorMessage ?? "nil")"
         )
         XCTAssertEqual(controller.operationPhase, .recoveryRequired)
-        XCTAssertEqual(controller.primaryAction, .restoreSleep)
+        XCTAssertEqual(controller.primaryAction, .prepareHelper)
     }
 
     @MainActor
@@ -4656,7 +4656,7 @@ final class SessionSafetyTests: XCTestCase {
         let bootout = try XCTUnwrap(install.range(of: "/bin/launchctl bootout"))
         let provision = try XCTUnwrap(install.range(of: "provision_output="))
         let recovery = try XCTUnwrap(install.range(of: "recovery_payload="))
-        let deletePrevious = try XCTUnwrap(install.range(of: "/bin/rm -rf \"$previous\""))
+        let deletePrevious = try XCTUnwrap(install.range(of: "remove_verified_runtime_directory \"$previous\""))
         let publishCurrent = try XCTUnwrap(install.range(of: "/bin/mv \"$stage_current\" \"$current\""))
         let bootstrap = try XCTUnwrap(install.range(of: "/bin/launchctl bootstrap system \"$plist\"", options: [], range: publishCurrent.upperBound..<install.endIndex))
         XCTAssertLessThan(stageVerify.lowerBound, bootout.lowerBound)
@@ -4686,7 +4686,8 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallLegacyMarkerDeletion.lowerBound)
         XCTAssertFalse(restore.contains(AppPaths.legacyV4RootHelperVersionPath))
         XCTAssertTrue(uninstall.contains("recovery-proof" ) == false, "private proof is helper-owned, never shell-deleted")
-        XCTAssertFalse(restore.contains("/bin/rm -rf \"$current\" \"$previous\""))
+        let restorePostRecovery = try XCTUnwrap(restore.range(of: "failure_reason=daemon-restart-failed"))
+        XCTAssertFalse(restore[restorePostRecovery.lowerBound...].contains("remove_verified_runtime_directory"))
     }
 
     func testAdministratorCommandSkipsUserZshStartupFiles() {

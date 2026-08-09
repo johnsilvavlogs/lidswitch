@@ -7,6 +7,10 @@ import LidSwitchCore
 enum RecoveryAssessment: Equatable {
     case pristineIdle
     case migratedIdle(String)
+    /// A sessionless safe-idle conclusion reached only after the installed
+    /// helper has retired an exact containment fence. It is not a pristine
+    /// bootstrap: the durable proof retains that prior containment boundary.
+    case detachedIdle(String)
     case terminalIdle(UUID, String)
     case recoveryRequired(String)
     case legacyRestoreOnly(AppliedState)
@@ -17,6 +21,7 @@ struct RecoveryProof: Equatable {
     enum Kind: String {
         case pristine
         case migrated
+        case detachedSafeIdle = "detached-safe-idle"
         case terminal
         case recoveryRequired = "recovery-required"
     }
@@ -60,6 +65,9 @@ struct RecoveryProof: Equatable {
             proof = .init(kind: kind, sessionID: id, reason: reason)
         case .migrated:
             guard session == "none", reason.hasPrefix("legacy-") else { return nil }
+            proof = .init(kind: kind, sessionID: nil, reason: reason)
+        case .detachedSafeIdle:
+            guard session == "none", reason == "containment-extinguished-detached-safe-idle" else { return nil }
             proof = .init(kind: kind, sessionID: nil, reason: reason)
         case .recoveryRequired:
             guard session == "none" else { return nil }

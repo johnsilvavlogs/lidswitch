@@ -175,6 +175,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         case bind(Peer, TimeInterval, Bool)
         case pristineIdle
         case migratedIdle(String)
+        case detachedIdle(String)
         case terminalIdle(UUID, String)
         case recoveryRequired(String)
     }
@@ -250,7 +251,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         switch preparationAssessment {
         case .pristineIdle:
             return startTimerOnly() ? .ready : .transientFailure
-        case .migratedIdle:
+        case .migratedIdle, .detachedIdle:
             return startTimerOnly() ? .ready : .transientFailure
         case let .terminalIdle(session, reason):
             hydrateTerminal(session: session, reason: reason)
@@ -297,6 +298,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                       switch recovered {
                       case .pristineIdle: return .pristineIdle
                       case let .migratedIdle(reason): return .migratedIdle(reason)
+                      case let .detachedIdle(reason): return .detachedIdle(reason)
                       case let .terminalIdle(session, reason): return .terminalIdle(session, reason)
                       case .legacyRestoreOnly, .reconnectCandidate:
                           return .recoveryRequired("startup-recovery-incomplete")
@@ -316,7 +318,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                 reconnectDeadline = min(deadline, monotonicNow() + Self.reconnectGrace)
             case .pristineIdle:
                 activeSession = nil; activePeer = nil; activeConnection = nil; expiry = 0; reconnectDeadline = nil
-            case .migratedIdle:
+            case .migratedIdle, .detachedIdle:
                 activeSession = nil; activePeer = nil; activeConnection = nil; expiry = 0; reconnectDeadline = nil
             case let .terminalIdle(session, reason):
                 activeSession = nil; activePeer = nil; activeConnection = nil; expiry = 0; reconnectDeadline = nil
@@ -593,7 +595,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                 terminalReason: "activation-publication-failed"
             )
             switch outcome {
-            case .pristineIdle, .migratedIdle, .terminalIdle:
+            case .pristineIdle, .migratedIdle, .detachedIdle, .terminalIdle:
                 break
             case .recoveryRequired, .legacyRestoreOnly, .reconnectCandidate:
                 recoveryRequired = true
@@ -1145,6 +1147,9 @@ final class HelperSessionAuthority: @unchecked Sendable {
         case let .migratedIdle(reason):
             recoveryRequired = false
             return snapshot(result: 0, reason: reason, requested: Self.zeroUUID)
+        case let .detachedIdle(reason):
+            recoveryRequired = false
+            return snapshot(result: 0, reason: reason, requested: Self.zeroUUID)
         case let .recoveryRequired(reason):
             recoveryRequired = true
             return snapshot(result: 75, reason: reason, requested: Self.zeroUUID)
@@ -1252,7 +1257,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         switch proof.kind {
         case .pristine:
             return terminalEntries.isEmpty
-        case .migrated:
+        case .migrated, .detachedSafeIdle:
             return terminalEntries.isEmpty && reservationEntries.isEmpty
         case .terminal:
             guard let prior = proof.sessionID, prior != expected.sessionID else { return false }
@@ -1292,7 +1297,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         switch proof.kind {
         case .pristine:
             return terminalEntries.isEmpty && reservationEntries.isEmpty
-        case .migrated:
+        case .migrated, .detachedSafeIdle:
             return terminalEntries.isEmpty && reservationEntries.isEmpty
         case .terminal:
             guard let prior = proof.sessionID else { return false }
@@ -1397,6 +1402,10 @@ enum HelperControlService {
                 return .oneShot(.pristineIdle)
             case let .migratedIdle(reason):
                 return .oneShot(.migratedIdle(reason: reason))
+            case .detachedIdle:
+                // This conclusion is produced only through the authenticated
+                // daemon XPC restore path, never an administrator one-shot.
+                return .oneShot(.internalFailure(reason: "unexpected-detached-idle"))
             case let .terminalIdle(session, reason):
                 return .oneShot(.terminalIdle(sessionID: session, reason: reason))
             case let .recoveryRequired(reason):
