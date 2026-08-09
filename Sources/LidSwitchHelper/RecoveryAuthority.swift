@@ -500,19 +500,25 @@ final class RecoveryAuthorityStore {
         return prepareAuthorityAfterWriterQuiescence()
     }
 
-    func prepareAuthorityAfterWriterQuiescence() -> RecoveryProvisionOutcome {
+    func prepareAuthorityAfterWriterQuiescence(
+        allowInstallPreparationRepair: Bool = false
+    ) -> RecoveryProvisionOutcome {
         return RootStateLock.withExclusive(
             directory: directory,
             timeout: lockTimeout,
             now: lockNow
         ) { transaction in
-            self.prepareAuthorityLocked(transaction)
+            self.prepareAuthorityLocked(
+                transaction,
+                allowInstallPreparationRepair: allowInstallPreparationRepair
+            )
         } ?? .recoveryRequired("root-state-lock-unavailable")
     }
 
     func prepareAuthorityLocked(
         _ transaction: VerifiedRootStateDirectory.Transaction,
-        allowRecoveryRequiredLegacyRetry: Bool = false
+        allowRecoveryRequiredLegacyRetry: Bool = false,
+        allowInstallPreparationRepair: Bool = false
     ) -> RecoveryProvisionOutcome {
         guard reconcileAbandonedPublicationTemporaries(transaction) else {
             return .recoveryRequired("unsafe-authority-root-inventory")
@@ -529,6 +535,40 @@ final class RecoveryAuthorityStore {
         var applied = initialApplied.record
         let proof = proofRecord()
         let journal = journalRecord()
+
+        // A completed uninstall intentionally keeps the terminal ledger and
+        // safe-idle proof as audit evidence. Older helpers retired the entire
+        // reservation inode, however, which left the next installation with a
+        // one-sided private ledger pair that ordinary preparation correctly
+        // treats as ambiguous. Admit only that exact uninstall-produced gap:
+        // the root contains no installed runtime or mutable authority, and a
+        // canonical terminal safe-idle uninstall receipt reconstructs the
+        // retained proof exactly. Restore the proof before the empty ledger so
+        // every crash boundary remains retryable without inventing authority.
+        if allowInstallPreparationRepair,
+           inventory == .fresh,
+           reservation == .absent,
+           applied == .missing,
+           journal == .absent,
+           case let .privateAuthority(terminalEntries, _) = terminal,
+           let retainedProof = retainedUninstallProof(
+               terminalEntries: terminalEntries,
+               currentProof: proof
+           ) {
+            if proof != .valid(retainedProof) {
+                guard publishProof(retainedProof, transaction).isVerified else {
+                    return .recoveryRequired("uninstall-proof-repair-failed")
+                }
+            }
+            guard publishLedger(
+                bytes: "",
+                basename: Self.reservationBasename,
+                transaction: transaction
+            ).isVerified else {
+                return .recoveryRequired("uninstall-reservation-repair-failed")
+            }
+            return .ready
+        }
 
         // Public/legacy-mode applied bytes are never compatible with an
         // already completed pristine, migrated, or terminal conclusion. Check
@@ -625,7 +665,13 @@ final class RecoveryAuthorityStore {
             let hasLegacyApplied: Bool
             if case .legacyRestoreOnly = applied { hasLegacyApplied = true }
             else { hasLegacyApplied = false }
-            let canResumeEmptyPair = existingProof.kind == .pristine
+            // A pristine proof beside only one empty ledger is the durable
+            // boundary left when bootstrap published proof before completing
+            // its ledger pair. Only the explicit Install/Repair administrator
+            // one-shot may resume that preparation; Restore and Uninstall
+            // must keep the incomplete authority fail-closed.
+            let canResumeEmptyPair = (existingProof.kind == .pristine
+                    && allowInstallPreparationRepair)
                 || (existingProof.kind == .recoveryRequired
                     && hasLegacyApplied
                     && allowRecoveryRequiredLegacyRetry)
@@ -1368,6 +1414,75 @@ final class RecoveryAuthorityStore {
         return value
     }
 
+    /// Recognizes only the authority shape emitted by a completed uninstall
+    /// from a prior helper: no runtime/history leaves, no mutable recovery
+    /// state, a private terminal ledger, and a canonical safe-idle uninstall
+    /// receipt whose lineage exactly matches the retained proof. The single
+    /// historical recovery-required reason is admitted so an install that
+    /// already encountered the old one-sided gap can heal on retry.
+    private func retainedUninstallProof(
+        terminalEntries: [UUID],
+        currentProof: ProofRecord
+    ) -> RecoveryProof? {
+        guard containmentReceiptRecord() == .absent,
+              recoveryBudgetRecord() == .absent,
+              statusProjectionTaskRecord() == .absent,
+              directory.entryState(Self.statusProjectionGenerationBasename) == .absent,
+              directory.entryState("helper-status.projection.lock") == .absent,
+              directory.entryState("helper-status.projection-temp") == .absent,
+              Self.legacyHistoryBasenames.allSatisfy({ directory.entryState($0) == .absent }),
+              let names = directory.boundedEntryNames()
+        else { return nil }
+
+        var candidate: RecoveryProof?
+        for name in names.sorted() {
+            guard let transaction = canonicalTransactionID(
+                name,
+                prefix: "administrator-transaction-",
+                suffix: ".receipt"
+            ), case let .legacyMode(raw) = classifiedText(
+                name,
+                maximumBytes: AdministratorTransactionReceipt.maximumBytes
+            ), let receipt = AdministratorTransactionReceipt.parse(raw),
+               receipt.transactionID == transaction,
+               receipt.operation == .uninstall,
+               receipt.state == .terminal,
+               receipt.outcome == .safeIdle
+            else { continue }
+
+            let receiptProof: RecoveryProof
+            if let sessionID = receipt.sessionID {
+                guard terminalEntries.last == sessionID else { continue }
+                receiptProof = RecoveryProof(
+                    kind: .terminal,
+                    sessionID: sessionID,
+                    reason: receipt.reason
+                )
+            } else if receipt.reason == "pristine", terminalEntries.isEmpty {
+                receiptProof = RecoveryProof(kind: .pristine, sessionID: nil, reason: "bootstrap")
+            } else if receipt.reason.hasPrefix("legacy-"), terminalEntries.isEmpty {
+                receiptProof = RecoveryProof(kind: .migrated, sessionID: nil, reason: receipt.reason)
+            } else {
+                continue
+            }
+
+            if let candidate, candidate != receiptProof { return nil }
+            candidate = receiptProof
+        }
+
+        guard let candidate else { return nil }
+        switch currentProof {
+        case let .valid(existing) where existing == candidate:
+            return candidate
+        case let .valid(proof)
+            where proof.kind == .recoveryRequired
+                && proof.reason == "ledger-migration-or-history-ambiguous":
+            return candidate
+        case .absent, .invalid, .valid:
+            return nil
+        }
+    }
+
     private func historicalRegularIsValid(
         _ basename: String,
         expectedMode: mode_t,
@@ -2013,9 +2128,11 @@ final class RecoveryAuthorityStore {
 
     /// Uninstall is a terminal boundary, not merely a stopped daemon. Once the
     /// helper has published safe-idle proof, retire every mutable reservation
-    /// and projection artifact by its exact, parsed basename. The terminal
-    /// ledger and the one safe-idle proof deliberately remain as bounded audit
-    /// evidence; unknown, quarantined, or malformed state refuses cleanup.
+    /// entry and projection artifact by its exact, parsed basename. The empty
+    /// reservation inode stays paired with the terminal ledger so a clean
+    /// reinstall is unambiguous. The terminal ledger and the one safe-idle
+    /// proof deliberately remain as bounded audit evidence; unknown,
+    /// quarantined, or malformed state refuses cleanup.
     func retireUninstallMutableResidue(
         _ transaction: VerifiedRootStateDirectory.Transaction
     ) -> Bool {
@@ -2024,15 +2141,13 @@ final class RecoveryAuthorityStore {
         }
         switch ledger(Self.reservationBasename) {
         case .absent:
-            break
-        case let .privateAuthority(_, bytes):
-            guard removed(transaction.removeOrResume(
-                Self.reservationBasename,
-                maximumBytes: TerminalGenerationLedger.maximumBytes
-            ) { data in
-                guard let raw = String(data: data, encoding: .utf8) else { return false }
-                return raw == bytes && TerminalGenerationLedger.parse(raw) != nil
-            }) else { return false }
+            return false
+        case .privateAuthority:
+            guard publishLedger(
+                bytes: "",
+                basename: Self.reservationBasename,
+                transaction: transaction
+            ).isVerified else { return false }
         case .legacyReadable, .invalid:
             return false
         }
@@ -2071,6 +2186,7 @@ final class RecoveryAuthorityStore {
             }) else { return false }
         }
         return appliedRecord() == .missing
+            && privateLedger(Self.reservationBasename) == []
             && containmentReceiptRecord() == .absent
             && recoveryBudgetRecord() == .absent
             && journalRecord() == .absent

@@ -771,12 +771,15 @@ final class LegacyMigrationFixtureTests: XCTestCase {
         XCTAssertEqual(journaled.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
         XCTAssertNil(journaled.store.proof())
 
-        let bootstrap = try LegacyFixture(disabled: false, ac: nil, battery: nil)
+        let bootstrap = try LegacyFixture(disabled: false, ac: 10, battery: nil)
         defer { bootstrap.dispose() }
         try bootstrap.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [])
         try bootstrap.installProof(.init(kind: .pristine, sessionID: nil, reason: "bootstrap"))
         XCTAssertEqual(bootstrap.coordinator.provision(), .ready)
-        XCTAssertEqual(bootstrap.store.prepareAuthorityAfterWriterQuiescence(), .ready)
+        XCTAssertEqual(
+            bootstrap.coordinator.recover(intent: .install, allowReconnect: false),
+            .pristineIdle
+        )
         XCTAssertEqual(bootstrap.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
         XCTAssertEqual(bootstrap.store.proof()?.kind, .pristine)
 
@@ -785,6 +788,260 @@ final class LegacyMigrationFixtureTests: XCTestCase {
         try unmarkedGap.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [])
         XCTAssertTrue(unmarkedGap.prepareMustFailWithoutSetter())
         XCTAssertEqual(unmarkedGap.store.proof()?.kind, .recoveryRequired)
+    }
+
+    func testPristinePartialBootstrapCannotRepairThroughRestoreOrUninstall() throws {
+        for intent in [RecoveryIntent.userRestore, .uninstall] {
+            let fixture = try LegacyFixture(disabled: false, ac: nil, battery: nil)
+            defer { fixture.dispose() }
+            try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [])
+            try fixture.installProof(.init(kind: .pristine, sessionID: nil, reason: "bootstrap"))
+
+            XCTAssertEqual(fixture.coordinator.provision(), .ready)
+            XCTAssertEqual(
+                fixture.coordinator.recover(intent: intent, allowReconnect: false),
+                .recoveryRequired("ledger-migration-or-history-ambiguous"),
+                "\(intent) must not acquire install-only repair authority"
+            )
+            XCTAssertEqual(fixture.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+            XCTAssertEqual(
+                fixture.store.proof(),
+                RecoveryProof(
+                    kind: .recoveryRequired,
+                    sessionID: nil,
+                    reason: "ledger-migration-or-history-ambiguous"
+                )
+            )
+            XCTAssertEqual(fixture.power.setCalls, [])
+        }
+    }
+
+    func testUninstallRetirementKeepsAnEmptyReservationLedgerForImmediateReinstall() throws {
+        let terminal = UUID()
+        let reserved = UUID()
+        let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+        defer { fixture.dispose() }
+        try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+        try fixture.installPrivateLedger(RecoveryAuthorityStore.reservationBasename, entries: [reserved])
+        let proof = RecoveryProof(kind: .terminal, sessionID: terminal, reason: "peer-process-invalid")
+        try fixture.installProof(proof)
+
+        XCTAssertEqual(fixture.store.provisionLock(), .ready)
+        XCTAssertEqual(
+            fixture.store.withTransaction { fixture.store.retireUninstallMutableResidue($0) },
+            true
+        )
+        XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.terminalBasename), [terminal])
+        XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
+        XCTAssertEqual(fixture.store.proof(), proof)
+        XCTAssertEqual(fixture.store.prepareAuthorityAfterWriterQuiescence(), .ready)
+    }
+
+    func testRetainedUninstallReceiptRepairsOlderOneSidedLedgerAndFailedInstallRetry() throws {
+        let terminal = UUID()
+        let terminalProof = RecoveryProof(
+            kind: .terminal,
+            sessionID: terminal,
+            reason: "peer-process-invalid"
+        )
+        for proof in [
+            terminalProof,
+            RecoveryProof(
+                kind: .recoveryRequired,
+                sessionID: nil,
+                reason: "ledger-migration-or-history-ambiguous"
+            ),
+        ] {
+            let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+            defer { fixture.dispose() }
+            try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+            try fixture.installProof(proof)
+            try fixture.installReceipt(.init(
+                transactionID: UUID(),
+                operation: .uninstall,
+                state: .terminal,
+                outcome: .safeIdle,
+                sessionID: terminal,
+                reason: "peer-process-invalid"
+            ))
+
+            XCTAssertEqual(fixture.store.provisionLock(), .ready)
+            XCTAssertEqual(
+                fixture.store.prepareAuthorityAfterWriterQuiescence(
+                    allowInstallPreparationRepair: true
+                ),
+                .ready
+            )
+            XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
+            XCTAssertEqual(fixture.store.proof(), terminalProof)
+            XCTAssertEqual(fixture.power.setCalls, [])
+        }
+    }
+
+    func testOneSidedTerminalLedgerStillRejectsMissingOrMismatchedUninstallReceipt() throws {
+        for receiptSession in [Optional<UUID>.none, Optional(UUID())] {
+            let terminal = UUID()
+            let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+            defer { fixture.dispose() }
+            try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+            try fixture.installProof(.init(
+                kind: .terminal,
+                sessionID: terminal,
+                reason: "peer-process-invalid"
+            ))
+            if let receiptSession {
+                try fixture.installReceipt(.init(
+                    transactionID: UUID(),
+                    operation: .uninstall,
+                    state: .terminal,
+                    outcome: .safeIdle,
+                    sessionID: receiptSession,
+                    reason: "peer-process-invalid"
+                ))
+            }
+
+            XCTAssertEqual(fixture.store.provisionLock(), .ready)
+            XCTAssertEqual(
+                fixture.store.prepareAuthorityAfterWriterQuiescence(
+                    allowInstallPreparationRepair: true
+                ),
+                .recoveryRequired("ledger-migration-or-history-ambiguous")
+            )
+            XCTAssertEqual(fixture.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+            XCTAssertEqual(fixture.power.setCalls, [])
+        }
+    }
+
+    func testRetainedUninstallReceiptCannotRepairOutsideExplicitInstall() throws {
+        let terminal = UUID()
+        let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+        defer { fixture.dispose() }
+        try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+        try fixture.installProof(.init(
+            kind: .terminal,
+            sessionID: terminal,
+            reason: "peer-process-invalid"
+        ))
+        try fixture.installReceipt(.init(
+            transactionID: UUID(),
+            operation: .uninstall,
+            state: .terminal,
+            outcome: .safeIdle,
+            sessionID: terminal,
+            reason: "peer-process-invalid"
+        ))
+
+        XCTAssertEqual(fixture.store.provisionLock(), .ready)
+        XCTAssertEqual(
+            fixture.coordinator.recover(intent: .userRestore, allowReconnect: false),
+            .recoveryRequired("ledger-migration-or-history-ambiguous")
+        )
+        XCTAssertEqual(fixture.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testWrongOperationReceiptCannotRepairFailedInstallProof() throws {
+        let terminal = UUID()
+        let failed = RecoveryProof(
+            kind: .recoveryRequired,
+            sessionID: nil,
+            reason: "ledger-migration-or-history-ambiguous"
+        )
+        let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+        defer { fixture.dispose() }
+        try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+        try fixture.installProof(failed)
+        try fixture.installReceipt(.init(
+            transactionID: UUID(),
+            operation: .install,
+            state: .terminal,
+            outcome: .safeIdle,
+            sessionID: terminal,
+            reason: "peer-process-invalid"
+        ))
+
+        XCTAssertEqual(fixture.store.provisionLock(), .ready)
+        XCTAssertEqual(
+            fixture.store.prepareAuthorityAfterWriterQuiescence(
+                allowInstallPreparationRepair: true
+            ),
+            .recoveryRequired("ledger-migration-or-history-ambiguous")
+        )
+        XCTAssertEqual(fixture.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+        XCTAssertEqual(fixture.store.proof(), failed)
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testRetainedUninstallRepairRejectsQuarantinedPowerHistory() throws {
+        for basename in [
+            RecoveryAuthorityStore.legacyACBasename,
+            RecoveryAuthorityStore.legacyBatteryBasename,
+        ] {
+            let terminal = UUID()
+            let fixture = try LegacyFixture(disabled: false, ac: 10, battery: 10)
+            defer { fixture.dispose() }
+            try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+            try fixture.installProof(.init(
+                kind: .terminal,
+                sessionID: terminal,
+                reason: "peer-process-invalid"
+            ))
+            try fixture.installReceipt(.init(
+                transactionID: UUID(),
+                operation: .uninstall,
+                state: .terminal,
+                outcome: .safeIdle,
+                sessionID: terminal,
+                reason: "peer-process-invalid"
+            ))
+            try fixture.installLegacyTimer(basename, value: 7)
+            try fixture.quarantine(basename)
+            let quarantine = try XCTUnwrap(VerifiedRootStateDirectory.quarantineBasename(for: basename))
+            let retainedBytes = try fixture.read(quarantine)
+
+            XCTAssertEqual(fixture.store.provisionLock(), .ready)
+            XCTAssertEqual(
+                fixture.store.prepareAuthorityAfterWriterQuiescence(
+                    allowInstallPreparationRepair: true
+                ),
+                .recoveryRequired("ledger-migration-or-history-ambiguous")
+            )
+            XCTAssertEqual(fixture.store.ledger(RecoveryAuthorityStore.reservationBasename), .absent)
+            XCTAssertEqual(try fixture.read(quarantine), retainedBytes)
+            XCTAssertEqual(fixture.power.setCalls, [])
+        }
+    }
+
+    func testCoordinatorExplicitInstallRepairsExactFailedUninstallFootprint() throws {
+        let terminal = UUID()
+        let fixture = try LegacyFixture(disabled: false, ac: 10, battery: nil)
+        defer { fixture.dispose() }
+        try fixture.installPrivateLedger(RecoveryAuthorityStore.terminalBasename, entries: [terminal])
+        try fixture.installProof(.init(
+            kind: .recoveryRequired,
+            sessionID: nil,
+            reason: "ledger-migration-or-history-ambiguous"
+        ))
+        try fixture.installReceipt(.init(
+            transactionID: UUID(),
+            operation: .uninstall,
+            state: .terminal,
+            outcome: .safeIdle,
+            sessionID: terminal,
+            reason: "peer-process-invalid"
+        ))
+
+        XCTAssertEqual(fixture.coordinator.provision(), .ready)
+        XCTAssertEqual(
+            fixture.coordinator.recover(intent: .install, allowReconnect: false),
+            .terminalIdle(terminal, "peer-process-invalid")
+        )
+        XCTAssertEqual(fixture.store.privateLedger(RecoveryAuthorityStore.reservationBasename), [])
+        XCTAssertEqual(
+            fixture.store.proof(),
+            RecoveryProof(kind: .terminal, sessionID: terminal, reason: "peer-process-invalid")
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
     }
 
     func testProofPublishedOrphanCleanupResumesWithoutAnySetter() throws {
@@ -1263,8 +1520,12 @@ private final class LegacyFixture {
 
     func installTransactionReceipt(transaction: UUID) throws {
         let receipt = AdministratorTransactionReceipt.running(transactionID: transaction, operation: .install)
+        try installReceipt(receipt)
+    }
+
+    func installReceipt(_ receipt: AdministratorTransactionReceipt) throws {
         try installRegular(
-            name: "administrator-transaction-\(transaction.uuidString.lowercased()).receipt",
+            name: "administrator-transaction-\(receipt.transactionID.uuidString.lowercased()).receipt",
             bytes: receipt.payload,
             mode: 0o644
         )

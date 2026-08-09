@@ -192,7 +192,8 @@ final class RecoveryCoordinator {
             }
             switch store.prepareAuthorityLocked(
                 transaction,
-                allowRecoveryRequiredLegacyRetry: permitRecoveryRequiredRetry
+                allowRecoveryRequiredLegacyRetry: permitRecoveryRequiredRetry,
+                allowInstallPreparationRepair: intent == .install && !allowReconnect
             ) {
             case .ready:
                 break
