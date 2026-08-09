@@ -117,7 +117,7 @@ struct LidSwitchPanel: View {
             .buttonStyle(.borderedProminent)
             .keyboardShortcut("k", modifiers: [.command])
             .disabled(controller.isBusy && !controller.isCancelRestoring)
-            .accessibilityHint("Clears the remaining system sleep override with administrator approval.")
+            .accessibilityHint("Uses the installed authenticated helper to clear the remaining system sleep override and verify safe idle.")
         } else if controller.primaryAction == .cancelRestoringProgress {
             HStack(spacing: 8) {
                 ProgressView()
@@ -166,7 +166,10 @@ struct LidSwitchPanel: View {
             Button {
                 controller.prepareHelper()
             } label: {
-                Label("Prepare Safe Helper", systemImage: "shield.lefthalf.filled")
+                Label(
+                    controller.snapshot.helperPreparationCTA.title,
+                    systemImage: "shield.lefthalf.filled"
+                )
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -177,7 +180,7 @@ struct LidSwitchPanel: View {
                     || !controller.snapshot.canPrepareHelper
                     || !controller.snapshot.sleepDisabledVerified
             )
-            .accessibilityHint("Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off.")
+            .accessibilityHint(controller.snapshot.helperPreparationCTA.accessibilityHint)
         } else {
             Button {
                 confirmationPresenter.present(.startSession) { controller.startSession() }

@@ -97,8 +97,11 @@ public enum HelperOneShotResult: Equatable, Sendable {
     }
 }
 
-/// Durable app-readable transaction truth. This is a completion receipt, not
-/// recovery authority: private applied/proof/ledger files remain root-only.
+/// Durable app-readable transaction truth. This is not runtime recovery
+/// authority: private applied/proof/ledger files remain root-only. The helper
+/// may use an exact terminal safe-idle uninstall receipt only as a narrow
+/// migration anchor for the one-sided ledger footprint emitted by older
+/// LidSwitch uninstall code; it can never authorize a session or power setter.
 public struct AdministratorTransactionReceipt: Equatable, Sendable {
     public enum State: String, Equatable, Sendable { case running, terminal }
     public enum Outcome: String, Equatable, Sendable {

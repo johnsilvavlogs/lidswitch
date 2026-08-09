@@ -2,14 +2,7 @@
 
 ## Release status
 
-LidSwitch `0.2.14` build `9` is a helper-and-app recovery candidate, not yet a public
-release. Its focused source tests pass; held build, immutable package,
-transactional install, and real menu-bar recovery proof remain release gates.
-Tag `v0.2.14` and its exact DMG remain unpublished. LidSwitch `0.2.12` build `7`, tag `v0.2.12`, remains the
-current public manual release. That public tag points to source commit
-`57d44b5bd566fd768a12705f2778fbb2d2f45375`; its only published asset is
-`LidSwitch.dmg`, whose SHA-256 is
-`0c2d03cafc88ee8d947b4f3551e72e046ce50955fb2946eb56bc8b344669dc00`.
+LidSwitch `0.2.15` build `10` is a source-bound candidate identity, not installed or release-qualified proof. A local immutable candidate path now exists, but it remains blocked until its held build receipt, emitted immutable manifest, benchmark evidence, and native canary are reviewed together.
 
 The release tier is a public manual DMG with ad-hoc signing, no Developer ID
 signature, and no notarization; recipients use Gatekeeper’s **Open Anyway**
@@ -54,12 +47,14 @@ publishers plus their descriptor validation. Legacy `build_dmg.sh` and
 
 ## Validation boundary
 
-The published release was produced through the held build and immutable
-packaging path above, installed transactionally, and accepted only after the
-controlled native canary proved active ownership, peer-process-invalid
-rollback, `SleepDisabled=0`, and no automatic rearm. The release asset and the
-`releases/latest/download/LidSwitch.dmg` response were downloaded independently
-and matched the published digest above.
+This source identity is not a published or release-qualified asset. A candidate
+may be accepted only after the held build and immutable packaging receipts are
+reviewed together, the exact app is installed transactionally, and a controlled
+native canary proves active ownership, peer-process-invalid rollback,
+`SleepDisabled=0`, and no automatic rearm. A future published asset must also be
+downloaded independently from both its versioned release URL and
+`releases/latest/download/LidSwitch.dmg`; both bytes must match the reviewed
+candidate digest before that publication can be claimed here.
 
 Public hygiene is available only as an **observational source scan**:
 

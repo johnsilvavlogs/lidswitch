@@ -927,6 +927,23 @@ final class RawXPCSecurityTests: XCTestCase {
         XCTAssertTrue(try self.source("Sources/LidSwitch/Services/PowerController.swift").contains("\"install-migration\""))
     }
 
+    func testRoutineRestoreProductionPathUsesInstalledHelperAndCannotInvokeAdministratorInstaller() throws {
+        let controllerSource = try source("Sources/LidSwitch/Services/PowerController.swift")
+        let restoreStart = try XCTUnwrap(controllerSource.range(of: "restoreSleep: {"))
+        let restoreSuffix = controllerSource[restoreStart.lowerBound...]
+        let restoreEnd = try XCTUnwrap(restoreSuffix.range(of: "        uninstallHelper: {"))
+        let restore = String(restoreSuffix[..<restoreEnd.lowerBound])
+
+        XCTAssertTrue(restore.contains("client.restoreThroughInstalledHelper()"))
+        XCTAssertFalse(restore.contains("PrivilegedHelperManager"))
+        XCTAssertFalse(restore.contains("SecureHelperInstaller"))
+        XCTAssertFalse(restore.contains("administrator"))
+
+        let manager = try source("Sources/LidSwitch/Services/PrivilegedHelperManager.swift")
+        XCTAssertFalse(manager.contains("restoreSleepNow"))
+        XCTAssertTrue(manager.contains("repairMissingHelperAndRestore"))
+    }
+
     private func fixturePolicy() -> EnrollmentPolicy {
         EnrollmentPolicy(ownerUID: 501, profile: .manualExact, appIdentifier: "com.example.App",
                          appCDHash: Data(repeating: 1, count: 20), helperIdentifier: "com.example.Helper",

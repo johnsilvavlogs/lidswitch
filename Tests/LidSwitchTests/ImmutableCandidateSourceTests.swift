@@ -9,6 +9,14 @@ final class ImmutableCandidateSourceTests: XCTestCase {
     private let digest = Data(repeating: 0x11, count: 32)
     private let cdhash = Data(repeating: 0x22, count: 20)
 
+    private func repositorySource(_ relative: String) throws -> String {
+        try String(
+            contentsOfFile: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent(relative).path,
+            encoding: .utf8
+        )
+    }
+
     private func anchor(
         channel: String = ReleaseIdentity.channel,
         helperDigest: Data? = nil,
@@ -116,6 +124,10 @@ final class ImmutableCandidateSourceTests: XCTestCase {
     func testFrozenTransferReceiptRejectsUnsafeSourceCapabilityMetadata() {
         let transfer = SecureHelperInstaller.FrozenHelperTransfer(
             sourcePath: "/Users/fixture/.lidswitch-frozen/00000000-0000-4000-8000-000000000001/LidSwitchHelper",
+            stageParentPath: "/Users/fixture/.lidswitch-frozen",
+            stageName: "00000000-0000-4000-8000-000000000001",
+            stageDevice: 10, stageInode: 19, stageOwnerUID: 501, stageOwnerGID: 20,
+            stageMode: UInt32(S_IFDIR | 0o700),
             sourceDevice: 10,
             sourceInode: 20,
             sourceOwnerUID: 501,
@@ -129,28 +141,44 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         )
         XCTAssertTrue(transfer.isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            sourcePath: "relative/LidSwitchHelper", sourceDevice: transfer.sourceDevice,
+            sourcePath: "relative/LidSwitchHelper", stageParentPath: transfer.stageParentPath,
+            stageName: transfer.stageName, stageDevice: transfer.stageDevice,
+            stageInode: transfer.stageInode, stageOwnerUID: transfer.stageOwnerUID,
+            stageOwnerGID: transfer.stageOwnerGID, stageMode: transfer.stageMode,
+            sourceDevice: transfer.sourceDevice,
             sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
             sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
             sourceLinks: transfer.sourceLinks, sha256: transfer.sha256, size: transfer.size,
             identifier: transfer.identifier, cdhash: transfer.cdhash
         ).isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourcePath: transfer.sourcePath, stageParentPath: transfer.stageParentPath,
+            stageName: transfer.stageName, stageDevice: transfer.stageDevice,
+            stageInode: transfer.stageInode, stageOwnerUID: transfer.stageOwnerUID,
+            stageOwnerGID: transfer.stageOwnerGID, stageMode: transfer.stageMode,
+            sourceDevice: transfer.sourceDevice,
             sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
             sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: UInt32(S_IFREG | 0o755),
             sourceLinks: transfer.sourceLinks, sha256: transfer.sha256, size: transfer.size,
             identifier: transfer.identifier, cdhash: transfer.cdhash
         ).isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourcePath: transfer.sourcePath, stageParentPath: transfer.stageParentPath,
+            stageName: transfer.stageName, stageDevice: transfer.stageDevice,
+            stageInode: transfer.stageInode, stageOwnerUID: transfer.stageOwnerUID,
+            stageOwnerGID: transfer.stageOwnerGID, stageMode: transfer.stageMode,
+            sourceDevice: transfer.sourceDevice,
             sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
             sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
             sourceLinks: 2, sha256: transfer.sha256, size: transfer.size,
             identifier: transfer.identifier, cdhash: transfer.cdhash
         ).isSelfConsistent)
         XCTAssertFalse(SecureHelperInstaller.FrozenHelperTransfer(
-            sourcePath: transfer.sourcePath, sourceDevice: transfer.sourceDevice,
+            sourcePath: transfer.sourcePath, stageParentPath: transfer.stageParentPath,
+            stageName: transfer.stageName, stageDevice: transfer.stageDevice,
+            stageInode: transfer.stageInode, stageOwnerUID: transfer.stageOwnerUID,
+            stageOwnerGID: transfer.stageOwnerGID, stageMode: transfer.stageMode,
+            sourceDevice: transfer.sourceDevice,
             sourceInode: transfer.sourceInode, sourceOwnerUID: transfer.sourceOwnerUID,
             sourceOwnerGID: transfer.sourceOwnerGID, sourceMode: transfer.sourceMode,
             sourceLinks: transfer.sourceLinks, sha256: Data(), size: transfer.size,
@@ -165,6 +193,13 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         XCTAssertTrue(script.contains("$before[1] == $expected_ino"))
         XCTAssertTrue(script.contains("Digest::SHA->new(256)"))
         XCTAssertTrue(script.contains("O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW"))
+        XCTAssertTrue(script.contains("receipt-ring-parse"))
+        XCTAssertTrue(script.contains("while (@terminal > $terminal_limit)"))
+        XCTAssertTrue(script.contains("receipt-ring-unlink"))
+        XCTAssertTrue(script.contains("receipt-ring-running-unlink"))
+        XCTAssertTrue(script.contains("my $terminal_limit = $current_is_running ? 7 : 8"))
+        XCTAssertTrue(script.contains("remove_verified_runtime_directory"))
+        XCTAssertFalse(script.contains("/bin/rm -rf \"$current\" \"$previous\""))
         XCTAssertFalse(script.contains("helper_payload_base64="))
         XCTAssertFalse(script.contains("MMIME::Base64=decode_base64"))
 
@@ -193,6 +228,29 @@ final class ImmutableCandidateSourceTests: XCTestCase {
         ))
         XCTAssertFalse(runnerInvoked)
         XCTAssertThrowsError(try SecureHelperInstaller.perform(.install, using: DenyingAdapter()))
+    }
+
+    func testTerminalOrNoChildResultRetiresOnlyItsExactFrozenStage() throws {
+        let installer = try repositorySource("Sources/LidSwitch/Services/SecureHelperInstaller.swift")
+        XCTAssertTrue(installer.contains("if case .completionIndeterminate = result { return result }"))
+        XCTAssertTrue(installer.contains("try retireFrozenStage(enrollment.transfer)"))
+        XCTAssertTrue(installer.contains("directoryInventoryMatches(stage, expectedLeaf: \"LidSwitchHelper\")"))
+        XCTAssertTrue(installer.contains("unlinkat(stage, \"LidSwitchHelper\", 0)"))
+        XCTAssertTrue(installer.contains("unlinkat(parent, transfer.stageName, AT_REMOVEDIR)"))
+        XCTAssertFalse(installer.contains("rm -rf \"$stageParentPath\""))
+    }
+
+    func testUninstallRetiresOnlyParsedMutableAuthorityResidue() throws {
+        let authority = try repositorySource("Sources/LidSwitchHelper/RecoveryAuthority.swift")
+        let coordinator = try repositorySource("Sources/LidSwitchHelper/RecoveryCoordinator.swift")
+        let entrypoint = try repositorySource("Sources/LidSwitchHelper/main.swift")
+        XCTAssertTrue(authority.contains("func retireUninstallMutableResidue"))
+        XCTAssertTrue(authority.contains("Self.reservationBasename"))
+        XCTAssertTrue(authority.contains("Self.statusProjectionGenerationBasename"))
+        XCTAssertTrue(authority.contains("containmentReceiptRecord() == .absent"))
+        XCTAssertTrue(coordinator.contains("func retireUninstallMutableResidue() -> Bool"))
+        XCTAssertTrue(entrypoint.contains("uninstall-residue-retirement-failed"))
+        XCTAssertTrue(entrypoint.contains("operation == .uninstall"))
     }
 
     func testImmutableDirectoryOpenFlagsAreKernelCompatibleAndRejectSymlinkAncestors() throws {

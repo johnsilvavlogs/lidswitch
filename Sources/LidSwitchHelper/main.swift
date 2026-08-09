@@ -35,10 +35,15 @@ case let .oneShot(result):
             emitted.payload.withCString { fputs($0, stdout) }
             exit(emitted.exitCode)
         }
+        if operation == .uninstall,
+           result.exitCode == 0,
+           !RecoveryCoordinator(configuration: configuration, power: SystemPowerSystem()).retireUninstallMutableResidue() {
+            emitted = .internalFailure(reason: "uninstall-residue-retirement-failed")
+        }
         payload = AdministratorTransactionReceipt.terminal(
             transactionID: transaction,
             operation: operation,
-            helperResult: result
+            helperResult: emitted
         ).payload
     }
     payload.withCString { fputs($0, stdout) }

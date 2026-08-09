@@ -238,44 +238,590 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.power.setCalls, [])
     }
 
-    func testAdministratorOneShotSynchronouslyRetiresExactExpiredTerminalContainmentWithoutSecondMutation() throws {
-        let fixture = try Fixture()
-        defer { fixture.dispose() }
+    private func installDetachedRecoveryRequiredContainment(in fixture: Fixture) throws {
         let identity = ContainedProcessIdentity(
-            pid: Int32.max - 3,
+            pid: Int32.max - 1,
             startSeconds: 10,
             startMicroseconds: 1
         )
         let priorOwner = UUID()
-        // Production-shaped v4 residue: the old owner reached TERM, made no
-        // signal/reap claim, and every original deadline is already expired.
-        let terminal = ContainedProcessReceipt(
+        let base = ContainedProcessReceipt(
             token: UUID(),
             executable: "/usr/bin/pmset",
             commandFingerprint: "0123456789abcdef",
             leader: identity,
             members: [.init(identity: identity, executable: "/usr/bin/pmset", commandFingerprint: "0123456789abcdef")],
             processGroupID: identity.pid,
-            sessionID: Int32.max - 4,
+            sessionID: Int32.max - 2,
             rootDeadlineNanoseconds: 10,
-            cleanupDeadlineNanoseconds: 20,
-            phase: .term,
-            termSignalIssued: false,
-            killSignalIssued: false,
-            leaderReaped: false,
-            reapAttemptCount: 3,
-            cleanupOwnerToken: priorOwner,
-            ownerDeadlineNanoseconds: 30
+            cleanupDeadlineNanoseconds: 20
         )
+        let claimed = try XCTUnwrap(base.claimed(by: priorOwner, until: 30))
+        let receipt = try XCTUnwrap(claimed.advancing(to: .ambiguous, owner: priorOwner, deadline: 30))
         XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
-            fixture.store.publishInitialContainmentReceipt(terminal, $0)
+            fixture.store.publishInitialContainmentReceipt(receipt, $0)
         }))
+        XCTAssertTrue(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.markRecoveryRequired("containment-pending", $0).isVerified
+        }))
+    }
 
-        XCTAssertEqual(
-            fixture.coordinator.recover(intent: .install, allowReconnect: false),
-            .pristineIdle
+    func testDetachedTransitionPendingProofParserRequiresExactSessionShape() throws {
+        let terminal = UUID()
+        let validTerminal = try XCTUnwrap(RecoveryProof.detachedTransitionPending(
+            .terminal,
+            terminalSession: terminal
+        ))
+        XCTAssertEqual(RecoveryProof.parse(validTerminal.payload), validTerminal)
+
+        for disposition in [
+            RecoveryProof.DetachedTransitionDisposition.pristine,
+            .migrated,
+            .detached,
+        ] {
+            let valid = try XCTUnwrap(RecoveryProof.detachedTransitionPending(disposition))
+            XCTAssertEqual(RecoveryProof.parse(valid.payload), valid)
+            XCTAssertNil(RecoveryProof.parse(valid.payload.replacingOccurrences(of: "session=none", with: "session=garbage")))
+            XCTAssertNil(RecoveryProof.parse(valid.payload.replacingOccurrences(of: "session=none", with: "session=\(terminal.uuidString.lowercased())")))
+        }
+        XCTAssertNil(RecoveryProof.parse(validTerminal.payload.replacingOccurrences(of: "session=\(terminal.uuidString.lowercased())", with: "session=none")))
+        XCTAssertNil(RecoveryProof.parse(validTerminal.payload.replacingOccurrences(of: "session=\(terminal.uuidString.lowercased())", with: "session=garbage")))
+    }
+
+    func testRecoveryListenerRetiresExactContainmentThenPerformsDetachedRestore() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+
+        let timerStarts = IntegerBox()
+        let projected = StatusProjectionTaskBox()
+
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in
+                projected.append(task)
+                return fixture.statusWriteOutcome(task: task)
+            },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in timerStarts.increment(); return NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
         )
+        XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let restored = authority.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
+        )
+
+        XCTAssertEqual(restored.result, 0)
+        XCTAssertEqual(restored.state, 0)
         XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
+        XCTAssertEqual(timerStarts.value, 1)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .absent)
+        XCTAssertEqual(projected.values.count, 1)
+        XCTAssertEqual(projected.values.first?.state, "inactive")
+        XCTAssertEqual(projected.values.first?.reason, "containment-extinguished-detached-safe-idle")
+        XCTAssertNil(projected.values.first?.sessionID)
+        let inactiveStatus = try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(inactiveStatus.hasPrefix("state=inactive\nreason=containment-extinguished-detached-safe-idle\nsession=none\n"))
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(.init(
+                kind: .detachedSafeIdle,
+                sessionID: nil,
+                reason: "containment-extinguished-detached-safe-idle"
+            ))
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        // The same production authority entrypoint accepts BEGIN only after
+        // detached RESTORE established its one normal reconciliation timer.
+        let begin = authority.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+            sessionID: UUID()
+        )
+        XCTAssertEqual(begin.result, 0)
+        XCTAssertEqual(timerStarts.value, 1)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(projected.values.count, 2)
+        XCTAssertEqual(projected.values.last?.state, "active")
+    }
+
+    func testDetachedTransitionPendingRetriesAfterTimerRepairAcrossRelaunch() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+        let failedTimerStarts = IntegerBox()
+        let failed = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in failedTimerStarts.increment(); return nil },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        XCTAssertEqual(failed.prepareBeforeListening(), .recoveryListenerOnly)
+
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        let firstRestore = failed.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(firstRestore.result, 75)
+        XCTAssertEqual(firstRestore.state, 3)
+        XCTAssertEqual(failedTimerStarts.value, 1)
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(try XCTUnwrap(RecoveryProof.detachedTransitionPending(.detached)))
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        // A still-broken dependency is not a one-shot bypass. Every later
+        // authenticated RESTORE stays fenced and leaves the same typed proof
+        // in place until a normal reconciliation timer can actually start.
+        let persistentFailure = failed.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(persistentFailure.result, 75)
+        XCTAssertEqual(persistentFailure.state, 3)
+        XCTAssertEqual(failedTimerStarts.value, 2)
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(try XCTUnwrap(RecoveryProof.detachedTransitionPending(.detached)))
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        let recoveredTimerStarts = IntegerBox()
+        let relaunched = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in recoveredTimerStarts.increment(); return NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        XCTAssertEqual(relaunched.prepareBeforeListening(), .recoveryListenerOnly)
+
+        // A relaunch may expose only the recovery listener from this typed
+        // pending proof. It cannot BEGIN before the repaired detached RESTORE.
+        let prematureBegin = relaunched.handle(
+            connection: 3,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+            sessionID: UUID()
+        )
+        XCTAssertEqual(prematureBegin.result, 75)
+        XCTAssertEqual(recoveredTimerStarts.value, 0)
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        let secondRestore = relaunched.handle(
+            connection: 4,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(secondRestore.result, 0)
+        XCTAssertEqual(secondRestore.state, 0)
+        XCTAssertEqual(recoveredTimerStarts.value, 1)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .absent)
+        let recoveredStatus = try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(recoveredStatus.hasPrefix(
+            "state=inactive\nreason=containment-extinguished-detached-safe-idle\nsession=none\n"
+        ))
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(.init(
+                kind: .detachedSafeIdle,
+                sessionID: nil,
+                reason: "containment-extinguished-detached-safe-idle"
+            ))
+        )
+
+        let begin = relaunched.handle(
+            connection: 5,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+            sessionID: UUID()
+        )
+        XCTAssertEqual(begin.result, 0)
+        XCTAssertEqual(recoveredTimerStarts.value, 1)
+    }
+
+    func testDetachedTransitionPendingRetriesAfterProjectionRepair() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+        try fixture.createPrivateFile(
+            RecoveryAuthorityStore.statusProjectionBasename,
+            bytes: "not-a-status-projection\n"
+        )
+        let timerStarts = IntegerBox()
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in timerStarts.increment(); return NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        let firstRestore = authority.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(firstRestore.result, 75)
+        XCTAssertEqual(firstRestore.state, 3)
+        XCTAssertEqual(timerStarts.value, 1)
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(try XCTUnwrap(RecoveryProof.detachedTransitionPending(.detached)))
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        let invalidTaskPath = fixture.sandbox.url
+            .appendingPathComponent(RecoveryAuthorityStore.statusProjectionBasename)
+            .path
+        XCTAssertEqual(unlink(invalidTaskPath), 0)
+        let secondRestore = authority.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(secondRestore.result, 0)
+        XCTAssertEqual(secondRestore.state, 0)
+        XCTAssertEqual(timerStarts.value, 1)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .absent)
+        let recoveredStatus = try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(recoveredStatus.hasPrefix(
+            "state=inactive\nreason=containment-extinguished-detached-safe-idle\nsession=none\n"
+        ))
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testDetachedTransitionPendingSurvivesFinalProofFailureAndRelaunch() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+
+        let first = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in nil },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        XCTAssertEqual(first.prepareBeforeListening(), .recoveryListenerOnly)
+
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        XCTAssertEqual(first.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        ).result, 75)
+        let pending = try XCTUnwrap(RecoveryProof.detachedTransitionPending(.detached))
+        XCTAssertEqual(fixture.store.proofRecord(), .valid(pending))
+
+        // The next RESTORE starts its normal timer and durably enqueues fresh
+        // status, but the final safe-proof rename fails. This models the last
+        // crash/write boundary: the typed fence must remain authoritative even
+        // though the public projection can already say inactive.
+        try fixture.activateFault(.proofPreRename)
+        let faultedTimerStarts = IntegerBox()
+        let faulted = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in faultedTimerStarts.increment(); return NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        XCTAssertEqual(faulted.prepareBeforeListening(), .recoveryListenerOnly)
+        let failedFinalPublication = faulted.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(failedFinalPublication.result, 75)
+        XCTAssertEqual(failedFinalPublication.state, 3)
+        XCTAssertEqual(faultedTimerStarts.value, 1)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(fixture.store.proofRecord(), .valid(pending))
+        XCTAssertEqual(fixture.power.setCalls, [])
+
+        // A new process must still start recovery-listener-only. Once the
+        // proof publication dependency is repaired, authenticated RESTORE can
+        // publish safe authority last and only then make BEGIN eligible.
+        try fixture.activateStore(lockTimeout: 1)
+        let relaunchedTimerStarts = IntegerBox()
+        let relaunched = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in relaunchedTimerStarts.increment(); return NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        XCTAssertEqual(relaunched.prepareBeforeListening(), .recoveryListenerOnly)
+        let restored = relaunched.handle(
+            connection: 3,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        )
+        XCTAssertEqual(restored.result, 0)
+        XCTAssertEqual(restored.state, 0)
+        XCTAssertEqual(relaunchedTimerStarts.value, 1)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(.init(
+                kind: .detachedSafeIdle,
+                sessionID: nil,
+                reason: "containment-extinguished-detached-safe-idle"
+            ))
+        )
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testDetachedTransitionPendingRetainsEveryOriginalAuthorityClass() throws {
+        func exercise(
+            _ disposition: RecoveryProof.DetachedTransitionDisposition,
+            expectedKind: RecoveryProof.Kind
+        ) throws {
+            let fixture = try Fixture()
+            defer { fixture.dispose() }
+            let terminalSession = UUID()
+            switch disposition {
+            case .pristine:
+                break
+            case .migrated:
+                XCTAssertTrue(fixture.publishProof(.init(
+                    kind: .migrated,
+                    sessionID: nil,
+                    reason: "legacy-transition-fixture"
+                )))
+            case .detached:
+                XCTAssertTrue(fixture.publishProof(.init(
+                    kind: .detachedSafeIdle,
+                    sessionID: nil,
+                    reason: "containment-extinguished-detached-safe-idle"
+                )))
+            case .terminal:
+                XCTAssertTrue(fixture.record(terminalSession, in: RecoveryAuthorityStore.terminalBasename))
+                XCTAssertTrue(fixture.publishProof(.init(
+                    kind: .terminal,
+                    sessionID: terminalSession,
+                    reason: "terminal-transition-fixture"
+                )))
+            }
+
+            let failed = HelperSessionAuthority(
+                configuration: fixture.configuration,
+                power: fixture.power,
+                recoveryStoreFactory: { _ in fixture.store },
+                peerIsLive: { _ in true },
+                bootIdentity: { Self.boot },
+                timerStarter: { _ in nil },
+                recoveryCoordinatorFactory: { fixture.coordinator }
+            )
+            var peer = ls_peer_identity_t()
+            XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+            let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            XCTAssertEqual(
+                failed.handle(
+                    connection: 1,
+                    peer: peer,
+                    operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+                    sessionID: zero
+                ).result,
+                75
+            )
+            XCTAssertEqual(
+                fixture.store.proofRecord(),
+                .valid(try XCTUnwrap(RecoveryProof.detachedTransitionPending(
+                    disposition,
+                    terminalSession: disposition == .terminal ? terminalSession : nil
+                )))
+            )
+
+            let restarted = HelperSessionAuthority(
+                configuration: fixture.configuration,
+                power: fixture.power,
+                recoveryStoreFactory: { _ in fixture.store },
+                peerIsLive: { _ in true },
+                bootIdentity: { Self.boot },
+                timerStarter: { _ in NSObject() },
+                recoveryCoordinatorFactory: { fixture.coordinator }
+            )
+            XCTAssertEqual(restarted.prepareBeforeListening(), .recoveryListenerOnly)
+            let retried = restarted.handle(
+                connection: 2,
+                peer: peer,
+                operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+                sessionID: zero
+            )
+            XCTAssertEqual(retried.result, 0)
+            guard case let .valid(proof) = fixture.store.proofRecord() else {
+                return XCTFail("retry must publish its original authority class")
+            }
+            XCTAssertEqual(proof.kind, expectedKind)
+            XCTAssertEqual(proof.sessionID, disposition == .terminal ? terminalSession : nil)
+        }
+
+        try exercise(.pristine, expectedKind: .pristine)
+        try exercise(.migrated, expectedKind: .migrated)
+        try exercise(.detached, expectedKind: .detachedSafeIdle)
+        try exercise(.terminal, expectedKind: .terminal)
+    }
+
+    func testOnlyTypedDetachedTransitionPendingCanRetryAndConflictsStayBlocked() throws {
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+        let generic = try Fixture()
+        defer { generic.dispose() }
+        XCTAssertTrue(generic.publishProof(.init(
+            kind: .recoveryRequired,
+            sessionID: nil,
+            reason: "generic-recovery-required"
+        )))
+        let genericAuthority = HelperSessionAuthority(
+            configuration: generic.configuration,
+            power: generic.power,
+            recoveryStoreFactory: { _ in generic.store },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() },
+            recoveryCoordinatorFactory: { generic.coordinator }
+        )
+        XCTAssertEqual(genericAuthority.prepareBeforeListening(), .recoveryListenerOnly)
+        XCTAssertEqual(genericAuthority.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        ).result, 75)
+        XCTAssertEqual(genericAuthority.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+            sessionID: UUID()
+        ).result, 75)
+        XCTAssertEqual(generic.power.setCalls, [])
+
+        let conflicting = try Fixture()
+        defer { conflicting.dispose() }
+        XCTAssertTrue(conflicting.publishProof(try XCTUnwrap(RecoveryProof.detachedTransitionPending(.detached))))
+        XCTAssertTrue(conflicting.record(UUID(), in: RecoveryAuthorityStore.terminalBasename))
+        let conflictingAuthority = HelperSessionAuthority(
+            configuration: conflicting.configuration,
+            power: conflicting.power,
+            recoveryStoreFactory: { _ in conflicting.store },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() },
+            recoveryCoordinatorFactory: { conflicting.coordinator }
+        )
+        XCTAssertEqual(conflictingAuthority.prepareBeforeListening(), .recoveryListenerOnly)
+        XCTAssertEqual(conflictingAuthority.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: zero
+        ).result, 75)
+        XCTAssertEqual(conflictingAuthority.handle(
+            connection: 2,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+            sessionID: UUID()
+        ).result, 75)
+        XCTAssertEqual(conflicting.power.setCalls, [])
+    }
+
+    func testTimerlessPristineBeginDurablyProjectsRecoveryRequiredAndCannotMutatePower() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let projected = StatusProjectionTaskBox()
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in
+                projected.append(task)
+                return fixture.statusWriteOutcome(task: task)
+            },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in XCTFail("BEGIN must not create a reconciliation timer"); return nil },
+            recoveryCoordinatorFactory: { fixture.coordinator }
+        )
+        // Do not call prepareBeforeListening(): this reaches the production
+        // BEGIN guard from a valid pristine proof with no timer token.
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let begin = authority.handle(
+            connection: 1,
+            peer: peer,
+            operation: UInt32(LS_OPERATION_BEGIN.rawValue),
+            sessionID: UUID()
+        )
+
+        XCTAssertEqual(begin.result, 75)
+        XCTAssertEqual(begin.state, 3)
+        XCTAssertEqual(
+            fixture.store.proofRecord(),
+            .valid(.init(kind: .recoveryRequired, sessionID: nil, reason: "reconciliation-timer-unavailable"))
+        )
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .absent)
+        XCTAssertEqual(projected.values.count, 1)
+        XCTAssertEqual(projected.values.first?.state, "recovery-required")
+        XCTAssertEqual(projected.values.first?.reason, "reconciliation-timer-unavailable")
+        XCTAssertNil(projected.values.first?.sessionID)
+        let recoveryStatus = try String(contentsOfFile: fixture.configuration.statusPath, encoding: .utf8)
+        XCTAssertTrue(recoveryStatus.hasPrefix("state=recovery-required\nreason=reconciliation-timer-unavailable\nsession=none\n"))
         XCTAssertEqual(fixture.power.setCalls, [])
     }
 
@@ -323,7 +869,6 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertEqual(fixture.store.containmentReceiptRecord(), .valid(receipt))
         XCTAssertEqual(fixture.power.setCalls, [])
     }
-
     /// Exercises the production connected timer entrypoint.  It deliberately
     /// enters through BEGIN, privateAuthorityMatches and tickLocked rather
     /// than calling the recovery-budget helper directly.
@@ -344,6 +889,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             timerStarter: { _ in NSObject() },
             recoveryCoordinatorFactory: { fixture.coordinator }
         )
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
         let session = UUID()
         XCTAssertEqual(authority.handle(connection: 1, peer: peer,
                                         operation: UInt32(LS_OPERATION_BEGIN.rawValue), sessionID: session).result, 0)
@@ -440,6 +986,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             timerStarter: { _ in NSObject() },
             recoveryCoordinatorFactory: { fixture.coordinator }
         )
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
         let session = UUID()
         XCTAssertEqual(authority.handle(connection: 1, peer: peer,
                                         operation: UInt32(LS_OPERATION_BEGIN.rawValue), sessionID: session).result, 0)
@@ -499,6 +1046,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             timerStarter: { _ in NSObject() },
             recoveryCoordinatorFactory: { fixture.coordinator }
         )
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
         let session = UUID()
         XCTAssertEqual(authority.handle(connection: 1, peer: peer,
                                         operation: UInt32(LS_OPERATION_BEGIN.rawValue), sessionID: session).result, 0)
@@ -1815,7 +2363,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             listenerCalls.increment()
             return 0
         }, 0)
-        XCTAssertEqual(listenerCalls.value, 0)
+        XCTAssertEqual(listenerCalls.value, 1, "durable recovery keeps only the authenticated restore listener alive")
         guard case let .terminalIdle(actual, reason) = fixture.coordinator.recover(intent: .userRestore, allowReconnect: false) else {
             return XCTFail("operator one-shot must receive one restore-only retry")
         }
@@ -1894,7 +2442,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             return 0
         }, 0)
         XCTAssertEqual(handledTimer.value, 0)
-        XCTAssertEqual(handledListener.value, 0)
+        XCTAssertEqual(handledListener.value, 1)
 
         let transientAuthority = HelperSessionAuthority(
             configuration: handled.configuration,
@@ -2412,4 +2960,18 @@ private final class IntegerBox {
     func increment() { lock.lock(); storage += 1; lock.unlock() }
     func set(_ value: Int) { lock.lock(); storage = value; lock.unlock() }
     var value: Int { lock.lock(); defer { lock.unlock() }; return storage }
+}
+
+private final class StatusProjectionTaskBox {
+    private let lock = NSLock()
+    private var storage: [StatusProjectionTask] = []
+
+    func append(_ task: StatusProjectionTask) {
+        lock.lock(); storage.append(task); lock.unlock()
+    }
+
+    var values: [StatusProjectionTask] {
+        lock.lock(); defer { lock.unlock() }
+        return storage
+    }
 }

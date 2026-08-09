@@ -538,7 +538,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         await assertEventually { replies.read { $0.count } == 1 }
         XCTAssertEqual(replies.read { $0 }, [false])
         XCTAssertFalse(controller.isBusy)
-        XCTAssertEqual(controller.operationPhase, .idle)
+        XCTAssertEqual(controller.operationPhase, .recoveryRequired)
         XCTAssertEqual(controller.primaryAction, .restoreSleep)
 
         releaseRollback.signal()
@@ -828,7 +828,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         }
 
         XCTAssertEqual(controller.snapshot, stalePending)
-        XCTAssertEqual(controller.displayedStatus.title, "Recovery required")
+        XCTAssertEqual(controller.displayedStatus.title, "Restore required")
         XCTAssertEqual(controller.displayedStatus.tone, .warning)
         XCTAssertEqual(controller.primaryAction, .stopAndRestore)
         XCTAssertFalse(controller.displayedStatus.accessibilityState.contains("Protection active"))
@@ -924,7 +924,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         current.mutate { $0 = failure }
         releaseWaiter.signal()
         await assertEventually {
-            !controller.isBusy && controller.operationPhase == .idle
+            !controller.isBusy && controller.operationPhase == .recoveryRequired
         }
         XCTAssertEqual(controller.snapshot, failure)
         XCTAssertEqual(controller.displayedStatus.title, "Restore required")
@@ -1298,7 +1298,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
             !controller.isBusy && controller.operationPhase == .recoveryRequired
         }
         XCTAssertEqual(controller.snapshot, unsafe)
-        XCTAssertEqual(controller.displayedStatus.title, "Recovery required")
+        XCTAssertEqual(controller.displayedStatus.title, "Restore required")
         XCTAssertTrue(controller.requiresTerminationCleanup)
         XCTAssertNotNil(controller.cleanupOwnerSessionIDForTesting)
         XCTAssertEqual(events.read { $0.filter { $0 == "remote-restore" }.count }, 1)
@@ -1341,7 +1341,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
 
         XCTAssertEqual(controller.cleanupOwnerSessionIDForTesting, retainedSessionID)
         XCTAssertEqual(controller.operationPhase, .recoveryRequired)
-        XCTAssertEqual(controller.displayedStatus.title, "Recovery required")
+        XCTAssertEqual(controller.displayedStatus.title, "Restore required")
         XCTAssertEqual(controller.primaryAction, .restoreSleep)
         XCTAssertTrue(controller.requiresTerminationCleanup)
         XCTAssertTrue(controller.errorMessage?.contains("try Restore Sleep again") == true)

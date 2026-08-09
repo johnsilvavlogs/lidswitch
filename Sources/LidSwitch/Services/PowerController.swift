@@ -66,6 +66,13 @@ enum PowerControllerPrimaryAction: Equatable, Sendable {
         if operationPhase == .starting { return .cancelStart }
         // Authoritative safety actions outrank any outstanding rollback waiter.
         if snapshot.sessionActive || snapshot.sessionPending { return .stopAndRestore }
+        // Restore is prompt-free only through an already-installed,
+        // authenticated helper. If its installation is unavailable or invalid,
+        // route to the explicit one-time preparation/repair boundary instead
+        // of looping an impossible Restore action.
+        if (snapshot.restoreRequired || operationPhase == .recoveryRequired), !snapshot.helperReady {
+            return .prepareHelper
+        }
         if snapshot.restoreRequired { return .restoreSleep }
         if operationPhase == .recoveryRequired { return .restoreSleep }
         if operationPhase == .cancelRestoring { return .cancelRestoringProgress }
@@ -95,9 +102,13 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
     ) -> Self {
         if operationPhase == .recoveryRequired {
             return Self(
-                title: "Recovery required",
-                detail: "LidSwitch could not prove a detached safe-idle state. Protection is not being reported active; Restore Sleep remains available.",
-                accessibilityState: "LidSwitch, recovery required. Protection is not being reported active because a detached safe-idle state was not proved. Restore Sleep remains available.",
+                title: snapshot.helperReady ? "Restore required" : "Helper repair required",
+                detail: snapshot.helperReady
+                    ? "LidSwitch could not prove a detached safe-idle state. Protection is not being reported active; Restore Sleep remains available."
+                    : "LidSwitch could not prove a detached safe-idle state and the installed helper is unavailable. Prepare or repair the helper before restoring.",
+                accessibilityState: snapshot.helperReady
+                    ? "LidSwitch, restore required. Protection is not being reported active because a detached safe-idle state was not proved. Restore Sleep remains available."
+                    : "LidSwitch, helper repair required. Protection is not being reported active because a detached safe-idle state was not proved and the helper is unavailable. Prepare or repair the helper before restoring.",
                 menuBarSymbol: "exclamationmark.triangle.fill",
                 panelSymbol: "exclamationmark.triangle.fill",
                 tone: .warning
@@ -367,7 +378,9 @@ struct PowerControllerSideEffects: @unchecked Sendable {
     let beginActivity: @MainActor @Sendable () -> NSObjectProtocol
     let endActivity: @MainActor @Sendable (NSObjectProtocol) -> Void
     let prepareHelper: @Sendable () throws -> AdministratorOperationResult
-    let restoreSleep: @Sendable () throws -> AdministratorOperationResult
+    /// Routine recovery is served by the already-installed, authenticated
+    /// helper. It must never re-enter the administrator-installation path.
+    let restoreSleep: @Sendable () throws -> HelperControlReply
     let uninstallHelper: @Sendable () throws -> AdministratorOperationResult
     let terminateApplication: @MainActor @Sendable () -> Void
 
@@ -492,7 +505,8 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         },
         restoreSleep: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
-            return try PrivilegedHelperManager.restoreSleepNow()
+            guard let client else { throw HelperControlError.unavailable }
+            return try client.restoreThroughInstalledHelper()
         },
         uninstallHelper: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
@@ -667,7 +681,7 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         },
         restoreSleep: {
             record("restore-sleep")
-            return administratorResult(.userRestore)
+            return try fixtureRoutineRestoreReply(administratorResult(.userRestore))
         },
         uninstallHelper: {
             record("uninstall-helper")
@@ -707,7 +721,7 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         },
         restoreSleep: {
             record("restore-sleep")
-            return fixtureAdministratorResult(.userRestore)
+            return try fixtureRoutineRestoreReply(fixtureAdministratorResult(.userRestore))
         },
         uninstallHelper: {
             record("uninstall-helper")
@@ -728,6 +742,23 @@ struct PowerControllerSideEffects: @unchecked Sendable {
             sessionID: nil,
             reason: "fixture"
         ))
+    }
+
+    private static func fixtureRoutineRestoreReply(
+        _ result: AdministratorOperationResult
+    ) throws -> HelperControlReply {
+        guard case let .safeIdle(receipt) = result else {
+            throw HelperControlError.rejected("fixture-routine-restore-unverified")
+        }
+        return HelperControlReply(
+            reason: receipt.reason,
+            sessionID: receipt.sessionID ?? UUID(),
+            expiryMonotonic: 0,
+            state: receipt.state == .terminal ? .terminal : .idle,
+            power: .ac,
+            sleepDisabled: false,
+            acSleepMinutes: 0
+        )
     }
     #endif
 }
@@ -1678,18 +1709,18 @@ final class PowerController: ObservableObject {
         let restoreVerificationWaiter = restoreVerificationWaiter
 
         Task.detached {
-            var administratorFailureMessage: String?
+            var recoveryFailureMessage: String?
             do {
                 let result = try self.sideEffects.restoreSleep()
-                try Self.requireAdministratorSafeIdle(
+                try Self.requireInstalledHelperSafeIdle(
                     result,
-                    fallback: "The administrator restore did not prove a safe idle state."
+                    fallback: "The installed helper did not prove a safe idle state."
                 )
             } catch {
                 let detail = (error as NSError).localizedDescription
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                administratorFailureMessage = detail.isEmpty
-                    ? "The administrator recovery did not complete."
+                recoveryFailureMessage = detail.isEmpty
+                    ? "The installed helper recovery did not complete."
                     : detail
             }
 
@@ -1711,7 +1742,7 @@ final class PowerController: ObservableObject {
                     self.alert = nil
                     self.announce("System sleep has been restored.")
                 } else {
-                    let detail = administratorFailureMessage
+                    let detail = recoveryFailureMessage
                         ?? "macOS still reports an active sleep override."
                     self.alert = .operationFailure(message: "LidSwitch could not verify that the macOS sleep override is off. \(detail) Keep LidSwitch open and try Restore Sleep again.")
                     self.announce(self.errorMessage ?? "System sleep restoration could not be verified.")
@@ -1912,23 +1943,23 @@ final class PowerController: ObservableObject {
         let safeRollbackWaiter = safeRollbackWaiter
         Task.detached {
             var next = safeRollbackWaiter()
-            var administratorFailureMessage: String?
+            var recoveryFailureMessage: String?
             if !(expectedOwner?.provesFullRollback(next) == true
                     || expectedOwner?.hasAuthenticatedTerminalProof == true
                     || (expectedOwner == nil && Self.isVerifiedSafeIdle(next))) {
                 do {
                     let result = try self.sideEffects.restoreSleep()
-                    try Self.requireAdministratorSafeIdle(
+                    try Self.requireInstalledHelperSafeIdle(
                         result,
-                        fallback: "Restore-and-Quit did not prove a safe idle state."
+                        fallback: "The installed helper did not prove safe idle for Restore-and-Quit."
                     )
                     self.snapshotProviders.invalidateInventory()
                     next = safeRollbackWaiter()
                 } catch {
                     let detail = (error as NSError).localizedDescription
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    administratorFailureMessage = detail.isEmpty
-                        ? "The administrator recovery did not complete."
+                    recoveryFailureMessage = detail.isEmpty
+                        ? "The installed helper recovery did not complete."
                         : detail
                 }
             }
@@ -1954,7 +1985,7 @@ final class PowerController: ObservableObject {
                         self.refresh(forceFresh: true)
                     }
                 } else {
-                    let detail = administratorFailureMessage
+                    let detail = recoveryFailureMessage
                         ?? "macOS still reports an active sleep override."
                     self.alert = .operationFailure(message: "LidSwitch stopped renewing the session, but safe idle was not proved. \(detail) Keep LidSwitch open and retry Restore Sleep.")
                     self.announce(self.errorMessage ?? "Restore required before quitting.")
@@ -2373,13 +2404,30 @@ final class PowerController: ObservableObject {
         }
     }
 
+    nonisolated private static func requireInstalledHelperSafeIdle(
+        _ reply: HelperControlReply,
+        fallback: String
+    ) throws {
+        guard (reply.state == .idle || reply.state == .terminal),
+              reply.power != .unknown,
+              !reply.sleepDisabled,
+              reply.acSleepMinutes != nil
+        else {
+            throw NSError(
+                domain: "LidSwitch.Recovery",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: fallback]
+            )
+        }
+    }
+
     private func announce(_ message: String) {
         announcementHandler(message)
     }
 
     nonisolated private static func isVerifiedSafeIdle(_ candidate: PowerSnapshot) -> Bool {
         guard candidate.ownedSessionID == nil,
-              candidate.source.isAC,
+              candidate.source.isKnown,
               candidate.sleepDisabledVerified,
               !candidate.sleepDisabled,
               candidate.acIdleSleepMinutes != nil,
@@ -2390,6 +2438,12 @@ final class PowerController: ObservableObject {
         else { return false }
         return true
     }
+
+    #if DEBUG
+    nonisolated static func installedHelperSafeIdleForTesting(_ reply: HelperControlReply) -> Bool {
+        (try? requireInstalledHelperSafeIdle(reply, fallback: "fixture")) != nil
+    }
+    #endif
 
     nonisolated private static func hasNoOwnedSession(_ candidate: PowerSnapshot) -> Bool {
         candidate.ownedSessionID == nil

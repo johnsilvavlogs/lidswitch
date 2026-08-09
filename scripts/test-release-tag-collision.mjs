@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const repository = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = join(repository, 'script/validate_release_tag_collision.sh');
-const tag = 'v0.2.10';
+const tag = 'v0.2.15';
 const sha = '0123456789abcdef0123456789abcdef01234567';
 
 function fixture(mode, existingReceipt) {

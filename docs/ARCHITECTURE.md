@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.14` is a SwiftPM menu bar app with four targets:
+LidSwitch `0.2.15` is a SwiftPM menu bar app with four targets:
 
 - `LidSwitch`: UI, inspection, authenticated raw-XPC client, installation, and recovery controls.
 - `LidSwitchCore`: shared wire schemas, release identity, bounded file primitives, monotonic clock, boot identity, and compatibility policy.
@@ -18,7 +18,8 @@ LidSwitch `0.2.14` is a SwiftPM menu bar app with four targets:
 7. A serial `DispatchSourceTimer` coordinator accepts **active** only when the lease, fresh helper acknowledgement, session UUID, and direct AC source agree. It never depends on the main run loop or a full `PowerInspector.snapshot`, and it is the sole termination authority for an owned active generation.
 8. The coordinator renews every 8 seconds using monotonic deadlines. Immediately before atomic lease publication, it rechecks the prior expiry and fresh matching helper/AC state.
 9. The root-owned private `0600` `terminal-generations` ledger is the authoritative tombstone, bounded to the newest 64 session UUIDs; helper status remains the public acknowledgement surface. Replaying a fresh lease with a tombstoned UUID cannot reactivate the helper.
-10. Install, Restore, Quit fallback, and Remove use one staged verified helper:
+10. Uninstall keeps `recovery-reservations` as a verified empty private ledger so its pair with `terminal-generations` remains structurally complete for reinstall. Builds that previously deleted that inode are repaired only by an explicit install one-shot, only with no runtime or mutable authority present, and only when a canonical terminal `safe-idle` uninstall receipt exactly reconstructs the retained proof and terminal lineage. That receipt is a migration anchor, never session or power-mutation authority.
+11. Install, Restore, Quit fallback, and Remove use one staged verified helper:
     provision the fixed root lock, run one typed recovery intent, require exact
     safe-idle proof, and only then publish or remove generations. The
     administrator shell owns staging/launchd/receipt mechanics only; its mutable
@@ -149,6 +150,6 @@ claim is made.
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.14`, `CFBundleVersion=9`, and helper version `9` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.15`, `CFBundleVersion=10`, and helper version `10` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

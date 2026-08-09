@@ -1418,6 +1418,102 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertNotEqual(PowerControllerPrimaryAction.resolve(snapshot: genericResidue, operationPhase: .idle), .prepareHelper)
     }
 
+    func testRecoveryRequiredWithUnavailableHelperRoutesToOneTimeRepairInsteadOfRestore() {
+        let unavailable = PowerSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            acIdleSleepMinutes: 5,
+            preferences: .disabled,
+            helperArtifactsPresent: true,
+            helperLoaded: false,
+            helperNeedsUpdate: false,
+            legacyLoginItemPresent: false,
+            legacyLoginItemLoaded: false,
+            activationLease: nil,
+            ownedSessionID: nil,
+            helperStatus: HelperStatusRecord(
+                state: "recovery-required", reason: "fixture", sessionID: nil, updatedAt: Date()
+            ),
+            systemBuild: "25F84",
+            systemBuildQualified: true,
+            bundleIntegrityValid: true,
+            bundleVersionValid: true,
+            checkedAt: Date(),
+            installationInventoryState: .invalid("helper-unloaded"),
+            helperLaunchdState: .absent
+        )
+
+        XCTAssertFalse(unavailable.helperReady)
+        XCTAssertEqual(unavailable.helperPreparationCTA, .repair)
+        XCTAssertEqual(
+            PowerControllerPrimaryAction.resolve(snapshot: unavailable, operationPhase: .recoveryRequired),
+            .prepareHelper
+        )
+    }
+
+    func testCleanInstallAndExistingHelperRepairHaveDistinctPreparationLabels() {
+        let cleanInstall = PowerSnapshot(
+            source: .ac,
+            sleepDisabled: false,
+            sleepDisabledVerified: true,
+            acIdleSleepMinutes: 5,
+            preferences: .disabled,
+            helperArtifactsPresent: false,
+            helperLoaded: false,
+            helperNeedsUpdate: false,
+            legacyLoginItemPresent: false,
+            legacyLoginItemLoaded: false,
+            activationLease: nil,
+            ownedSessionID: nil,
+            helperStatus: nil,
+            systemBuild: "25F84",
+            systemBuildQualified: true,
+            bundleIntegrityValid: true,
+            bundleVersionValid: true,
+            checkedAt: Date(),
+            installationInventoryState: .invalid("not-installed"),
+            helperLaunchdState: .absent
+        )
+        let existingUnavailable = PowerSnapshot(
+            source: cleanInstall.source,
+            sleepDisabled: cleanInstall.sleepDisabled,
+            sleepDisabledVerified: cleanInstall.sleepDisabledVerified,
+            acIdleSleepMinutes: cleanInstall.acIdleSleepMinutes,
+            preferences: cleanInstall.preferences,
+            helperArtifactsPresent: true,
+            helperLoaded: false,
+            helperNeedsUpdate: true,
+            legacyLoginItemPresent: false,
+            legacyLoginItemLoaded: false,
+            activationLease: nil,
+            ownedSessionID: nil,
+            helperStatus: nil,
+            systemBuild: cleanInstall.systemBuild,
+            systemBuildQualified: true,
+            bundleIntegrityValid: true,
+            bundleVersionValid: true,
+            checkedAt: cleanInstall.checkedAt,
+            installationInventoryState: .invalid("outdated"),
+            helperLaunchdState: .absent
+        )
+
+        XCTAssertEqual(cleanInstall.helperPreparationCTA, .prepare)
+        XCTAssertEqual(cleanInstall.helperPreparationCTA.title, "Prepare Safe Helper")
+        XCTAssertEqual(
+            cleanInstall.helperPreparationCTA.accessibilityHint,
+            "Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off."
+        )
+        XCTAssertEqual(existingUnavailable.helperPreparationCTA, .repair)
+        XCTAssertEqual(existingUnavailable.helperPreparationCTA.title, "Repair Helper")
+        XCTAssertEqual(
+            existingUnavailable.helperPreparationCTA.accessibilityHint,
+            "Repairs the unavailable installed helper with one administrator-approved repair transaction. Protection stays off."
+        )
+        XCTAssertEqual(PowerControllerPrimaryAction.resolve(snapshot: cleanInstall, operationPhase: .idle), .prepareHelper)
+        XCTAssertEqual(PowerControllerPrimaryAction.resolve(snapshot: existingUnavailable, operationPhase: .idle), .prepareHelper)
+    }
+
     func testPendingInventoryUsesCheckingTruthAndBlocksStartWithoutFalseBuildFailure() {
         let pending = makeSnapshot(
             source: .ac,
@@ -2495,7 +2591,7 @@ final class SessionSafetyTests: XCTestCase {
             "unexpected error: \(controller.errorMessage ?? "nil")"
         )
         XCTAssertEqual(controller.operationPhase, .recoveryRequired)
-        XCTAssertEqual(controller.primaryAction, .restoreSleep)
+        XCTAssertEqual(controller.primaryAction, .prepareHelper)
     }
 
     @MainActor
@@ -4560,7 +4656,7 @@ final class SessionSafetyTests: XCTestCase {
         let bootout = try XCTUnwrap(install.range(of: "/bin/launchctl bootout"))
         let provision = try XCTUnwrap(install.range(of: "provision_output="))
         let recovery = try XCTUnwrap(install.range(of: "recovery_payload="))
-        let deletePrevious = try XCTUnwrap(install.range(of: "/bin/rm -rf \"$previous\""))
+        let deletePrevious = try XCTUnwrap(install.range(of: "remove_verified_runtime_directory \"$previous\""))
         let publishCurrent = try XCTUnwrap(install.range(of: "/bin/mv \"$stage_current\" \"$current\""))
         let bootstrap = try XCTUnwrap(install.range(of: "/bin/launchctl bootstrap system \"$plist\"", options: [], range: publishCurrent.upperBound..<install.endIndex))
         XCTAssertLessThan(stageVerify.lowerBound, bootout.lowerBound)
@@ -4590,16 +4686,34 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertLessThan(uninstallRecovery.lowerBound, uninstallLegacyMarkerDeletion.lowerBound)
         XCTAssertFalse(restore.contains(AppPaths.legacyV4RootHelperVersionPath))
         XCTAssertTrue(uninstall.contains("recovery-proof" ) == false, "private proof is helper-owned, never shell-deleted")
-        XCTAssertFalse(restore.contains("/bin/rm -rf \"$current\" \"$previous\""))
+        let restorePostRecovery = try XCTUnwrap(restore.range(of: "failure_reason=daemon-restart-failed"))
+        XCTAssertFalse(restore[restorePostRecovery.lowerBound...].contains("remove_verified_runtime_directory"))
     }
 
     func testAdministratorCommandSkipsUserZshStartupFiles() {
         let command = PrivilegedHelperManager.diagnosticAdministratorCommand(
             "/usr/bin/true\n"
         )
-        XCTAssertTrue(command.hasSuffix("| /bin/zsh -f"))
-        XCTAssertTrue(command.contains("/bin/zsh -f"))
+        XCTAssertTrue(command.hasSuffix("/bin/zsh -f"))
+        XCTAssertTrue(command.contains("/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C"))
+        for variable in ["PERL5OPT=", "PERL5LIB=", "DYLD_LIBRARY_PATH=", "DYLD_FRAMEWORK_PATH=", "DYLD_INSERT_LIBRARIES=", "ENV=", "BASH_ENV=", "ZDOTDIR="] {
+            XCTAssertTrue(command.contains(variable), "missing explicit clear for \(variable)")
+        }
         XCTAssertFalse(command.contains("/bin/zsh -l"))
+    }
+
+    func testPrivilegedAppleScriptSpawnUsesClosedFixedEnvironment() {
+        let spec = Shell.privilegedAppleScript("return \"ok\"")
+        XCTAssertEqual(spec.executable, "/usr/bin/osascript")
+        XCTAssertEqual(spec.commandClass, .privilegedMutation)
+        XCTAssertEqual(
+            spec.environment,
+            [
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C",
+                "PERL5OPT=", "PERL5LIB=", "DYLD_LIBRARY_PATH=", "DYLD_FRAMEWORK_PATH=",
+                "DYLD_INSERT_LIBRARIES=", "ENV=", "BASH_ENV=", "ZDOTDIR=",
+            ]
+        )
     }
 
     func testHelperConfigurationRejectsMissingAndDuplicateArguments() {

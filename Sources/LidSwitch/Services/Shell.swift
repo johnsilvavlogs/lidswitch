@@ -92,6 +92,10 @@ enum Shell {
     struct CommandSpec: Sendable {
         let executable: String
         let arguments: [String]
+        /// `nil` inherits only for non-privileged, reviewed direct-exec
+        /// observations. The privileged AppleScript path supplies its own
+        /// closed environment and never receives the app's process variables.
+        let environment: [String]?
         let commandClass: CommandClass
         let timeout: TimeInterval
         let maximumOutputBytes: Int
@@ -102,10 +106,10 @@ enum Shell {
         /// File-scoped so the reviewed factory surface in `Shell` is the only
         /// production construction path, while nested-type access remains
         /// valid under Swift's lexical `private` rules.
-        fileprivate init(executable: String, arguments: [String], commandClass: CommandClass,
+        fileprivate init(executable: String, arguments: [String], environment: [String]? = nil, commandClass: CommandClass,
                          timeout: TimeInterval, maximumOutputBytes: Int = 1 * 1_024 * 1_024,
                          reconcileAfterTimeout: (@Sendable () -> Bool)? = nil) {
-            self.executable = executable; self.arguments = arguments; self.commandClass = commandClass
+            self.executable = executable; self.arguments = arguments; self.environment = environment; self.commandClass = commandClass
             self.timeout = timeout; self.maximumOutputBytes = maximumOutputBytes
             self.reconcileAfterTimeout = reconcileAfterTimeout
         }
@@ -217,8 +221,32 @@ enum Shell {
     /// admin command might already be committed, so callers must reconcile
     /// durable state and never interpret it as cancellation.
     static func privilegedAppleScript(_ source: String) -> CommandSpec {
-        CommandSpec(executable: "/usr/bin/osascript", arguments: ["-e", source], commandClass: .privilegedMutation, timeout: 45)
+        CommandSpec(
+            executable: "/usr/bin/osascript",
+            arguments: ["-e", source],
+            environment: privilegedAppleScriptEnvironment,
+            commandClass: .privilegedMutation,
+            timeout: 45
+        )
     }
+
+    /// A deliberately fixed, small environment for the only process that can
+    /// request administrator authorization. `/usr/bin/env -i` is repeated in
+    /// the root command below, but this prevents the outer osascript itself
+    /// from inheriting interpreter or dynamic-loader controls.
+    private static let privilegedAppleScriptEnvironment = [
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+        "LANG=C",
+        "LC_ALL=C",
+        "PERL5OPT=",
+        "PERL5LIB=",
+        "DYLD_LIBRARY_PATH=",
+        "DYLD_FRAMEWORK_PATH=",
+        "DYLD_INSERT_LIBRARIES=",
+        "ENV=",
+        "BASH_ENV=",
+        "ZDOTDIR=",
+    ]
 
     #if DEBUG
     /// This factory is compiled only for test/debug fixtures and does not
@@ -618,7 +646,32 @@ enum Shell {
         defer { argv.forEach { if let value = $0 { free(value) } } }
         guard argv.dropLast().allSatisfy({ $0 != nil }) else { return .failure(.argv, "Could not allocate command arguments.") }
         var child: pid_t = 0
-        let result = argv.withUnsafeMutableBufferPointer { buffer in spec.executable.withCString { posix_spawn(&child, $0, &actions, &attributes, buffer.baseAddress, environ) } }
+        var environment: [UnsafeMutablePointer<CChar>?]?
+        if let configuredEnvironment = spec.environment {
+            environment = configuredEnvironment.map { strdup($0) }
+            environment?.append(nil)
+            guard environment?.dropLast().allSatisfy({ $0 != nil }) == true else {
+                return .failure(.argv, "Could not allocate spawn environment.")
+            }
+        }
+        defer { environment?.forEach { if let value = $0 { free(value) } } }
+        let result: Int32
+        if var environment {
+            result = environment.withUnsafeMutableBufferPointer { environmentBuffer in
+                argv.withUnsafeMutableBufferPointer { buffer in
+                    spec.executable.withCString {
+                        posix_spawn(&child, $0, &actions, &attributes, buffer.baseAddress,
+                                    environmentBuffer.baseAddress!)
+                    }
+                }
+            }
+        } else {
+            result = argv.withUnsafeMutableBufferPointer { buffer in
+                spec.executable.withCString {
+                    posix_spawn(&child, $0, &actions, &attributes, buffer.baseAddress, environ)
+                }
+            }
+        }
         guard result == 0 else { return .failure(.spawn, String(cString: strerror(result))) }
         close(out[1]); out[1] = -1; close(err[1]); err[1] = -1
         let prepared = PreparedSpawn(child: child, stdout: out[0], stderr: err[0]); out[0] = -1; err[0] = -1

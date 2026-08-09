@@ -8,8 +8,13 @@ typealias HelperTimerStarter = (@escaping HelperTimerHandler) -> AnyObject?
 
 enum HelperDaemonPreparation: Equatable {
     case ready
+    /// Durable recovery is fail-closed for autonomous activity, but the
+    /// installed authenticated helper must keep its XPC listener available so
+    /// the user can request a prompt-free, restore-only convergence.
+    case recoveryListenerOnly
     /// Recovery reached a durable fail-closed state. Exiting successfully keeps
     /// launchd's SuccessfulExit=false policy from respawning a write loop.
+    /// Kept for legacy callers that intentionally cannot expose a listener.
     case handledRecoveryRequired
     /// Store/lock/timer/preflight infrastructure failed without a durable stop.
     case transientFailure
@@ -170,6 +175,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         case bind(Peer, TimeInterval, Bool)
         case pristineIdle
         case migratedIdle(String)
+        case detachedIdle(String)
         case terminalIdle(UUID, String)
         case recoveryRequired(String)
     }
@@ -245,7 +251,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         switch preparationAssessment {
         case .pristineIdle:
             return startTimerOnly() ? .ready : .transientFailure
-        case .migratedIdle:
+        case .migratedIdle, .detachedIdle:
             return startTimerOnly() ? .ready : .transientFailure
         case let .terminalIdle(session, reason):
             hydrateTerminal(session: session, reason: reason)
@@ -292,6 +298,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                       switch recovered {
                       case .pristineIdle: return .pristineIdle
                       case let .migratedIdle(reason): return .migratedIdle(reason)
+                      case let .detachedIdle(reason): return .detachedIdle(reason)
                       case let .terminalIdle(session, reason): return .terminalIdle(session, reason)
                       case .legacyRestoreOnly, .reconnectCandidate:
                           return .recoveryRequired("startup-recovery-incomplete")
@@ -311,7 +318,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                 reconnectDeadline = min(deadline, monotonicNow() + Self.reconnectGrace)
             case .pristineIdle:
                 activeSession = nil; activePeer = nil; activeConnection = nil; expiry = 0; reconnectDeadline = nil
-            case .migratedIdle:
+            case .migratedIdle, .detachedIdle:
                 activeSession = nil; activePeer = nil; activeConnection = nil; expiry = 0; reconnectDeadline = nil
             case let .terminalIdle(session, reason):
                 activeSession = nil; activePeer = nil; activeConnection = nil; expiry = 0; reconnectDeadline = nil
@@ -371,10 +378,11 @@ final class HelperSessionAuthority: @unchecked Sendable {
         guard let store = recoveryStoreFactory(configuration.supportDirectory),
               let persisted = store.withTransaction({ _ -> Bool in
                   guard case let .valid(proof) = store.proofRecord() else { return false }
-                  return proof.kind == .recoveryRequired && proof.reason == expectedReason
+                  return (proof.kind == .recoveryRequired || proof.kind == .detachedTransitionPending)
+                    && proof.reason == expectedReason
               })
         else { return .transientFailure }
-        return persisted ? .handledRecoveryRequired : .transientFailure
+        return persisted ? .recoveryListenerOnly : .transientFailure
     }
 
     private func startTimerOnly() -> Bool {
@@ -382,6 +390,15 @@ final class HelperSessionAuthority: @unchecked Sendable {
         guard let token = timerStarter({ [weak self] in self?.tick() }) else { return false }
         timerToken = token
         return true
+    }
+
+    /// Recovery-only startup deliberately keeps no timer while its durable
+    /// recovery fence is still active.  A successful detached RESTORE must
+    /// cross back into the ordinary helper lifecycle before it may clear that
+    /// fence: one normal reconciler owns lease expiry, peer death, reconnect,
+    /// and power-drift checks for every later BEGIN.
+    private func ensureNormalReconciliationTimer() -> Bool {
+        timerToken != nil || startTimerOnly()
     }
 
     private static func startSystemTimer(_ handler: @escaping HelperTimerHandler) -> AnyObject? {
@@ -401,12 +418,11 @@ final class HelperSessionAuthority: @unchecked Sendable {
             return snapshot(result: 77, reason: "peer-process-unavailable", requested: sessionID)
         }
         let snapshotOperation = operation == UInt32(LS_OPERATION_SNAPSHOT.rawValue)
+        let detachedRestoreOperation = operation == UInt32(LS_OPERATION_RESTORE.rawValue)
+            && sessionID == Self.zeroUUID
         // A containment receipt is a hard mutation fence. Snapshot remains
-        // responsive, but RESTORE is a power mutation and must wait for exact
-        // cleanup/extinction plus an explicit administrator recovery path.
-        guard !recoveryRequired || (snapshotOperation && activeSession != nil) else {
-            return snapshot(result: 75, reason: "recovery-required", requested: sessionID)
-        }
+        // responsive, and detached RESTORE can proceed only after exact
+        // cleanup/extinction through the installed helper.
         if operation == UInt32(LS_OPERATION_RESTORE.rawValue) {
             guard sessionID == Self.zeroUUID else { return snapshot(result: 64, reason: "restore-session-forbidden", requested: sessionID) }
         } else if operation != UInt32(LS_OPERATION_SNAPSHOT.rawValue), sessionID == Self.zeroUUID {
@@ -415,6 +431,15 @@ final class HelperSessionAuthority: @unchecked Sendable {
         guard let store = recoveryStoreFactory(configuration.supportDirectory) else {
             registerAuthorityUnavailableIfActive()
             return snapshot(result: 75, reason: "unsafe-root-state-directory", requested: sessionID)
+        }
+        // A detached RESTORE is the app's prompt-free recovery path. It may
+        // only retire an already-ambiguous containment receipt after exact
+        // extinction proof; it never sends a signal or retries a power setter.
+        if detachedRestoreOperation {
+            _ = RecoveryCoordinator.reconcileExtinctExpiredContainment(store: store)
+        }
+        guard !recoveryRequired || (snapshotOperation && activeSession != nil) || detachedRestoreOperation else {
+            return snapshot(result: 75, reason: "recovery-required", requested: sessionID)
         }
         guard let reply = store.withTransaction({ transaction in
             self.handleLocked(
@@ -488,12 +513,10 @@ final class HelperSessionAuthority: @unchecked Sendable {
             }
             return snapshot(result: 0, reason: "verified", requested: sessionID)
         case UInt32(LS_OPERATION_RESTORE.rawValue):
-            return restore(
-                connection: connection,
-                peer: peer,
-                store: store,
-                transaction: transaction
-            )
+            if activeSession == nil {
+                return restoreDetachedState(store: store, transaction: transaction)
+            }
+            return restore(connection: connection, peer: peer, store: store, transaction: transaction)
         default:
             return snapshot(result: 64, reason: "unknown-operation", requested: sessionID)
         }
@@ -539,6 +562,25 @@ final class HelperSessionAuthority: @unchecked Sendable {
         transaction: VerifiedRootStateDirectory.Transaction
     ) -> AuthorityReply {
         guard activeSession == nil, activeConnection == nil else { return snapshot(result: 77, reason: "second-session", requested: sessionID) }
+        // BEGIN is never allowed to create root power authority unless the
+        // normal reconciliation lifecycle is already alive.  This is defense
+        // in depth for recovery-listener-only processes and direct bridge
+        // entrypoints that bypass daemon preparation in fixtures.
+        guard timerToken != nil else {
+            recoveryRequired = true
+            guard store.markRecoveryRequired("reconciliation-timer-unavailable", transaction).isVerified,
+                  projectStatus(
+                    state: "recovery-required",
+                    reason: "reconciliation-timer-unavailable",
+                    sessionID: nil,
+                    store: store,
+                    transaction: transaction
+                  )
+            else {
+                return snapshot(result: 75, reason: "recovery-proof-unverified", requested: sessionID)
+            }
+            return snapshot(result: 75, reason: "reconciliation-timer-unavailable", requested: sessionID)
+        }
         // A lower bridge ID belongs to an earlier connection in this helper
         // process and can never start a new generation after being superseded.
         guard connection >= connectionHighWatermark else { return snapshot(result: 77, reason: "connection-replay", requested: sessionID) }
@@ -582,7 +624,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                 terminalReason: "activation-publication-failed"
             )
             switch outcome {
-            case .pristineIdle, .migratedIdle, .terminalIdle:
+            case .pristineIdle, .migratedIdle, .detachedIdle, .terminalIdle:
                 break
             case .recoveryRequired, .legacyRestoreOnly, .reconnectCandidate:
                 recoveryRequired = true
@@ -942,7 +984,8 @@ final class HelperSessionAuthority: @unchecked Sendable {
         reason: String,
         sessionID: UUID?,
         store: RecoveryAuthorityStore,
-        transaction: VerifiedRootStateDirectory.Transaction
+        transaction: VerifiedRootStateDirectory.Transaction,
+        markRecoveryRequiredOnFailure: Bool = true
     ) -> Bool {
         guard StatusProjectionDispatcher.enqueue(state: state, reason: reason, sessionID: sessionID,
                                                  store: store, transaction: transaction, configuration: configuration,
@@ -950,7 +993,12 @@ final class HelperSessionAuthority: @unchecked Sendable {
                                                  writer: statusProjectionWriter) else {
             // A public write may fail later, but failure to persist the dirty
             // intent is an authority failure now and must not be silent.
-            _ = store.markRecoveryRequired("status-projection-enqueue-failed", transaction)
+            // Detached RESTORE has a stronger, typed retry fence that retains
+            // the exact safe-idle/terminal authority class. Its caller must be
+            // allowed to publish that proof before this helper returns.
+            if markRecoveryRequiredOnFailure {
+                _ = store.markRecoveryRequired("status-projection-enqueue-failed", transaction)
+            }
             return false
         }
         return true
@@ -1106,6 +1154,158 @@ final class HelperSessionAuthority: @unchecked Sendable {
         return snapshot(result: terminalResult, reason: terminalReason, requested: session)
     }
 
+    /// An authenticated app that has no bound generation can ask its installed
+    /// helper to converge *only* durable, detached recovery state. This is not
+    /// a second owner path: a live session remains protected by the existing
+    /// connection/peer checks above, and every failed assessment stays
+    /// recovery-required.
+    private func restoreDetachedState(
+        store: RecoveryAuthorityStore,
+        transaction: VerifiedRootStateDirectory.Transaction
+    ) -> AuthorityReply {
+        let outcome = recoveryCoordinatorFactory().recoverWithinTransaction(
+            store: store,
+            transaction: transaction,
+            intent: .userRestore,
+            allowReconnect: false,
+            terminalReason: "detached-user-restore",
+            permitRecoveryRequiredRetry: true
+        )
+        switch outcome {
+        case let .terminalIdle(session, reason):
+            guard completeDetachedRecoveryTransition(
+                status: "terminal",
+                reason: reason,
+                sessionID: session,
+                finalProof: .init(kind: .terminal, sessionID: session, reason: reason),
+                store: store,
+                transaction: transaction
+            ) else {
+                return detachedRecoveryTransitionFailure(
+                    disposition: .terminal,
+                    terminalSession: session,
+                    store: store,
+                    transaction: transaction
+                )
+            }
+            recoveryRequired = false
+            hydrateTerminal(session: session, reason: reason)
+            return snapshot(result: 0, reason: reason, requested: session)
+        case .pristineIdle:
+            guard completeDetachedRecoveryTransition(
+                status: "inactive",
+                reason: "idle",
+                sessionID: nil,
+                finalProof: .init(kind: .pristine, sessionID: nil, reason: "bootstrap"),
+                store: store,
+                transaction: transaction
+            ) else {
+                return detachedRecoveryTransitionFailure(
+                    disposition: .pristine,
+                    store: store,
+                    transaction: transaction
+                )
+            }
+            recoveryRequired = false
+            return snapshot(result: 0, reason: "idle", requested: Self.zeroUUID)
+        case let .migratedIdle(reason):
+            guard completeDetachedRecoveryTransition(
+                status: "inactive",
+                reason: reason,
+                sessionID: nil,
+                finalProof: .init(kind: .migrated, sessionID: nil, reason: reason),
+                store: store,
+                transaction: transaction
+            ) else {
+                return detachedRecoveryTransitionFailure(
+                    disposition: .migrated,
+                    store: store,
+                    transaction: transaction
+                )
+            }
+            recoveryRequired = false
+            return snapshot(result: 0, reason: reason, requested: Self.zeroUUID)
+        case let .detachedIdle(reason):
+            guard completeDetachedRecoveryTransition(
+                status: "inactive",
+                reason: reason,
+                sessionID: nil,
+                finalProof: .init(kind: .detachedSafeIdle, sessionID: nil, reason: reason),
+                store: store,
+                transaction: transaction
+            ) else {
+                return detachedRecoveryTransitionFailure(
+                    disposition: .detached,
+                    store: store,
+                    transaction: transaction
+                )
+            }
+            recoveryRequired = false
+            return snapshot(result: 0, reason: reason, requested: Self.zeroUUID)
+        case let .recoveryRequired(reason):
+            recoveryRequired = true
+            return snapshot(result: 75, reason: reason, requested: Self.zeroUUID)
+        case .legacyRestoreOnly, .reconnectCandidate:
+            recoveryRequired = true
+            return snapshot(result: 75, reason: "detached-recovery-unverified", requested: Self.zeroUUID)
+        }
+    }
+
+    /// The detached-recovery proof is private authority.  Do not expose its
+    /// safe-idle result to BEGIN until both ordinary reconciliation and a fresh
+    /// public idle/terminal projection have been durably scheduled in this
+    /// same root-state transaction.  The public write remains asynchronous,
+    /// but enqueue failure is synchronous authority failure.
+    private func completeDetachedRecoveryTransition(
+        status: String,
+        reason: String,
+        sessionID: UUID?,
+        finalProof: RecoveryProof,
+        store: RecoveryAuthorityStore,
+        transaction: VerifiedRootStateDirectory.Transaction
+    ) -> Bool {
+        guard ensureNormalReconciliationTimer() else { return false }
+        guard projectStatus(
+            state: status,
+            reason: reason,
+            sessionID: sessionID,
+            store: store,
+            transaction: transaction,
+            markRecoveryRequiredOnFailure: false
+        ) else { return false }
+        // The root transaction serializes every durable authority write but
+        // does not roll one back. Publish the safe proof only after the timer
+        // exists and the fresh status task is durable, so every earlier crash
+        // or write fault leaves the retry fence intact across relaunch.
+        return store.publishProof(finalProof, transaction).isVerified
+    }
+
+    /// A failed post-recovery transition must replace the provisional
+    /// safe-idle conclusion with a typed, root-only retry fence before
+    /// replying. The disposition retains the exact authority class that was
+    /// already proven; this is deliberately not a generic recovery-required
+    /// proof. In-memory `recoveryRequired` additionally fences this live
+    /// process if the root proof itself cannot be rewritten.
+    private func detachedRecoveryTransitionFailure(
+        disposition: RecoveryProof.DetachedTransitionDisposition,
+        terminalSession: UUID? = nil,
+        store: RecoveryAuthorityStore,
+        transaction: VerifiedRootStateDirectory.Transaction
+    ) -> AuthorityReply {
+        recoveryRequired = true
+        guard let pending = RecoveryProof.detachedTransitionPending(
+            disposition,
+            terminalSession: terminalSession
+        ), store.publishDetachedTransitionPending(
+            disposition,
+            terminalSession: terminalSession,
+            transaction
+        ).isVerified else {
+            return snapshot(result: 75, reason: "recovery-proof-unverified", requested: Self.zeroUUID)
+        }
+        return snapshot(result: 75, reason: pending.reason, requested: Self.zeroUUID)
+    }
+
     private func registerAuthorityUnavailableIfActive() {
         guard activeSession != nil else { return }
         registerRollbackFailure(
@@ -1204,12 +1404,12 @@ final class HelperSessionAuthority: @unchecked Sendable {
         switch proof.kind {
         case .pristine:
             return terminalEntries.isEmpty
-        case .migrated:
+        case .migrated, .detachedSafeIdle:
             return terminalEntries.isEmpty && reservationEntries.isEmpty
         case .terminal:
             guard let prior = proof.sessionID, prior != expected.sessionID else { return false }
             return terminalEntries.last == prior
-        case .recoveryRequired:
+        case .detachedTransitionPending, .recoveryRequired:
             return false
         }
     }
@@ -1244,12 +1444,12 @@ final class HelperSessionAuthority: @unchecked Sendable {
         switch proof.kind {
         case .pristine:
             return terminalEntries.isEmpty && reservationEntries.isEmpty
-        case .migrated:
+        case .migrated, .detachedSafeIdle:
             return terminalEntries.isEmpty && reservationEntries.isEmpty
         case .terminal:
             guard let prior = proof.sessionID else { return false }
             return terminalEntries.last == prior
-        case .recoveryRequired:
+        case .detachedTransitionPending, .recoveryRequired:
             return false
         }
     }
@@ -1309,7 +1509,11 @@ struct HelperControlServiceOperations: @unchecked Sendable {
         },
         recover: { configuration, intent in
             RecoveryCoordinator(configuration: configuration, power: SystemPowerSystem())
-                .recover(intent: intent, allowReconnect: false)
+                .recover(
+                    intent: intent,
+                    allowReconnect: false,
+                    hydrateStatusProjection: intent != .uninstall
+                )
         },
         daemon: { configuration in HelperControlService.runDaemon(configuration: configuration) }
     )
@@ -1345,6 +1549,10 @@ enum HelperControlService {
                 return .oneShot(.pristineIdle)
             case let .migratedIdle(reason):
                 return .oneShot(.migratedIdle(reason: reason))
+            case .detachedIdle:
+                // This conclusion is produced only through the authenticated
+                // daemon XPC restore path, never an administrator one-shot.
+                return .oneShot(.internalFailure(reason: "unexpected-detached-idle"))
             case let .terminalIdle(session, reason):
                 return .oneShot(.terminalIdle(sessionID: session, reason: reason))
             case let .recoveryRequired(reason):
@@ -1401,7 +1609,7 @@ enum HelperControlService {
         listener: () -> Int32
     ) -> Int32 {
         switch authority.prepareBeforeListening() {
-        case .ready:
+        case .ready, .recoveryListenerOnly:
             return listener() == 0 ? 0 : 78
         case .handledRecoveryRequired:
             return 0

@@ -7,6 +7,10 @@ import LidSwitchCore
 enum RecoveryAssessment: Equatable {
     case pristineIdle
     case migratedIdle(String)
+    /// A sessionless safe-idle conclusion reached only after the installed
+    /// helper has retired an exact containment fence. It is not a pristine
+    /// bootstrap: the durable proof retains that prior containment boundary.
+    case detachedIdle(String)
     case terminalIdle(UUID, String)
     case recoveryRequired(String)
     case legacyRestoreOnly(AppliedState)
@@ -17,13 +21,63 @@ struct RecoveryProof: Equatable {
     enum Kind: String {
         case pristine
         case migrated
+        case detachedSafeIdle = "detached-safe-idle"
         case terminal
+        /// The installed helper reached a typed safe-idle/terminal conclusion,
+        /// but could not complete the timer plus public-status transition.
+        /// It is fail-closed until that same helper retries detached RESTORE.
+        case detachedTransitionPending = "detached-transition-pending"
         case recoveryRequired = "recovery-required"
+    }
+
+    /// The transition retry must retain its pre-failure authority class. In
+    /// particular, a terminal ledger can never be retried as empty/pristine.
+    enum DetachedTransitionDisposition: String, CaseIterable {
+        case pristine
+        case migrated
+        case detached
+        case terminal
+
+        var reason: String { "detached-transition-pending-\(rawValue)" }
+
+        init?(sessionID: UUID?, reason: String) {
+            guard reason == "detached-transition-pending-pristine"
+                    || reason == "detached-transition-pending-migrated"
+                    || reason == "detached-transition-pending-detached"
+                    || reason == "detached-transition-pending-terminal"
+            else { return nil }
+            switch (reason, sessionID) {
+            case ("detached-transition-pending-pristine", nil): self = .pristine
+            case ("detached-transition-pending-migrated", nil): self = .migrated
+            case ("detached-transition-pending-detached", nil): self = .detached
+            case ("detached-transition-pending-terminal", .some): self = .terminal
+            default: return nil
+            }
+        }
     }
 
     let kind: Kind
     let sessionID: UUID?
     let reason: String
+
+    var detachedTransitionDisposition: DetachedTransitionDisposition? {
+        guard kind == .detachedTransitionPending else { return nil }
+        return .init(sessionID: sessionID, reason: reason)
+    }
+
+    static func detachedTransitionPending(
+        _ disposition: DetachedTransitionDisposition,
+        terminalSession: UUID? = nil
+    ) -> RecoveryProof? {
+        switch disposition {
+        case .pristine, .migrated, .detached:
+            guard terminalSession == nil else { return nil }
+            return .init(kind: .detachedTransitionPending, sessionID: nil, reason: disposition.reason)
+        case .terminal:
+            guard let terminalSession else { return nil }
+            return .init(kind: .detachedTransitionPending, sessionID: terminalSession, reason: disposition.reason)
+        }
+    }
 
     var payload: String {
         [
@@ -61,6 +115,27 @@ struct RecoveryProof: Equatable {
         case .migrated:
             guard session == "none", reason.hasPrefix("legacy-") else { return nil }
             proof = .init(kind: kind, sessionID: nil, reason: reason)
+        case .detachedSafeIdle:
+            guard session == "none", reason == "containment-extinguished-detached-safe-idle" else { return nil }
+            proof = .init(kind: kind, sessionID: nil, reason: reason)
+        case .detachedTransitionPending:
+            let pendingSession: UUID?
+            if reason == DetachedTransitionDisposition.terminal.reason {
+                guard let terminalSession = UUID(uuidString: session) else { return nil }
+                pendingSession = terminalSession
+            } else {
+                // Nonterminal retry classes deliberately carry no session.
+                // Do not collapse malformed session text to nil: that would
+                // make an arbitrary payload parse as a pristine transition.
+                guard session == "none" else { return nil }
+                pendingSession = nil
+            }
+            guard let disposition = DetachedTransitionDisposition(sessionID: pendingSession, reason: reason) else { return nil }
+            proof = .init(
+                kind: kind,
+                sessionID: disposition == .terminal ? pendingSession : nil,
+                reason: reason
+            )
         case .recoveryRequired:
             guard session == "none" else { return nil }
             proof = .init(kind: kind, sessionID: nil, reason: reason)
@@ -425,19 +500,25 @@ final class RecoveryAuthorityStore {
         return prepareAuthorityAfterWriterQuiescence()
     }
 
-    func prepareAuthorityAfterWriterQuiescence() -> RecoveryProvisionOutcome {
+    func prepareAuthorityAfterWriterQuiescence(
+        allowInstallPreparationRepair: Bool = false
+    ) -> RecoveryProvisionOutcome {
         return RootStateLock.withExclusive(
             directory: directory,
             timeout: lockTimeout,
             now: lockNow
         ) { transaction in
-            self.prepareAuthorityLocked(transaction)
+            self.prepareAuthorityLocked(
+                transaction,
+                allowInstallPreparationRepair: allowInstallPreparationRepair
+            )
         } ?? .recoveryRequired("root-state-lock-unavailable")
     }
 
     func prepareAuthorityLocked(
         _ transaction: VerifiedRootStateDirectory.Transaction,
-        allowRecoveryRequiredLegacyRetry: Bool = false
+        allowRecoveryRequiredLegacyRetry: Bool = false,
+        allowInstallPreparationRepair: Bool = false
     ) -> RecoveryProvisionOutcome {
         guard reconcileAbandonedPublicationTemporaries(transaction) else {
             return .recoveryRequired("unsafe-authority-root-inventory")
@@ -454,6 +535,40 @@ final class RecoveryAuthorityStore {
         var applied = initialApplied.record
         let proof = proofRecord()
         let journal = journalRecord()
+
+        // A completed uninstall intentionally keeps the terminal ledger and
+        // safe-idle proof as audit evidence. Older helpers retired the entire
+        // reservation inode, however, which left the next installation with a
+        // one-sided private ledger pair that ordinary preparation correctly
+        // treats as ambiguous. Admit only that exact uninstall-produced gap:
+        // the root contains no installed runtime or mutable authority, and a
+        // canonical terminal safe-idle uninstall receipt reconstructs the
+        // retained proof exactly. Restore the proof before the empty ledger so
+        // every crash boundary remains retryable without inventing authority.
+        if allowInstallPreparationRepair,
+           inventory == .fresh,
+           reservation == .absent,
+           applied == .missing,
+           journal == .absent,
+           case let .privateAuthority(terminalEntries, _) = terminal,
+           let retainedProof = retainedUninstallProof(
+               terminalEntries: terminalEntries,
+               currentProof: proof
+           ) {
+            if proof != .valid(retainedProof) {
+                guard publishProof(retainedProof, transaction).isVerified else {
+                    return .recoveryRequired("uninstall-proof-repair-failed")
+                }
+            }
+            guard publishLedger(
+                bytes: "",
+                basename: Self.reservationBasename,
+                transaction: transaction
+            ).isVerified else {
+                return .recoveryRequired("uninstall-reservation-repair-failed")
+            }
+            return .ready
+        }
 
         // Public/legacy-mode applied bytes are never compatible with an
         // already completed pristine, migrated, or terminal conclusion. Check
@@ -550,7 +665,13 @@ final class RecoveryAuthorityStore {
             let hasLegacyApplied: Bool
             if case .legacyRestoreOnly = applied { hasLegacyApplied = true }
             else { hasLegacyApplied = false }
-            let canResumeEmptyPair = existingProof.kind == .pristine
+            // A pristine proof beside only one empty ledger is the durable
+            // boundary left when bootstrap published proof before completing
+            // its ledger pair. Only the explicit Install/Repair administrator
+            // one-shot may resume that preparation; Restore and Uninstall
+            // must keep the incomplete authority fail-closed.
+            let canResumeEmptyPair = (existingProof.kind == .pristine
+                    && allowInstallPreparationRepair)
                 || (existingProof.kind == .recoveryRequired
                     && hasLegacyApplied
                     && allowRecoveryRequiredLegacyRetry)
@@ -1293,6 +1414,75 @@ final class RecoveryAuthorityStore {
         return value
     }
 
+    /// Recognizes only the authority shape emitted by a completed uninstall
+    /// from a prior helper: no runtime/history leaves, no mutable recovery
+    /// state, a private terminal ledger, and a canonical safe-idle uninstall
+    /// receipt whose lineage exactly matches the retained proof. The single
+    /// historical recovery-required reason is admitted so an install that
+    /// already encountered the old one-sided gap can heal on retry.
+    private func retainedUninstallProof(
+        terminalEntries: [UUID],
+        currentProof: ProofRecord
+    ) -> RecoveryProof? {
+        guard containmentReceiptRecord() == .absent,
+              recoveryBudgetRecord() == .absent,
+              statusProjectionTaskRecord() == .absent,
+              directory.entryState(Self.statusProjectionGenerationBasename) == .absent,
+              directory.entryState("helper-status.projection.lock") == .absent,
+              directory.entryState("helper-status.projection-temp") == .absent,
+              Self.legacyHistoryBasenames.allSatisfy({ directory.entryState($0) == .absent }),
+              let names = directory.boundedEntryNames()
+        else { return nil }
+
+        var candidate: RecoveryProof?
+        for name in names.sorted() {
+            guard let transaction = canonicalTransactionID(
+                name,
+                prefix: "administrator-transaction-",
+                suffix: ".receipt"
+            ), case let .legacyMode(raw) = classifiedText(
+                name,
+                maximumBytes: AdministratorTransactionReceipt.maximumBytes
+            ), let receipt = AdministratorTransactionReceipt.parse(raw),
+               receipt.transactionID == transaction,
+               receipt.operation == .uninstall,
+               receipt.state == .terminal,
+               receipt.outcome == .safeIdle
+            else { continue }
+
+            let receiptProof: RecoveryProof
+            if let sessionID = receipt.sessionID {
+                guard terminalEntries.last == sessionID else { continue }
+                receiptProof = RecoveryProof(
+                    kind: .terminal,
+                    sessionID: sessionID,
+                    reason: receipt.reason
+                )
+            } else if receipt.reason == "pristine", terminalEntries.isEmpty {
+                receiptProof = RecoveryProof(kind: .pristine, sessionID: nil, reason: "bootstrap")
+            } else if receipt.reason.hasPrefix("legacy-"), terminalEntries.isEmpty {
+                receiptProof = RecoveryProof(kind: .migrated, sessionID: nil, reason: receipt.reason)
+            } else {
+                continue
+            }
+
+            if let candidate, candidate != receiptProof { return nil }
+            candidate = receiptProof
+        }
+
+        guard let candidate else { return nil }
+        switch currentProof {
+        case let .valid(existing) where existing == candidate:
+            return candidate
+        case let .valid(proof)
+            where proof.kind == .recoveryRequired
+                && proof.reason == "ledger-migration-or-history-ambiguous":
+            return candidate
+        case .absent, .invalid, .valid:
+            return nil
+        }
+    }
+
     private func historicalRegularIsValid(
         _ basename: String,
         expectedMode: mode_t,
@@ -1662,6 +1852,63 @@ final class RecoveryAuthorityStore {
         return publish(proof.payload, Self.proofBasename, transaction, parser: { RecoveryProof.parse($0) == proof })
     }
 
+    /// The only sessionless migration transition that may replace a completed
+    /// safe proof. This is not a general proof writer: it admits only the
+    /// helper's typed post-recovery fence, from the matching already-verified
+    /// safe class, while no applied authority or conflicting history exists.
+    /// In particular, ordinary migration remains immutable across crashes,
+    /// legacy repair, and generic recovery-required handling.
+    func publishDetachedTransitionPending(
+        _ disposition: RecoveryProof.DetachedTransitionDisposition,
+        terminalSession: UUID? = nil,
+        _ transaction: VerifiedRootStateDirectory.Transaction
+    ) -> RecoveryPublicationOutcome {
+        guard let pending = RecoveryProof.detachedTransitionPending(
+            disposition,
+            terminalSession: terminalSession
+        ) else { return .notPublished(.parser) }
+        if proofRecord() == .valid(pending) { return .alreadyVerified }
+        guard appliedRecord() == .missing,
+              case let .privateAuthority(terminalEntries, _) = ledger(Self.terminalBasename),
+              case let .privateAuthority(reservationEntries, _) = ledger(Self.reservationBasename),
+              case let .valid(current) = proofRecord()
+        else { return .notPublished(.parser) }
+
+        switch disposition {
+        case .pristine:
+            guard current.kind == .pristine,
+                  current.sessionID == nil,
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .notPublished(.parser) }
+        case .migrated:
+            guard current.kind == .migrated,
+                  current.sessionID == nil,
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .notPublished(.parser) }
+        case .detached:
+            let isDetachedSafe = current.kind == .detachedSafeIdle
+                && current.sessionID == nil
+            let isExactContainmentFence = current.kind == .recoveryRequired
+                && current.sessionID == nil
+                && current.reason == "containment-extinguished-explicit-recovery-required"
+            guard (isDetachedSafe || isExactContainmentFence),
+                  terminalEntries.isEmpty,
+                  reservationEntries.isEmpty
+            else { return .notPublished(.parser) }
+        case .terminal:
+            guard let terminalSession,
+                  current.kind == .terminal,
+                  current.sessionID == terminalSession,
+                  terminalEntries.last == terminalSession
+            else { return .notPublished(.parser) }
+        }
+        return publish(pending.payload, Self.proofBasename, transaction) {
+            RecoveryProof.parse($0) == pending
+        }
+    }
+
     /// The only admissible successor to a completed migration. It is bound to
     /// the exact private schema-3 applied record and the latest terminal ledger
     /// receipt, so a migrated proof remains immutable for every legacy shape.
@@ -1877,6 +2124,72 @@ final class RecoveryAuthorityStore {
         case .removed, .alreadyAbsent: return true
         case .removalUnverified, .unsafeEntry, .recoveryRequired, .transactionInactive, .reentrant: return false
         }
+    }
+
+    /// Uninstall is a terminal boundary, not merely a stopped daemon. Once the
+    /// helper has published safe-idle proof, retire every mutable reservation
+    /// entry and projection artifact by its exact, parsed basename. The empty
+    /// reservation inode stays paired with the terminal ledger so a clean
+    /// reinstall is unambiguous. The terminal ledger and the one safe-idle
+    /// proof deliberately remain as bounded audit evidence; unknown,
+    /// quarantined, or malformed state refuses cleanup.
+    func retireUninstallMutableResidue(
+        _ transaction: VerifiedRootStateDirectory.Transaction
+    ) -> Bool {
+        func removed(_ result: VerifiedRootStateDirectory.RemovalResult) -> Bool {
+            result == .removed || result == .alreadyAbsent
+        }
+        switch ledger(Self.reservationBasename) {
+        case .absent:
+            return false
+        case .privateAuthority:
+            guard publishLedger(
+                bytes: "",
+                basename: Self.reservationBasename,
+                transaction: transaction
+            ).isVerified else { return false }
+        case .legacyReadable, .invalid:
+            return false
+        }
+
+        switch statusProjectionTaskRecord() {
+        case .absent:
+            break
+        case let .valid(task):
+            guard removeStatusProjectionTask(expected: task, transaction) else { return false }
+        case .invalid:
+            return false
+        }
+        switch directory.entryState(Self.statusProjectionGenerationBasename) {
+        case .absent:
+            break
+        case .unknown:
+            return false
+        case .present:
+            guard removed(transaction.removeOrResume(
+                Self.statusProjectionGenerationBasename,
+                maximumBytes: 32
+            ) { data in
+                guard let raw = String(data: data, encoding: .utf8),
+                      let generation = UInt64(raw.trimmingCharacters(in: .newlines))
+                else { return false }
+                return raw == "\(generation)\n"
+            }) else { return false }
+        }
+
+        for (basename, maximumBytes) in [
+            ("helper-status.projection.lock", 0),
+            ("helper-status.projection-temp", 4_096),
+        ] {
+            guard removed(transaction.removeOrResume(basename, maximumBytes: maximumBytes) { data in
+                basename == "helper-status.projection.lock" ? data.isEmpty : StatusProjectionTask.parse(String(data: data, encoding: .utf8) ?? "") != nil
+            }) else { return false }
+        }
+        return appliedRecord() == .missing
+            && privateLedger(Self.reservationBasename) == []
+            && containmentReceiptRecord() == .absent
+            && recoveryBudgetRecord() == .absent
+            && journalRecord() == .absent
     }
 
     func containmentReceiptRecord() -> ContainmentReceiptRecord {

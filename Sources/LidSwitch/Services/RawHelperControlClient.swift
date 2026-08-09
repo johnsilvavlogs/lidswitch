@@ -306,6 +306,23 @@ final class RawHelperControlClient: @unchecked Sendable {
         return resolution
     }
 
+    /// Uses the already-enrolled helper to converge a detached recovery state.
+    /// This operation has no authority-creation path: the bridge authenticates
+    /// the installed app and the helper accepts only its zero-session RESTORE
+    /// route.  Installation and removal remain administrator transactions.
+    func restoreThroughInstalledHelper() throws -> HelperControlReply {
+        lock.lock(); defer { lock.unlock() }
+        let reply = try Self.acceptedReply(
+            from: exchangeLocked(UInt32(LS_OPERATION_RESTORE.rawValue), sessionID: Self.zeroUUID)
+        )
+        guard (reply.state == .idle || reply.state == .terminal),
+              reply.power != .unknown,
+              !reply.sleepDisabled,
+              reply.acSleepMinutes != nil
+        else { throw HelperControlError.malformedReply }
+        return reply
+    }
+
     private static func resolveBegin(
         sessionID: UUID,
         exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
@@ -446,6 +463,20 @@ final class RawHelperControlClient: @unchecked Sendable {
     }
 
 #if DEBUG
+    static func restoreThroughInstalledHelperForTesting(
+        exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
+    ) throws -> HelperControlReply {
+        let reply = try acceptedReply(
+            from: exchange(UInt32(LS_OPERATION_RESTORE.rawValue), zeroUUID)
+        )
+        guard (reply.state == .idle || reply.state == .terminal),
+              reply.power != .unknown,
+              !reply.sleepDisabled,
+              reply.acSleepMinutes != nil
+        else { throw HelperControlError.malformedReply }
+        return reply
+    }
+
     static func resolveBeginForTesting(
         sessionID: UUID,
         exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
