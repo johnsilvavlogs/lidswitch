@@ -1,6 +1,30 @@
 import Darwin
 import Foundation
 
+/// Caches the first successful value of a process-lifetime invariant while
+/// preserving fail-closed retries when the underlying kernel read is
+/// temporarily unavailable. The loader runs under the lock, so concurrent
+/// first readers cannot duplicate the expensive lookup or publish different
+/// values.
+final class ProcessInvariantCache<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cachedValue: Value?
+
+    func value(load: () -> Value?) -> Value? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cachedValue {
+            return cachedValue
+        }
+        guard let loaded = load() else {
+            return nil
+        }
+        cachedValue = loaded
+        return loaded
+    }
+}
+
 public struct ActivationLease: Equatable, Sendable {
     public static let schemaVersion = 1
     public static let maximumLifetime: TimeInterval = 30
@@ -123,11 +147,18 @@ public struct ActivationLease: Equatable, Sendable {
 }
 
 public enum MonotonicClock {
-    public static func seconds() -> TimeInterval {
+    /// The Mach timebase is immutable for a running kernel. Resolve it once per
+    /// process so heartbeat, lease, and recovery paths pay only for the
+    /// continuous-clock read on subsequent calls.
+    private static let timebase: (numer: UInt32, denom: UInt32) = {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
+        return (info.numer, info.denom)
+    }()
+
+    public static func seconds() -> TimeInterval {
         let ticks = mach_continuous_time()
-        return TimeInterval(ticks) * TimeInterval(info.numer) / TimeInterval(info.denom) / 1_000_000_000
+        return TimeInterval(ticks) * TimeInterval(timebase.numer) / TimeInterval(timebase.denom) / 1_000_000_000
     }
 }
 
@@ -142,7 +173,13 @@ public enum LeaseValidationFailure: String, Error, Equatable, Sendable {
 }
 
 public enum BootIdentity {
+    private static let cache = ProcessInvariantCache<String>()
+
     public static func current() -> String? {
+        cache.value(load: readCurrent)
+    }
+
+    private static func readCurrent() -> String? {
         var size = 0
         guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0,
               size > 1
@@ -169,7 +206,13 @@ public enum BootIdentity {
 }
 
 public enum SystemBuild {
+    private static let cache = ProcessInvariantCache<String>()
+
     public static func current() -> String? {
+        cache.value(load: readCurrent)
+    }
+
+    private static func readCurrent() -> String? {
         var size = 0
         guard sysctlbyname("kern.osversion", nil, &size, nil, 0) == 0,
               size > 1
