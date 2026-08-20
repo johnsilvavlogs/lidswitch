@@ -1,0 +1,118 @@
+name: Reseal source manifest
+
+on:
+  push:
+    branches:
+      - codex/cache-process-invariants
+
+permissions:
+  contents: write
+
+jobs:
+  reseal:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact branch revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 1
+
+      - name: Rebind Sources and Tests trees
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import stat
+
+          root = Path.cwd()
+          manifest_path = root / "script/source_snapshot_manifest.jsonl"
+          self_test_path = root / "script/test_safe_envelope.py"
+
+          def tree_digest(directory: Path, prefix: str) -> str:
+              digest = hashlib.sha256()
+
+              def visit(current: Path, name: str) -> None:
+                  for child_name in sorted(os.listdir(current)):
+                      if child_name.startswith(".") or re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", child_name) is None:
+                          raise SystemExit(f"unsafe manifest tree name: {child_name!r}")
+                      child = current / child_name
+                      metadata = child.lstat()
+                      child_path = f"{name}/{child_name}"
+                      if stat.S_ISDIR(metadata.st_mode):
+                          visit(child, child_path)
+                      elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1 and not stat.S_IMODE(metadata.st_mode) & 0o022:
+                          payload = child.read_bytes()
+                          if len(payload) != metadata.st_size:
+                              raise SystemExit(f"manifest tree file changed while reading: {child_path}")
+                          file_hash = hashlib.sha256(payload).hexdigest()
+                          digest.update(f"{child_path}|{metadata.st_size}|{file_hash}\n".encode("utf-8"))
+                      else:
+                          raise SystemExit(f"unsafe manifest tree node: {child_path}")
+
+              visit(directory, prefix)
+              return digest.hexdigest()
+
+          rows = [json.loads(line) for line in manifest_path.read_text(encoding="utf-8").splitlines()]
+          replacements = {
+              "Sources": tree_digest(root / "Sources", "Sources"),
+              "Tests": tree_digest(root / "Tests", "Tests"),
+          }
+          found: set[str] = set()
+          for row in rows:
+              path = row.get("path")
+              if path in replacements:
+                  row["sha256"] = replacements[path]
+                  found.add(path)
+          if found != set(replacements):
+              raise SystemExit(f"manifest lacks required tree rows: {sorted(set(replacements) - found)}")
+
+          manifest = "".join(
+              json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+              for row in rows
+          ).encode("utf-8")
+          manifest_path.write_bytes(manifest)
+          manifest_sha256 = hashlib.sha256(manifest).hexdigest()
+          manifest_size = len(manifest)
+
+          self_test = self_test_path.read_text(encoding="utf-8")
+          pattern = re.compile(
+              r'("script/source_snapshot_manifest\.jsonl": \(")[0-9a-f]{64}(\", )[0-9]+(\),)'
+          )
+          updated, count = pattern.subn(
+              rf'\g<1>{manifest_sha256}\g<2>{manifest_size}\g<3>',
+              self_test,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("could not update the frozen source-manifest descriptor exactly once")
+          self_test_path.write_text(updated, encoding="utf-8")
+
+          print(f"Sources={replacements['Sources']}")
+          print(f"Tests={replacements['Tests']}")
+          print(f"manifest_sha256={manifest_sha256}")
+          print(f"manifest_size={manifest_size}")
+          PY
+          git diff --check
+          git diff -- script/source_snapshot_manifest.jsonl script/test_safe_envelope.py
+
+      - name: Commit canonical bindings
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- script/source_snapshot_manifest.jsonl script/test_safe_envelope.py; then
+            echo "Manifest already canonical"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add script/source_snapshot_manifest.jsonl script/test_safe_envelope.py
+          git commit -m "Reseal source snapshot manifest"
+          git push origin HEAD:codex/cache-process-invariants
