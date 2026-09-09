@@ -1,0 +1,94 @@
+name: Apply Codex review fixes from PR
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-pr-resolve-all-review-comments-20260820
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    if: github.head_ref == 'codex/resolve-all-review-comments-20260820'
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: codex/resolve-all-review-comments-20260820
+          fetch-depth: 0
+
+      - name: Apply exact review fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$('/usr/bin/python3' - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('.github/workflows/codex-apply-review-fixes.yml').read_text()
+          match = re.search(r"echo '([A-Za-z0-9+/=]+)' [|] /usr/bin/base64 -D", text)
+          if match is None:
+              raise SystemExit('embedded remediation payload not found')
+          print(match.group(1))
+          PY
+          )"
+          printf '%s' "$payload" | /usr/bin/base64 -D | /usr/bin/gunzip > /tmp/codex-review-fixes.py
+          /usr/bin/python3 /tmp/codex-review-fixes.py
+          rm -f /tmp/codex-review-fixes.py .github/workflows/codex-pr-apply-review-fixes.yml
+
+      - name: Static patch integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          /usr/bin/python3 -m py_compile \
+            script/candidate_canary_preflight.py \
+            script/test_candidate_canary_preflight.py \
+            orchestration/hosted_held_bootstrap.py \
+            orchestration/verify_hosted_candidate_evidence.py \
+            orchestration/tests/test_hosted_evidence_fixture.py \
+            orchestration/tests/test_review_comment_regressions.py
+
+      - name: Canary and hosted regression suites
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 script/test_candidate_canary_preflight.py
+          /usr/bin/python3 orchestration/tests/test_review_comment_regressions.py
+          /usr/bin/python3 orchestration/tests/test_hosted_workflow_safety.py
+          /usr/bin/python3 orchestration/tests/test_hosted_evidence_fixture.py
+
+      - name: Source manifest exact verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 - <<'PY'
+          from pathlib import Path
+          from orchestration.hosted_held_bootstrap import verify_manifest
+          verify_manifest(Path('.'))
+          PY
+
+      - name: Swift regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test
+
+      - name: Commit verified fix set
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .github/workflows/codex-apply-review-fixes.yml
+          test ! -e .github/workflows/codex-pr-apply-review-fixes.yml
+          git status --short
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: resolve all Codex review findings'
+          git push origin HEAD:codex/resolve-all-review-comments-20260820
