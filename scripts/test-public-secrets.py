@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
 import os
 import pathlib
 import subprocess
@@ -303,7 +304,11 @@ def test_dmg_source_binding_proof() -> None:
 
 def test_distribution_release_truth() -> None:
     source = (SCRIPT_DIR.parent / "docs" / "DISTRIBUTION.md").read_text(encoding="utf-8")
-    require("LidSwitch `0.2.15` build `10`" in source, "distribution docs must state the current candidate identity")
+    identity = json.loads((SCRIPT_DIR.parent / "release" / "identity.json").read_text(encoding="utf-8"))
+    require(f"LidSwitch `{identity['appVersion']}` build `{identity['appBuild']}`" in source, "distribution docs must state the current candidate identity")
+    architecture = (SCRIPT_DIR.parent / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    for value in (f"CFBundleShortVersionString={identity['appVersion']}", f"CFBundleVersion={identity['appBuild']}", f"helper version `{identity['helperVersion']}`"):
+        require(value in architecture, "architecture docs must match the current packaged identity")
     require("source-bound candidate identity" in source and "not installed or release-qualified proof" in source, "distribution docs must retain the candidate boundary")
     require("not a published or release-qualified asset" in source, "distribution docs must not claim an unpublished asset")
     require("peer-process-invalid" in source and "SleepDisabled=0" in source and "no automatic rearm" in source, "distribution docs must state native canary acceptance")

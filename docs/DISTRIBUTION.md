@@ -2,7 +2,7 @@
 
 ## Release status
 
-LidSwitch `0.2.15` build `10` is a source-bound candidate identity, not installed or release-qualified proof. A local immutable candidate path now exists, but it remains blocked until its held build receipt, emitted immutable manifest, benchmark evidence, and native canary are reviewed together.
+LidSwitch `0.2.16` build `11` is a source-bound candidate identity, not installed or release-qualified proof. A local immutable candidate path now exists, but it remains blocked until its held build receipt, emitted immutable manifest, benchmark evidence, and native canary are reviewed together.
 
 The release tier is a public manual DMG with ad-hoc signing, no Developer ID
 signature, and no notarization; recipients use Gatekeeper’s **Open Anyway**
