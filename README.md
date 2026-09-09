@@ -2,12 +2,12 @@
 
 LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
 
-Version `0.2.15` build `10` keeps routine Start, Stop/Restore, relaunch, and detached recovery on the installed authenticated helper, so administrator authorization is limited to explicit prepare, repair, removal, and reinstall boundaries. A missing or unloaded helper now routes to **Repair Helper** instead of an impossible Restore loop. Recovery still runs under the fixed root-state lock, validates exact containment extinction, and preserves malformed or ambiguous evidence fail-closed.
+Version `0.2.16` build `11` keeps routine Start, Stop/Restore, relaunch, and detached recovery on the installed authenticated helper, so administrator authorization is limited to explicit prepare, repair, removal, and reinstall boundaries. A missing or unloaded helper now routes to **Repair Helper** instead of an impossible Restore loop. Recovery still runs under the fixed root-state lock, validates exact containment extinction, and preserves malformed or ambiguous evidence fail-closed.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `10` into the root-owned `Current` release directory and removes old startup artifacts. **Repair Helper** uses the same one-time authorization boundary for an existing unavailable installation. Neither action enables a session.
+- **Prepare Safe Helper** installs helper version `11` into the root-owned `Current` release directory and removes old startup artifacts. **Repair Helper** uses the same one-time authorization boundary for an existing unavailable installation. Neither action enables a session.
 - **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
 - The app begins one authenticated process-bound raw-XPC session. The helper chooses its same-boot monotonic deadline, capped at 30 seconds, and the app renews every 8 seconds.
 - The compiled helper validates the enrolled caller identity, exact live process tuple, session UUID, private recovery authority, power source, build, and native power-preference state.
