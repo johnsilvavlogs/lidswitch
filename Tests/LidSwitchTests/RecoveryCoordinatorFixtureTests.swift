@@ -1097,6 +1097,119 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         XCTAssertGreaterThan(second.generation, first.generation)
     }
 
+    func testCompletedProjectionQuarantineResumesAfterInterruptedAcknowledgement() throws {
+        for recovery in ["startup", "prepare", "enqueue"] {
+            let fixture = try Fixture()
+            defer { fixture.dispose() }
+            let task = try fixture.interruptCompletedProjectionRemoval()
+            let quarantine = try XCTUnwrap(VerifiedRootStateDirectory.quarantineBasename(
+                for: RecoveryAuthorityStore.statusProjectionBasename
+            ))
+            XCTAssertEqual(try fixture.readBytes(quarantine), task.payload)
+            XCTAssertTrue(fixture.store.authorityRootInventoryIsSafe)
+            let proof = fixture.store.proofRecord()
+            let publicStatus = try fixture.readBytes("helper-status")
+            switch recovery {
+            case "startup":
+                XCTAssertEqual(fixture.coordinator.recover(intent: .startup, allowReconnect: true), .pristineIdle)
+                XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+            case "prepare":
+                XCTAssertEqual(fixture.store.prepareAuthorityAfterWriterQuiescence(), .ready)
+            default:
+                let next = try XCTUnwrap(try XCTUnwrap(fixture.store.withTransaction {
+                    fixture.store.enqueueStatusProjection(state: "terminal", reason: "fixture-successor", sessionID: nil, $0)
+                }))
+                XCTAssertGreaterThan(next.generation, task.generation)
+                XCTAssertNotEqual(next.token, task.token)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.sandbox.url.appendingPathComponent(quarantine).path))
+            XCTAssertEqual(try fixture.readBytes("helper-status"), publicStatus)
+            XCTAssertEqual(fixture.store.proofRecord(), proof)
+            XCTAssertEqual(fixture.power.setCalls, [])
+        }
+    }
+
+    func testCompletedProjectionQuarantinePreservesMalformedForeignAndAmbiguousEvidence() throws {
+        for fault in ["malformed", "mode", "hardlink", "symlink", "both", "watermark", "token", "session", "generation"] {
+            let fixture = try Fixture()
+            defer { fixture.dispose() }
+            let task = try fixture.interruptCompletedProjectionRemoval()
+            let quarantine = try XCTUnwrap(VerifiedRootStateDirectory.quarantineBasename(
+                for: RecoveryAuthorityStore.statusProjectionBasename
+            ))
+            let path = fixture.sandbox.url.appendingPathComponent(quarantine).path
+            switch fault {
+            case "malformed":
+                try fixture.createPrivateFile(quarantine, bytes: "interrupted-garbage\n")
+            case "mode":
+                XCTAssertEqual(chmod(path, 0o644), 0)
+            case "hardlink":
+                XCTAssertEqual(link(path, fixture.sandbox.url.appendingPathComponent("foreign-link").path), 0)
+            case "symlink":
+                let retained = fixture.sandbox.url.appendingPathComponent("foreign-target").path
+                XCTAssertEqual(rename(path, retained), 0)
+                XCTAssertEqual(symlink(retained, path), 0)
+            case "both":
+                try fixture.createPrivateFile(RecoveryAuthorityStore.statusProjectionBasename, bytes: task.payload)
+            case "watermark":
+                try fixture.createPrivateFile(RecoveryAuthorityStore.statusProjectionGenerationBasename, bytes: "\(task.generation + 1)\n")
+            default:
+                let foreign = try XCTUnwrap(StatusProjectionTask(
+                    token: fault == "token" ? UUID() : task.token,
+                    generation: fault == "generation" ? task.generation + 1 : task.generation,
+                    state: task.state, reason: task.reason,
+                    sessionID: fault == "session" ? UUID() : task.sessionID,
+                    issuedEpoch: task.issuedEpoch, issuedMonotonicMillis: task.issuedMonotonicMillis,
+                    bootID: task.bootID, deadlineNanoseconds: task.deadlineNanoseconds
+                ))
+                try fixture.createLegacyFile("helper-status", bytes: foreign.statusPayload)
+            }
+            let retainedBytes = try fixture.readBytes(quarantine)
+            let status = try fixture.readBytes("helper-status")
+            let proof = fixture.store.proofRecord()
+            XCTAssertFalse(fixture.store.authorityRootInventoryIsSafe, fault)
+            XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .invalid, fault)
+            XCTAssertEqual(fixture.store.withTransaction {
+                fixture.store.reconcileCompletedStatusProjectionRemoval($0)
+            }, false, fault)
+            XCTAssertNil(try XCTUnwrap(fixture.store.withTransaction {
+                fixture.store.enqueueStatusProjection(state: "terminal", reason: "fixture-successor", sessionID: nil, $0)
+            }), fault)
+            XCTAssertEqual(try fixture.readBytes(quarantine), retainedBytes, fault)
+            XCTAssertEqual(try fixture.readBytes("helper-status"), status, fault)
+            XCTAssertEqual(fixture.store.proofRecord(), proof, fault)
+            XCTAssertEqual(fixture.power.setCalls, [], fault)
+        }
+    }
+
+    func testCompletedProjectionQuarantineRejectsReplacementAtRemovalBoundary() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let task = try fixture.interruptCompletedProjectionRemoval()
+        let quarantine = try XCTUnwrap(VerifiedRootStateDirectory.quarantineBasename(
+            for: RecoveryAuthorityStore.statusProjectionBasename
+        ))
+        let replacement = try XCTUnwrap(StatusProjectionTask(
+            generation: task.generation, state: task.state, reason: task.reason,
+            sessionID: task.sessionID, deadlineNanoseconds: task.deadlineNanoseconds
+        ))
+        try fixture.createPrivateFile("replacement", bytes: replacement.payload)
+        let system = VerifiedRootStateDirectory.Operations.system
+        try fixture.activateDirectoryOperations(.init(
+            fileBarrier: system.fileBarrier, directoryEntryBarrier: system.directoryEntryBarrier,
+            rename: system.rename, unlink: system.unlink,
+            beforeQuarantineUnlink: { fd, name in
+                if name == quarantine { XCTAssertEqual(renameat(fd, "replacement", fd, name), 0) }
+            }
+        ))
+        XCTAssertEqual(fixture.store.withTransaction {
+            fixture.store.reconcileCompletedStatusProjectionRemoval($0)
+        }, false)
+        XCTAssertEqual(try fixture.readBytes(quarantine), replacement.payload)
+        XCTAssertEqual(try fixture.readBytes("helper-status"), task.statusPayload)
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
     /// Uses the production atomic writer against the owned fixture status file;
     /// it is intentionally source-only until the isolated XCTest gate reopens.
     func testStatusProjectionWriterSerializesNewGenerationBeforeOldRetry() throws {
@@ -2846,6 +2959,42 @@ private final class Fixture {
             expectedGroupID: getgid(),
             fileOperations: fileOperations
         )
+    }
+
+    func activateDirectoryOperations(_ operations: VerifiedRootStateDirectory.Operations) throws {
+        let directory = try XCTUnwrap(Self.directory(at: sandbox.url, operations: operations))
+        storeBox.store = RecoveryAuthorityStore(
+            directory: directory, expectedOwnerUID: getuid(), expectedGroupID: getgid()
+        )
+    }
+
+    func interruptCompletedProjectionRemoval() throws -> StatusProjectionTask {
+        // An old-boot, expired task exercises acknowledgement recovery without
+        // republishing or rebasing stale diagnostic bytes after restart.
+        let generation = try XCTUnwrap(UInt64(readBytes(RecoveryAuthorityStore.statusProjectionGenerationBasename)
+            .trimmingCharacters(in: .newlines))) + 1
+        let task = try XCTUnwrap(StatusProjectionTask(
+            generation: generation, state: "inactive", reason: "pristine", sessionID: nil,
+            issuedEpoch: 10, issuedMonotonicMillis: 10, bootID: "previous-boot", deadlineNanoseconds: 100
+        ))
+        try createPrivateFile(RecoveryAuthorityStore.statusProjectionGenerationBasename, bytes: "\(generation)\n")
+        try createPrivateFile(RecoveryAuthorityStore.statusProjectionBasename, bytes: task.payload)
+        XCTAssertEqual(statusWriteOutcome(task: task), .written)
+        let quarantine = try XCTUnwrap(VerifiedRootStateDirectory.quarantineBasename(
+            for: RecoveryAuthorityStore.statusProjectionBasename
+        ))
+        let system = VerifiedRootStateDirectory.Operations.system
+        try activateDirectoryOperations(.init(
+            fileBarrier: system.fileBarrier, directoryEntryBarrier: system.directoryEntryBarrier,
+            rename: system.rename,
+            unlink: { fd, name in
+                if name == quarantine { errno = EIO; return -1 }
+                return system.unlink(fd, name)
+            }
+        ))
+        XCTAssertEqual(store.withTransaction { store.removeStatusProjectionTask(expected: task, $0) }, false)
+        try activateDirectoryOperations(.system)
+        return task
     }
 
     private static func directory(

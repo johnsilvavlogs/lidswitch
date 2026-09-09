@@ -187,6 +187,7 @@ enum StatusProjectionDispatcher {
         let now = UInt64(max(0, MonotonicClock.seconds()) * 1_000_000_000)
         let currentBoot = BootIdentity.current() ?? "unknown"
         guard let task = store.withTransaction({ transaction -> StatusProjectionTask? in
+            guard store.reconcileCompletedStatusProjectionRemoval(transaction) else { return nil }
             guard case let .valid(task) = store.statusProjectionTaskRecord(), !task.isExhausted else { return nil }
             guard task.bootID != currentBoot else { return task }
             guard let rebased = task.rebasedForCurrentBoot(now: now, bootID: currentBoot),

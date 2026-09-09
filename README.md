@@ -107,7 +107,7 @@ See `docs/VALIDATION.md` and `docs/OPERATIONS.md` before running it.
 /Library/Application Support/LidSwitch/terminal-generations
 /Library/Application Support/LidSwitch/recovery-reservations
 /Library/Application Support/LidSwitch/recovery-proof
-/Library/Application Support/LidSwitch/root-state.lock
+/Library/Application Support/LidSwitch/session-authorization.lock
 /Library/Application Support/LidSwitch/administrator-transaction-{uuid}.receipt
 ~/Library/Application Support/LidSwitch/activation-lease
 ~/Library/Application Support/LidSwitch/session-history.json
