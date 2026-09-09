@@ -1130,7 +1130,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
     }
 
     func testCompletedProjectionQuarantinePreservesMalformedForeignAndAmbiguousEvidence() throws {
-        for fault in ["malformed", "mode", "hardlink", "symlink", "both", "watermark", "token", "session", "generation"] {
+        for fault in ["malformed", "mode", "symlink", "both", "watermark", "token", "session", "generation"] {
             let fixture = try Fixture()
             defer { fixture.dispose() }
             let task = try fixture.interruptCompletedProjectionRemoval()
@@ -1143,8 +1143,6 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
                 try fixture.createPrivateFile(quarantine, bytes: "interrupted-garbage\n")
             case "mode":
                 XCTAssertEqual(chmod(path, 0o644), 0)
-            case "hardlink":
-                XCTAssertEqual(link(path, fixture.sandbox.url.appendingPathComponent("foreign-link").path), 0)
             case "symlink":
                 let retained = fixture.sandbox.url.appendingPathComponent("foreign-target").path
                 XCTAssertEqual(rename(path, retained), 0)
@@ -1180,6 +1178,27 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             XCTAssertEqual(fixture.store.proofRecord(), proof, fault)
             XCTAssertEqual(fixture.power.setCalls, [], fault)
         }
+    }
+
+    func testCompletedProjectionQuarantineRejectsHardlinkedMetadata() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        _ = try fixture.interruptCompletedProjectionRemoval()
+        let quarantine = try XCTUnwrap(VerifiedRootStateDirectory.quarantineBasename(
+            for: RecoveryAuthorityStore.statusProjectionBasename
+        ))
+        var metadata = stat()
+        XCTAssertEqual(lstat(fixture.sandbox.url.appendingPathComponent(quarantine).path, &metadata), 0)
+        XCTAssertTrue(RecoveryAuthorityStore.regularTextMetadataIsAccepted(
+            metadata, expectedOwnerUID: getuid(), maximumBytes: StatusProjectionTask.maximumBytes
+        ))
+        // The held sandbox denies link(2). Exercise the exact predicate called
+        // by the production quarantine reader with only its link count changed.
+        metadata.st_nlink = 2
+        XCTAssertFalse(RecoveryAuthorityStore.regularTextMetadataIsAccepted(
+            metadata, expectedOwnerUID: getuid(), maximumBytes: StatusProjectionTask.maximumBytes
+        ))
+        XCTAssertEqual(fixture.power.setCalls, [])
     }
 
     func testCompletedProjectionQuarantineRejectsReplacementAtRemovalBoundary() throws {
@@ -2975,7 +2994,8 @@ private final class Fixture {
             .trimmingCharacters(in: .newlines))) + 1
         let task = try XCTUnwrap(StatusProjectionTask(
             generation: generation, state: "inactive", reason: "pristine", sessionID: nil,
-            issuedEpoch: 10, issuedMonotonicMillis: 10, bootID: "previous-boot", deadlineNanoseconds: 100
+            issuedEpoch: 10, issuedMonotonicMillis: 10,
+            bootID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", deadlineNanoseconds: 100
         ))
         try createPrivateFile(RecoveryAuthorityStore.statusProjectionGenerationBasename, bytes: "\(generation)\n")
         try createPrivateFile(RecoveryAuthorityStore.statusProjectionBasename, bytes: task.payload)

@@ -2354,6 +2354,18 @@ final class RecoveryAuthorityStore {
 
     private enum ClassifiedText: Equatable { case privateMode(String), legacyMode(String), invalid }
 
+    static func regularTextMetadataIsAccepted(
+        _ status: stat,
+        expectedOwnerUID: uid_t,
+        maximumBytes: Int
+    ) -> Bool {
+        (status.st_mode & S_IFMT) == S_IFREG
+            && status.st_uid == expectedOwnerUID
+            && status.st_nlink == 1
+            && status.st_size >= 0
+            && status.st_size <= off_t(maximumBytes)
+    }
+
     /// Opens a leaf exactly once, classifies its mode from that held descriptor,
     /// reads exact EOF, revalidates descriptor metadata, then proves the public
     /// basename still binds the same inode. A legacy fallback can never reopen
@@ -2367,11 +2379,9 @@ final class RecoveryAuthorityStore {
 
         var before = stat()
         guard fstat(fd, &before) == 0,
-              (before.st_mode & S_IFMT) == S_IFREG,
-              before.st_uid == expectedOwnerUID,
-              before.st_nlink == 1,
-              before.st_size >= 0,
-              before.st_size <= off_t(maximumBytes)
+              Self.regularTextMetadataIsAccepted(
+                before, expectedOwnerUID: expectedOwnerUID, maximumBytes: maximumBytes
+              )
         else { return .invalid }
         let mode = before.st_mode & 0o7777
         // Current private authority is exact root:wheel 0600. Historical
