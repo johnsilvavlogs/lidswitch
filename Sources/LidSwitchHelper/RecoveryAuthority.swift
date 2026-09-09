@@ -529,6 +529,9 @@ final class RecoveryAuthorityStore {
             // no authority publication here.
             return .recoveryRequired("unsafe-authority-root-inventory")
         }
+        guard reconcileCompletedStatusProjectionRemoval(transaction) else {
+            return .recoveryRequired("status-projection-removal-unverified")
+        }
         var terminal = ledger(Self.terminalBasename)
         var reservation = ledger(Self.reservationBasename)
         let initialApplied = appliedRecordSnapshot()
@@ -1352,6 +1355,12 @@ final class RecoveryAuthorityStore {
                    !strictProjectionArtifactIsValid(name, expectedMode: 0o644, maximumBytes: 4_096) { return nil }
                 continue
             }
+            if name == VerifiedRootStateDirectory.quarantineBasename(for: Self.statusProjectionBasename) {
+                // An interrupted acknowledgement is diagnostic residue, not
+                // new recovery authority. Admit only the exact published task.
+                guard completedStatusProjectionQuarantine() != nil else { return nil }
+                continue
+            }
             let recoverableQuarantines = [
                 Self.appliedBasename,
                 Self.legacyACBasename,
@@ -1534,7 +1543,8 @@ final class RecoveryAuthorityStore {
     private func strictProjectionArtifactIsValid(
         _ basename: String,
         expectedMode: mode_t,
-        maximumBytes: off_t
+        maximumBytes: off_t,
+        expectedPayload: String? = nil
     ) -> Bool {
         guard let parent = directory.directoryDescriptor else { return false }
         let fd = Darwin.openat(parent, basename, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
@@ -1546,7 +1556,8 @@ final class RecoveryAuthorityStore {
               before.st_uid == expectedOwnerUID, before.st_gid == expectedGroupID,
               before.st_nlink == 1, before.st_mode & 0o7777 == expectedMode,
               before.st_size >= 0, before.st_size <= maximumBytes,
-              readExactly(fd, count: Int(before.st_size)) != nil
+              let bytes = readExactly(fd, count: Int(before.st_size)),
+              expectedPayload.map({ bytes == Data($0.utf8) }) ?? true
         else { return false }
         var after = stat(); var bound = stat()
         return fstat(fd, &after) == 0 && sameMetadata(before, after)
@@ -2049,14 +2060,47 @@ final class RecoveryAuthorityStore {
     enum StatusProjectionTaskRecord: Equatable { case absent, valid(StatusProjectionTask), invalid }
 
     func statusProjectionTaskRecord() -> StatusProjectionTaskRecord {
-        switch directory.entryState(Self.statusProjectionBasename) {
-        case .absent:
-            return evidenceState(for: Self.statusProjectionBasename) == .absent ? .absent : .invalid
-        case .unknown: return .invalid
-        case .present:
-            guard case let .privateMode(raw) = classifiedText(Self.statusProjectionBasename, maximumBytes: StatusProjectionTask.maximumBytes),
+        switch recoverableLeafName(Self.statusProjectionBasename) {
+        case .absent: return .absent
+        case .invalid: return .invalid
+        case let .bound(name):
+            guard name == Self.statusProjectionBasename,
+                  case let .privateMode(raw) = classifiedText(name, maximumBytes: StatusProjectionTask.maximumBytes),
                   let task = StatusProjectionTask.parse(raw) else { return .invalid }
             return .valid(task)
+        }
+    }
+
+    private func completedStatusProjectionQuarantine() -> StatusProjectionTask? {
+        guard let quarantine = VerifiedRootStateDirectory.quarantineBasename(for: Self.statusProjectionBasename),
+              case let .bound(name) = recoverableLeafName(Self.statusProjectionBasename), name == quarantine,
+              case let .privateMode(raw) = classifiedText(name, maximumBytes: StatusProjectionTask.maximumBytes),
+              let task = StatusProjectionTask.parse(raw),
+              case let .privateMode(watermark) = classifiedText(Self.statusProjectionGenerationBasename, maximumBytes: 32),
+              watermark == "\(task.generation)\n",
+              strictProjectionArtifactIsValid("helper-status", expectedMode: 0o644, maximumBytes: 4_096,
+                                              expectedPayload: task.statusPayload)
+        else { return nil }
+        return task
+    }
+
+    /// Resume only a completed projection acknowledgement. The fixed lock,
+    /// exact metadata/parser checks and removal CAS preserve malformed, foreign,
+    /// swapped and public-plus-quarantine evidence. This never republishes an
+    /// old status or grants power/session authority, even across a reboot.
+    func reconcileCompletedStatusProjectionRemoval(
+        _ transaction: VerifiedRootStateDirectory.Transaction
+    ) -> Bool {
+        guard let quarantine = VerifiedRootStateDirectory.quarantineBasename(for: Self.statusProjectionBasename) else { return false }
+        if directory.entryState(quarantine) == .absent { return true }
+        guard let task = completedStatusProjectionQuarantine() else { return false }
+        switch transaction.removeOrResume(Self.statusProjectionBasename, maximumBytes: StatusProjectionTask.maximumBytes) { data in
+            guard let raw = String(data: data, encoding: .utf8) else { return false }
+            return raw == task.payload && StatusProjectionTask.parse(raw) == task
+                && self.completedStatusProjectionQuarantine() == task
+        } {
+        case .removed, .alreadyAbsent: return true
+        case .removalUnverified, .unsafeEntry, .recoveryRequired, .transactionInactive, .reentrant: return false
         }
     }
 
@@ -2070,6 +2114,7 @@ final class RecoveryAuthorityStore {
         _ transaction: VerifiedRootStateDirectory.Transaction,
         generationFloor: UInt64 = 0
     ) -> StatusProjectionTask? {
+        guard reconcileCompletedStatusProjectionRemoval(transaction) else { return nil }
         let prior: StatusProjectionTask?
         switch statusProjectionTaskRecord() {
         case .absent: prior = nil
@@ -2309,6 +2354,18 @@ final class RecoveryAuthorityStore {
 
     private enum ClassifiedText: Equatable { case privateMode(String), legacyMode(String), invalid }
 
+    static func regularTextMetadataIsAccepted(
+        _ status: stat,
+        expectedOwnerUID: uid_t,
+        maximumBytes: Int
+    ) -> Bool {
+        (status.st_mode & S_IFMT) == S_IFREG
+            && status.st_uid == expectedOwnerUID
+            && status.st_nlink == 1
+            && status.st_size >= 0
+            && status.st_size <= off_t(maximumBytes)
+    }
+
     /// Opens a leaf exactly once, classifies its mode from that held descriptor,
     /// reads exact EOF, revalidates descriptor metadata, then proves the public
     /// basename still binds the same inode. A legacy fallback can never reopen
@@ -2322,11 +2379,9 @@ final class RecoveryAuthorityStore {
 
         var before = stat()
         guard fstat(fd, &before) == 0,
-              (before.st_mode & S_IFMT) == S_IFREG,
-              before.st_uid == expectedOwnerUID,
-              before.st_nlink == 1,
-              before.st_size >= 0,
-              before.st_size <= off_t(maximumBytes)
+              Self.regularTextMetadataIsAccepted(
+                before, expectedOwnerUID: expectedOwnerUID, maximumBytes: maximumBytes
+              )
         else { return .invalid }
         let mode = before.st_mode & 0o7777
         // Current private authority is exact root:wheel 0600. Historical

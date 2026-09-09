@@ -1,6 +1,6 @@
 {
   "name": "lidswitch-public-launch",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "private": true,
   "scripts": {
     "release:identity:check": "node scripts/check-release-identity.mjs",
