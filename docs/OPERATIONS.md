@@ -2,14 +2,16 @@
 
 ## Normal use
 
-1. Connect AC power and leave the lid open.
+1. Leave the lid open while setting up.
 2. Open LidSwitch.
-3. Prepare the helper if requested. Protection remains off.
-4. Confirm **Start Plugged-In Session**.
-5. Wait for **Protection active — plugged in** before closing the lid.
-6. Choose **Stop and Restore** before quitting when practical.
+3. Approve helper installation if requested. This authorization persists for the installed helper.
+4. Choose **Plugged in**, **On battery**, or both. Battery operation is initially off.
+5. Turn on **Keep Mac awake** and wait for **Awake while plugged in** or **Awake on battery** before closing the lid.
+6. Turn the switch off to restore normal sleep, or choose **Quit** to restore and exit.
 
-Unplugging, quitting, restarting, or losing the heartbeat ends the session. Replugging does not rearm it.
+Switching between selected power sources keeps protection active. An unselected source restores normal sleep while the switch waits; a selected source resumes protection only while this app remains open with the switch on. Changing source choices safely ends the existing generation before applying a new policy. Both choices off turns the master off.
+
+Quitting, restarting, or losing the heartbeat ends the session. Launching the app again keeps the saved source choices and leaves protection off. Ordinary switching and quitting do not ask for confirmation; setup, repair, updates, or removal may require macOS authorization.
 
 ## Inspect live state
 

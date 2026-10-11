@@ -42,16 +42,6 @@ final class LidSwitchApplicationDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Restore sleep and quit LidSwitch?"
-        alert.informativeText = "LidSwitch will stop renewing any session and verify that the system sleep override is off before it quits."
-        alert.addButton(withTitle: "Restore and Quit")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return .terminateCancel
-        }
-
         guard controller.requiresTerminationCleanup else {
             return .terminateNow
         }

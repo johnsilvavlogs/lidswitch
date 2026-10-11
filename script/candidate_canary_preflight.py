@@ -28,7 +28,8 @@ if ROOT not in sys.path:
 from immutable_candidate_core import CandidateError, canonical, parse, validate_manifest
 
 BINDING_SCHEMA = "lidswitch-candidate-canary-v1"
-RECEIPT_SCHEMA = "lidswitch-candidate-canary-receipt-v2"
+RECEIPT_SCHEMA = "lidswitch-candidate-canary-receipt-v3"
+LEGACY_RECEIPT_SCHEMA = "lidswitch-candidate-canary-receipt-v2"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 CDHASH = re.compile(r"[0-9a-f]{40}\Z")
 SESSION = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z")
@@ -194,6 +195,22 @@ def _sleep_disabled(live: str) -> int:
     if len(rows) != 1:
         fail("pmset-live-invalid")
     return int(rows[0])
+
+
+def _power_source(batt: str) -> str:
+    rows = re.findall(r"^Now drawing from [^\n]*$", batt, flags=re.MULTILINE)
+    sources = {"Now drawing from 'AC Power'": "AC", "Now drawing from 'Battery Power'": "Battery"}
+    if len(rows) != 1 or rows[0].rstrip(" \t") not in sources:
+        fail("power-source-unknown")
+    return sources[rows[0].rstrip(" \t")]
+
+
+def _validate_baseline(baseline):
+    if baseline["power_source"] not in ("AC", "Battery"):
+        fail("receipt-schema-invalid")
+    for name in ("ac_sleep_minutes", "battery_sleep_minutes"):
+        if isinstance(baseline[name], bool) or not isinstance(baseline[name], int) or baseline[name] < 0:
+            fail("receipt-schema-invalid")
 
 
 def _custom_sleep(custom: str):
@@ -375,7 +392,8 @@ def _observe_before(args, runner=None):
     batt = _command(("/usr/bin/pmset", "-g", "batt"), runner)
     live = _command(("/usr/bin/pmset", "-g", "live"), runner)
     custom = _command(("/usr/bin/pmset", "-g", "custom"), runner)
-    if "Now drawing from 'AC Power'" not in batt or _sleep_disabled(live) != 0:
+    power_source = _power_source(batt)
+    if _sleep_disabled(live) != 0:
         fail("power-not-safe-idle")
     sleeps = _custom_sleep(custom)
     status, status_sha = _status(args.status_file)
@@ -389,13 +407,17 @@ def _observe_before(args, runner=None):
         "candidate": {"candidate_id": manifest["candidate_id"], "manifest_sha256": hashlib.sha256(_read_regular(args.candidate_manifest)).hexdigest(), "binding_sha256": binding_sha},
         "installed": {"app_sha256": binding["app"]["executable_sha256"], "app_cdhash": binding["app"]["executable_cdhash"], "helper_sha256": binding["helper"]["sha256"], "helper_cdhash": binding["helper"]["cdhash"]},
         "lid_observation": lid_observation,
-        "before": {"power_source": "AC", "sleep_disabled": 0, "applied_state_present": False, "ac_sleep_minutes": sleeps["AC Power"], "battery_sleep_minutes": sleeps["Battery Power"], "pmset_batt_sha256": hashlib.sha256(batt.encode()).hexdigest(), "pmset_live_sha256": hashlib.sha256(live.encode()).hexdigest(), "pmset_custom_sha256": hashlib.sha256(custom.encode()).hexdigest(), "status_state": status["state"], "status_reason": status["reason"], "status_session": status["session"], "status_sha256": status_sha},
+        "before": {"power_source": power_source, "sleep_disabled": 0, "applied_state_present": False, "ac_sleep_minutes": sleeps["AC Power"], "battery_sleep_minutes": sleeps["Battery Power"], "pmset_batt_sha256": hashlib.sha256(batt.encode()).hexdigest(), "pmset_live_sha256": hashlib.sha256(live.encode()).hexdigest(), "pmset_custom_sha256": hashlib.sha256(custom.encode()).hexdigest(), "status_state": status["state"], "status_reason": status["reason"], "status_session": status["session"], "status_sha256": status_sha},
     }
 
 
 def _load_receipt(path, phase):
     receipt = _canonical_json(_read_regular(path))
-    if receipt.get("schema_version") != RECEIPT_SCHEMA or receipt.get("phase") != phase:
+    schema = receipt.get("schema_version")
+    # v2 preflights contain the full baseline and can safely enter a v3 chain.
+    # v2 active receipts omitted it, so cannot prove timer restoration.
+    supported = schema == RECEIPT_SCHEMA or (phase == "preflight" and schema == LEGACY_RECEIPT_SCHEMA)
+    if not supported or receipt.get("phase") != phase:
         fail("receipt-phase-invalid")
     if phase == "preflight":
         _keys(receipt, ("schema_version", "phase", "receipt_id", "created_unix", "candidate", "installed", "lid_observation", "before"))
@@ -408,20 +430,19 @@ def _load_receipt(path, phase):
         _hex(installed["app_sha256"]); _cdhash(installed["app_cdhash"]); _hex(installed["helper_sha256"]); _cdhash(installed["helper_cdhash"])
         _validate_lid_observation(receipt["lid_observation"])
         before = _keys(receipt["before"], ("power_source", "sleep_disabled", "applied_state_present", "ac_sleep_minutes", "battery_sleep_minutes", "pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_state", "status_reason", "status_session", "status_sha256"))
-        if before["power_source"] != "AC" or before["sleep_disabled"] != 0 or before["applied_state_present"] is not False or not _safe_idle_status(before["status_state"], before["status_reason"], before["status_session"]):
+        _validate_baseline(before)
+        if (schema == LEGACY_RECEIPT_SCHEMA and before["power_source"] != "AC") or before["sleep_disabled"] != 0 or before["applied_state_present"] is not False or not _safe_idle_status(before["status_state"], before["status_reason"], before["status_session"]):
             fail("receipt-schema-invalid")
         for name in ("pmset_batt_sha256", "pmset_live_sha256", "pmset_custom_sha256", "status_sha256"):
             _hex(before[name])
-        for name in ("ac_sleep_minutes", "battery_sleep_minutes"):
-            if isinstance(before[name], bool) or not isinstance(before[name], int) or before[name] < 0:
-                fail("receipt-schema-invalid")
     elif phase == "active":
-        _keys(receipt, ("schema_version", "phase", "preflight_receipt_sha256", "candidate", "session_uuid", "active_status_sha256", "active_sleep_disabled"))
+        _keys(receipt, ("schema_version", "phase", "preflight_receipt_sha256", "candidate", "session_uuid", "active_status_sha256", "active_sleep_disabled", "baseline"))
         _hex(receipt["preflight_receipt_sha256"]); _hex(receipt["active_status_sha256"])
         candidate = _keys(receipt["candidate"], ("candidate_id", "manifest_sha256", "binding_sha256"))
         _hex(candidate["candidate_id"]); _hex(candidate["manifest_sha256"]); _hex(candidate["binding_sha256"])
         if not SESSION.fullmatch(receipt["session_uuid"]) or receipt["active_sleep_disabled"] != 1:
             fail("receipt-schema-invalid")
+        _validate_baseline(_keys(receipt["baseline"], ("power_source", "ac_sleep_minutes", "battery_sleep_minutes")))
     return receipt, hashlib.sha256(canonical(receipt)).hexdigest()
 
 
@@ -431,12 +452,16 @@ def bind_active(preflight_path: str, active_path: str, status_path: str, manifes
     if preflight["candidate"] != {"candidate_id": manifest["candidate_id"], "manifest_sha256": hashlib.sha256(_read_regular(manifest_path)).hexdigest(), "binding_sha256": binding_sha}:
         fail("candidate-receipt-mismatch")
     _verify_installed(binding, app_bundle, helper, runner)
+    batt = _command(("/usr/bin/pmset", "-g", "batt"), runner)
     live = _command(("/usr/bin/pmset", "-g", "live"), runner)
     status, status_sha = _status(status_path)
     session = status["session"]
+    if _power_source(batt) != preflight["before"]["power_source"]:
+        fail("power-source-changed")
     if _sleep_disabled(live) != 1 or status["state"] != "active" or not SESSION.fullmatch(session):
         fail("active-session-unverified")
-    return _write_new(active_path, {"schema_version": RECEIPT_SCHEMA, "phase": "active", "preflight_receipt_sha256": preflight_sha, "candidate": preflight["candidate"], "session_uuid": session, "active_status_sha256": status_sha, "active_sleep_disabled": 1})
+    baseline = {key: preflight["before"][key] for key in ("power_source", "ac_sleep_minutes", "battery_sleep_minutes")}
+    return _write_new(active_path, {"schema_version": RECEIPT_SCHEMA, "phase": "active", "preflight_receipt_sha256": preflight_sha, "candidate": preflight["candidate"], "session_uuid": session, "active_status_sha256": status_sha, "active_sleep_disabled": 1, "baseline": baseline})
 
 
 def finalize(active_path: str, final_path: str, status_path: str, manifest_path: str, binding_path: str, app_bundle: str, helper: str, runner=None):
@@ -445,11 +470,19 @@ def finalize(active_path: str, final_path: str, status_path: str, manifest_path:
     if active["candidate"] != {"candidate_id": manifest["candidate_id"], "manifest_sha256": hashlib.sha256(_read_regular(manifest_path)).hexdigest(), "binding_sha256": binding_sha}:
         fail("candidate-receipt-mismatch")
     _verify_installed(binding, app_bundle, helper, runner)
+    batt = _command(("/usr/bin/pmset", "-g", "batt"), runner)
     live = _command(("/usr/bin/pmset", "-g", "live"), runner)
+    custom = _command(("/usr/bin/pmset", "-g", "custom"), runner)
+    sleeps = _custom_sleep(custom)
     status, status_sha = _status(status_path)
+    baseline = active["baseline"]
+    if _power_source(batt) != baseline["power_source"]:
+        fail("power-source-changed")
     if _sleep_disabled(live) != 0 or status["state"] != "terminal" or status["reason"] != PEER_DEATH_REASON or status["session"] != active["session_uuid"]:
         fail("rollback-or-terminal-unverified")
-    return _write_new(final_path, {"schema_version": RECEIPT_SCHEMA, "phase": "final", "active_receipt_sha256": active_sha, "candidate": active["candidate"], "session_uuid": active["session_uuid"], "rollback": {"sleep_disabled": 0, "terminal_reason": PEER_DEATH_REASON, "terminal_status_sha256": status_sha, "no_rearm_observation": "validate_live_state-post-wait"}})
+    if sleeps != {"AC Power": baseline["ac_sleep_minutes"], "Battery Power": baseline["battery_sleep_minutes"]}:
+        fail("sleep-timers-not-restored")
+    return _write_new(final_path, {"schema_version": RECEIPT_SCHEMA, "phase": "final", "active_receipt_sha256": active_sha, "candidate": active["candidate"], "session_uuid": active["session_uuid"], "rollback": {"sleep_disabled": 0, "ac_sleep_minutes": sleeps["AC Power"], "battery_sleep_minutes": sleeps["Battery Power"], "pmset_custom_sha256": hashlib.sha256(custom.encode()).hexdigest(), "terminal_reason": PEER_DEATH_REASON, "terminal_status_sha256": status_sha, "no_rearm_observation": "validate_live_state-post-wait"}})
 
 
 def main(argv=None):

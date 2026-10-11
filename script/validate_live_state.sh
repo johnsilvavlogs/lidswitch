@@ -86,17 +86,29 @@ sleep_disabled() {
   '
 }
 
-ac_sleep_minutes() {
-  /usr/bin/pmset -g custom | /usr/bin/awk '
-    /^AC Power:/ { ac=1; next }
-    /^Battery Power:/ { ac=0; next }
-    ac && $1 == "sleep" && $2 ~ /^[0-9]+$/ { print $2; found=1; exit }
+source_sleep_minutes() {
+  /usr/bin/pmset -g custom | /usr/bin/awk -v source="$expected_source" '
+    /^AC Power:/ { selected=(source == "AC"); next }
+    /^Battery Power:/ { selected=(source == "Battery"); next }
+    selected && $1 == "sleep" && $2 ~ /^[0-9]+$/ { print $2; found=1; exit }
     END { if (!found) exit 1 }
   '
 }
 
-power_is_ac() {
-  /usr/bin/pmset -g batt | /usr/bin/grep -Fq "Now drawing from 'AC Power'"
+power_source() {
+  /usr/bin/pmset -g batt | /usr/bin/awk '
+    /^Now drawing from / {
+      count++
+      sub(/[ \t]+$/, "")
+      if ($0 == "Now drawing from '\''AC Power'\''") source="AC"
+      else if ($0 == "Now drawing from '\''Battery Power'\''") source="Battery"
+    }
+    END { if (count == 1 && source != "") print source; else exit 1 }
+  '
+}
+
+power_is_unchanged() {
+  [ "$(power_source)" = "$expected_source" ]
 }
 
 status_value() {
@@ -104,7 +116,7 @@ status_value() {
 }
 
 test "$(/usr/sbin/sysctl -n kern.osversion)" = "$EXPECTED_BUILD" || fail "macOS build is not $EXPECTED_BUILD"
-power_is_ac || fail "Mac must remain on AC power"
+expected_source="$(power_source)" || fail "power source must be known AC or battery"
 test "$(sleep_disabled)" = "1" || fail "start a verified LidSwitch session before this canary"
 test -x "$APP_BINARY" || fail "installed app is missing"
 test -x "$HELPER" || fail "native helper is missing"
@@ -145,12 +157,15 @@ test -n "$pid" || fail "installed LidSwitch app is not running"
 # The manager creates the preflight receipt while the candidate is safely idle,
 # then manually starts it.  This read-only bind records the exact public active
 # session before any deliberate SIGKILL occurs; it cannot manufacture a session.
+session_bound="$(status_value session)"
+test -n "$session_bound" && test "$session_bound" != "none" || fail "bound helper session is missing"
 /usr/bin/python3 -I -S -B "$CANARY_PREFLIGHT_TOOL" bind-active \
   --preflight-receipt "$CANARY_PREFLIGHT_RECEIPT" \
   --active-receipt "$CANARY_ACTIVE_RECEIPT" \
   --status-file "$STATUS_FILE" --candidate-manifest "$CANARY_CANDIDATE_MANIFEST" \
   --canary-binding "$CANARY_BINDING" --app-bundle "$APP_BUNDLE" --helper "$HELPER" \
   || fail "candidate receipt could not bind the active session"
+test "$(status_value session)" = "$session_bound" || fail "helper session changed during receipt binding"
 
 # This is intentionally a second opt-in. It changes only SleepDisabled through
 # pmset; it never edits the root-owned lease, status, applied-state, or ledger.
@@ -160,6 +175,8 @@ if [ "${LIDSWITCH_INJECT_OVERRIDE_DRIFT:-0}" = "1" ]; then
   updated_before="$(status_value updated)"
   monotonic_before="$(status_value updated_monotonic)"
   test -n "$session_before" && test "$session_before" != "none" || fail "active helper session is missing"
+  test "$session_before" = "$session_bound" || fail "bound helper session changed before drift injection"
+  power_is_unchanged || fail "power changed or became unknown before drift injection"
   test -n "$updated_before" || fail "active helper timestamp is missing"
   test -n "$monotonic_before" || fail "active helper monotonic timestamp is missing"
   test "$(status_value state)" = "active" || fail "helper is not active before drift injection"
@@ -169,9 +186,9 @@ if [ "${LIDSWITCH_INJECT_OVERRIDE_DRIFT:-0}" = "1" ]; then
   recovered=0
   for _ in $(/usr/bin/jot 10); do
     current_updated="$(status_value updated)"
-    if power_is_ac \
+    if power_is_unchanged \
       && [ "$(sleep_disabled 2>/dev/null || true)" = "1" ] \
-      && [ "$(ac_sleep_minutes 2>/dev/null || true)" = "0" ] \
+      && [ "$(source_sleep_minutes 2>/dev/null || true)" = "0" ] \
       && [ "$(status_value state)" = "active" ] \
       && [ "$(status_value reason)" = "override-recovered" ] \
       && [ "$(status_value session)" = "$session_before" ] \
@@ -186,14 +203,18 @@ if [ "${LIDSWITCH_INJECT_OVERRIDE_DRIFT:-0}" = "1" ]; then
 fi
 
 for _ in $(/usr/bin/jot "$OBSERVATION_SECONDS"); do
-  power_is_ac || fail "power changed during active observation"
+  power_is_unchanged || fail "power changed or became unknown during active observation"
   test "$(sleep_disabled)" = "1" || fail "sleep override dropped during active observation"
   test "$(status_value state)" = "active" || fail "helper did not acknowledge the active session"
+  test "$(status_value session)" = "$session_bound" || fail "active helper session changed during observation"
   test -n "$(status_value boot_id)" || fail "helper status boot identity is missing"
   test -n "$(status_value updated_monotonic)" || fail "helper monotonic acknowledgement is missing"
   /bin/sleep 1
 done
 
+power_is_unchanged || fail "power changed or became unknown before SIGKILL"
+test "$(app_pid)" = "$pid" || fail "installed app process changed before SIGKILL"
+test "$(status_value session)" = "$session_bound" || fail "bound helper session changed before SIGKILL"
 echo "Active session remained verified for $OBSERVATION_SECONDS seconds; killing app PID $pid to prove peer-process-invalid rollback."
 /bin/kill -KILL "$pid"
 
@@ -214,6 +235,7 @@ test "$(sleep_disabled)" = "0" || fail "sleep override rearmed after restoration
 test ! -e "$APPLIED_STATE" || fail "applied-state remained after verified restoration"
 test "$(status_value state)" = "terminal" || fail "helper did not record a verified terminal state"
 test "$(status_value reason)" = "peer-process-invalid" || fail "helper misclassified unsolicited app death"
+test "$(status_value session)" = "$session_bound" || fail "helper terminal session is not the killed generation"
 
 /usr/bin/python3 -I -S -B "$CANARY_PREFLIGHT_TOOL" finalize \
   --active-receipt "$CANARY_ACTIVE_RECEIPT" \

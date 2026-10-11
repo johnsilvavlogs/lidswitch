@@ -1,21 +1,21 @@
 # LidSwitch
 
-LidSwitch is a native macOS menu bar app for one deliberate job: keep a plugged-in Mac running while its lid is closed for the duration of a session you explicitly start.
+LidSwitch is a native macOS menu bar app that keeps your Mac awake while its lid is closed. Turn on **Keep Mac awake** and choose whether it works **Plugged in**, **On battery**, or both.
 
-Version `0.2.16` build `11` keeps routine Start, Stop/Restore, relaunch, and detached recovery on the installed authenticated helper, so administrator authorization is limited to explicit prepare, repair, removal, and reinstall boundaries. A missing or unloaded helper now routes to **Repair Helper** instead of an impossible Restore loop. Recovery still runs under the fixed root-state lock, validates exact containment extinction, and preserves malformed or ambiguous evidence fail-closed.
+Version `0.3.0` build `12` uses one master switch and saves both power-source choices. Battery operation starts disabled until you select it. Approve helper installation once; ordinary switching and quitting use the installed authenticated helper without confirmation dialogs. Updating, repairing, or removing that privileged installation can still require macOS authorization.
 
 ## Safety model
 
-- Protection is off after install, app launch, login, reboot, or reconnecting power.
-- **Prepare Safe Helper** installs helper version `11` into the root-owned `Current` release directory and removes old startup artifacts. **Repair Helper** uses the same one-time authorization boundary for an existing unavailable installation. Neither action enables a session.
-- **Start Plugged-In Session** is available only on AC power after live state and bundle checks pass.
+- Protection is off after install, app launch, login, or reboot. Source choices persist; the master switch does not automatically turn on at launch.
+- First setup installs helper version `12` into the root-owned `Current` release directory and removes old startup artifacts. An unavailable installation offers **Repair Helper**.
+- **Keep Mac awake** starts protection on a selected, known power source after live state and bundle checks pass.
 - The app begins one authenticated process-bound raw-XPC session. The helper chooses its same-boot monotonic deadline, capped at 30 seconds, and the app renews every 8 seconds.
 - The compiled helper validates the enrolled caller identity, exact live process tuple, session UUID, private recovery authority, power source, build, and native power-preference state.
 - The helper applies power changes only on state transitions. It has no `StartInterval` loop.
-- Unplugging, quitting, restarting, app death, lease expiry, invalid state, lost acknowledgement, or power-setting drift ends the session and restores LidSwitch-owned changes.
-- Reconnecting power never starts a new session.
+- Moving between selected power sources keeps the session active. Moving to an unselected source restores normal sleep and leaves the switch waiting; returning to a selected source resumes only while this app remains open with the switch on.
+- Quitting, restarting, app death, lease expiry, invalid state, lost acknowledgement, or power-setting drift ends the session and restores LidSwitch-owned changes. An unknown power source cannot extend a lease.
 - A bounded owner-only local history records normalized start, acknowledgement, renewal, and end reasons without telemetry or secrets.
-- There is no battery keep-awake mode in this release.
+- The helper records the selected source policy and original sleep timers before changing power settings, including timers already set to zero. Turning the switch off restores those original values.
 - A root-owned applied-state record is removed only after restoration is verified. Failed restoration keeps that evidence and reports **Restore required**.
 
 The app currently qualifies macOS `26.5.2` build `25F84`. Other OS builds remain off until separately validated. The Swift package minimum remains macOS 14 for compilation.
@@ -48,7 +48,7 @@ Xcode runtime because Command Line Tools do not ship XCTest. Neither lane uses
 `xcodebuild`, an Apple account, a paid license, or a paid service, and neither
 launches the app or changes live power state.
 
-The session suite covers stable boot-session identity, current acknowledgement, monotonic heartbeat starvation, commit-boundary races, expiry, reboot mismatch, unplug/no-rearm, terminal-generation replay, app-death rollback, override drift, abnormal helper recovery, malformed and symlinked state, unknown power, restore failure, bounded diagnostics, stale zero baselines, and event-driven launchd configuration.
+The session suite covers selected-source transitions, battery renewal, original timer restoration, persistent preference migration, stable boot-session identity, current acknowledgement, heartbeat starvation, commit-boundary races, expiry, reboot mismatch, terminal-generation replay, app-death rollback, override drift, abnormal helper recovery, malformed and symlinked state, unknown power, restore failure, bounded diagnostics, zero baselines, and event-driven launchd configuration.
 
 ## Package without launching
 

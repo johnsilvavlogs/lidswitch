@@ -143,6 +143,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
     /// unbounded retired-ID set or an arbitrary reconnect ceiling.
     private var connectionHighWatermark: UInt64 = 0
     private var activePeer: Peer?
+    private var activePowerPolicy: SessionPowerPolicy = .pluggedInOnly
     private var reconnectDeadline: TimeInterval?
     private var expiry: TimeInterval = 0
     private var successfulOverrideRecoveries = 0
@@ -257,7 +258,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
             hydrateTerminal(session: session, reason: reason)
             return startTimerOnly() ? .ready : .transientFailure
         case let .reconnectCandidate(state):
-            // The coordinator has proved the private schema-2 artifact and
+            // The coordinator has proved the private process-bound artifact and
             // owned power plus terminal/reservation non-membership. Listener
             // startup re-reads both ledgers, then proves the exact live peer
             // tuple and unexpired same-boot owner before exposing RECONNECT.
@@ -285,7 +286,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                             store: store,
                             expectsRecoveryReservation: spentBudget
                          ),
-                         self.ownedStateIsIntact() {
+                         self.ownedStateIsIntact(policy: state.powerPolicy) {
                           return .bind(peer, deadline, spentBudget)
                       }
                       let recovered = coordinator.recoverWithinTransaction(
@@ -314,6 +315,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
             switch binding {
             case let .bind(peer, deadline, spentBudget):
                 activeSession = state.sessionID; activePeer = peer; activeConnection = nil; expiry = deadline
+                activePowerPolicy = state.powerPolicy
                 successfulOverrideRecoveries = spentBudget ? 1 : 0
                 reconnectDeadline = min(deadline, monotonicNow() + Self.reconnectGrace)
             case .pristineIdle:
@@ -409,7 +411,8 @@ final class HelperSessionAuthority: @unchecked Sendable {
         return timer as AnyObject
     }
 
-    func handle(connection: UInt64, peer rawPeer: ls_peer_identity_t?, operation: UInt32, sessionID: UUID) -> AuthorityReply {
+    func handle(connection: UInt64, peer rawPeer: ls_peer_identity_t?, operation: UInt32, sessionID: UUID,
+                powerPolicy: SessionPowerPolicy = .pluggedInOnly) -> AuthorityReply {
         lock.lock(); defer { lock.unlock() }
         // A malformed/unavailable tuple on another authenticated connection is
         // not evidence that the currently bound owner died. Only the helper
@@ -447,6 +450,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                 peer: peer,
                 operation: operation,
                 sessionID: sessionID,
+                powerPolicy: powerPolicy,
                 store: store,
                 transaction: transaction
             )
@@ -462,6 +466,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         peer: Peer,
         operation: UInt32,
         sessionID: UUID,
+        powerPolicy: SessionPowerPolicy,
         store: RecoveryAuthorityStore,
         transaction: VerifiedRootStateDirectory.Transaction
     ) -> AuthorityReply {
@@ -481,7 +486,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         }
         switch operation {
         case UInt32(LS_OPERATION_BEGIN.rawValue):
-            return begin(connection: connection, peer: peer, sessionID: sessionID, store: store, transaction: transaction)
+            return begin(connection: connection, peer: peer, sessionID: sessionID, powerPolicy: powerPolicy, store: store, transaction: transaction)
         case UInt32(LS_OPERATION_RECONNECT.rawValue):
             return reconnect(connection: connection, peer: peer, sessionID: sessionID, store: store, transaction: transaction)
         case UInt32(LS_OPERATION_RENEW.rawValue):
@@ -524,13 +529,14 @@ final class HelperSessionAuthority: @unchecked Sendable {
 
     /// Fixture-only compatibility entry point. Production reaches the overload
     /// above exclusively through the bridge's authenticated capture path.
-    func handle(connection: UInt64, operation: UInt32, sessionID: UUID) -> AuthorityReply {
+    func handle(connection: UInt64, operation: UInt32, sessionID: UUID,
+                powerPolicy: SessionPowerPolicy = .pluggedInOnly) -> AuthorityReply {
         var peer = ls_peer_identity_t()
         guard ls_peer_identity_for_current_process(&peer) else {
             return AuthorityReply(result: 75, reason: "peer-process-invalid", sessionID: sessionID,
                                   expiryMonotonic: 0, state: 2, power: 0, sleepDisabled: false, acSleepMinutes: -1)
         }
-        return handle(connection: connection, peer: peer, operation: operation, sessionID: sessionID)
+        return handle(connection: connection, peer: peer, operation: operation, sessionID: sessionID, powerPolicy: powerPolicy)
     }
 
     func connectionInvalidated(_ connection: UInt64) {
@@ -558,6 +564,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         connection: UInt64,
         peer: Peer,
         sessionID: UUID,
+        powerPolicy: SessionPowerPolicy,
         store: RecoveryAuthorityStore,
         transaction: VerifiedRootStateDirectory.Transaction
     ) -> AuthorityReply {
@@ -590,9 +597,17 @@ final class HelperSessionAuthority: @unchecked Sendable {
                           store: store, transaction: transaction)
             return snapshot(result: 79, reason: "replay-or-durability-denial", requested: sessionID)
         }
-        guard power.powerSource() == .ac, power.sleepDisabled() == false, let originalAC = power.acSleepMinutes() else {
+        guard policyAllows(power.powerSource(), policy: powerPolicy), power.sleepDisabled() == false else {
             return snapshot(result: 74, reason: "preflight-failed", requested: sessionID)
         }
+        // Recovery requires a readable AC timer before restoring the global
+        // override, even when this generation owns only the battery timer.
+        let observedAC = power.acSleepMinutes()
+        let originalAC = powerPolicy.pluggedIn ? observedAC : nil
+        let originalBattery = powerPolicy.onBattery ? power.batterySleepMinutes() : nil
+        guard validTimerBaseline(observedAC),
+              (!powerPolicy.onBattery || validTimerBaseline(originalBattery))
+        else { return snapshot(result: 74, reason: "preflight-failed", requested: sessionID) }
         guard let boot = bootIdentity() else { return snapshot(result: 74, reason: "boot-identity-unavailable", requested: sessionID) }
         let deadline = monotonicNow() + Self.leaseLifetime
         let owner = AppliedState.Owner(pid: peer.pid, startSeconds: peer.startSeconds,
@@ -603,8 +618,11 @@ final class HelperSessionAuthority: @unchecked Sendable {
         let state = AppliedState.currentAuthority(
             sessionID: sessionID,
             changedSleepDisabled: true,
-            changedACSleep: originalAC != 0,
-            originalACSleep: originalAC == 0 ? nil : originalAC,
+            changedACSleep: powerPolicy.pluggedIn && originalAC != 0,
+            originalACSleep: originalAC,
+            changedBatterySleep: powerPolicy.onBattery && originalBattery != 0,
+            originalBatterySleep: originalBattery,
+            powerPolicy: powerPolicy,
             owner: owner,
             leaseExpiryMonotonic: deadline
         )
@@ -634,12 +652,14 @@ final class HelperSessionAuthority: @unchecked Sendable {
         // Once the private applied authority is durable, every failure follows
         // the one coordinator ordering: terminal -> restore -> proof -> remove.
         activeSession = sessionID; activeConnection = connection; activePeer = peer
+        activePowerPolicy = powerPolicy
         connectionHighWatermark = max(connectionHighWatermark, connection)
         expiry = deadline; reconnectDeadline = nil; successfulOverrideRecoveries = 0
         var activationMutationIndeterminate = false
         do {
             try withContainmentReceipt(store: store, transaction: transaction) {
-                if originalAC != 0 { try power.setACSleepMinutes(0) }
+                if state.changedACSleep { try power.setACSleepMinutes(0) }
+                if state.changedBatterySleep { try power.setBatterySleepMinutes(0) }
                 try power.setSleepDisabled(true)
             }
         } catch HelperPowerMutationError.containmentPending {
@@ -650,7 +670,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
             // Reconcile once from native truth; do not issue another setter.
             activationMutationIndeterminate = true
         }
-        guard power.powerSource() == .ac, power.sleepDisabled() == true, power.acSleepMinutes() == 0 else {
+        guard nativePowerObservation() == .intact else {
             return restoreActive(
                 reason: activationMutationIndeterminate ? "activation-indeterminate" : "activation-verification-failed",
                 result: 70,
@@ -722,15 +742,17 @@ final class HelperSessionAuthority: @unchecked Sendable {
         guard privateAuthorityMatches(expectedSession: sessionID, peer: peer, expiry: expiry, store: store) else {
             return restoreActive(reason: "renewal-authority-mismatch", result: 75, store: store, transaction: transaction)
         }
-        switch power.powerSource() {
-        case .ac: consecutiveUnknownPowerReads = 0
-        case .battery: return restoreActive(reason: "ac-disconnect", result: 75, store: store, transaction: transaction)
-        case .unknown:
+        let source = power.powerSource()
+        if source == .unknown {
             consecutiveUnknownPowerReads += 1
             // Never extend authority while power is uncertain; the existing
             // helper-chosen expiry remains the hard upper bound.
             return snapshot(result: 0, reason: "native-state-indeterminate", requested: sessionID)
         }
+        guard policyAllows(source) else {
+            return restoreActive(reason: excludedSourceReason(source), result: 75, store: store, transaction: transaction)
+        }
+        consecutiveUnknownPowerReads = 0
         switch nativePowerObservation() {
         case .intact: break
         case .indeterminate:
@@ -866,16 +888,16 @@ final class HelperSessionAuthority: @unchecked Sendable {
             _ = restoreActive(reason: "reconnect-expired", store: store, transaction: transaction)
             return
         }
-        switch power.powerSource() {
-        case .ac:
-            consecutiveUnknownPowerReads = 0
-        case .battery:
-            _ = restoreActive(reason: "ac-disconnect", store: store, transaction: transaction)
-            return
-        case .unknown:
+        let source = power.powerSource()
+        if source == .unknown {
             consecutiveUnknownPowerReads += 1
             return
         }
+        guard policyAllows(source) else {
+            _ = restoreActive(reason: excludedSourceReason(source), store: store, transaction: transaction)
+            return
+        }
+        consecutiveUnknownPowerReads = 0
         // A disconnected transport may only retain an exact authority and
         // exact owned power. It never spends the recovery budget or rearms.
         if activeConnection == nil {
@@ -922,16 +944,43 @@ final class HelperSessionAuthority: @unchecked Sendable {
         recoveryRequired = false
     }
 
-    private func ownedStateIsIntact() -> Bool {
-        nativePowerObservation() == .intact
+    private func ownedStateIsIntact(policy: SessionPowerPolicy? = nil) -> Bool {
+        nativePowerObservation(policy: policy) == .intact
     }
 
-    private func nativePowerObservation() -> NativePowerObservation {
-        guard power.powerSource() == .ac,
-              let disabled = power.sleepDisabled(),
-              let ac = power.acSleepMinutes()
+    private func policyAllows(_ source: HelperPowerSource, policy: SessionPowerPolicy? = nil) -> Bool {
+        let selected = policy ?? activePowerPolicy
+        switch source {
+        case .ac: return selected.pluggedIn
+        case .battery: return selected.onBattery
+        case .unknown: return false
+        }
+    }
+
+    private func excludedSourceReason(_ source: HelperPowerSource) -> String {
+        source == .battery ? "ac-disconnect" : "power-source-excluded"
+    }
+
+    private func validTimerBaseline(_ value: Int?) -> Bool {
+        value.map { (0...1_440).contains($0) } == true
+    }
+
+    private func selectedTimersAreZero(policy: SessionPowerPolicy? = nil) -> Bool? {
+        let selected = policy ?? activePowerPolicy
+        let ac = selected.pluggedIn ? power.acSleepMinutes() : 0
+        let battery = selected.onBattery ? power.batterySleepMinutes() : 0
+        guard let ac, let battery else { return nil }
+        return ac == 0 && battery == 0
+    }
+
+    private func nativePowerObservation(policy: SessionPowerPolicy? = nil) -> NativePowerObservation {
+        let source = power.powerSource()
+        guard source != .unknown else { return .indeterminate }
+        guard policyAllows(source, policy: policy) else { return .confirmedDrift }
+        guard let disabled = power.sleepDisabled(),
+              let timersZero = selectedTimersAreZero(policy: policy)
         else { return .indeterminate }
-        return disabled && ac == 0 ? .intact : .confirmedDrift
+        return disabled && timersZero ? .intact : .confirmedDrift
     }
 
     private func persistRenewedExpiry(
@@ -1018,9 +1067,10 @@ final class HelperSessionAuthority: @unchecked Sendable {
         store: RecoveryAuthorityStore,
         transaction: VerifiedRootStateDirectory.Transaction
     ) -> Bool {
-        guard power.powerSource() == .ac, let disabled = power.sleepDisabled(), let ac = power.acSleepMinutes() else { return false }
-        if disabled && ac == 0 { return true }
-        guard !disabled, ac == 0, successfulOverrideRecoveries == 0,
+        guard policyAllows(power.powerSource()), let disabled = power.sleepDisabled(),
+              selectedTimersAreZero() == true else { return false }
+        if disabled { return true }
+        guard successfulOverrideRecoveries == 0,
               privateAuthorityMatches(expectedSession: sessionID, peer: peer, expiry: expiry, store: store),
               store.recoveryBudgetRecord() == .absent,
               store.recordTerminal(
@@ -1052,8 +1102,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
             // cannot prove that pmset did not commit.  Never issue a second
             // setter: accept this one attempt only when a fresh exact native
             // observation proves the requested owned postcondition.
-            guard power.sleepDisabled() == true,
-                  power.acSleepMinutes() == 0,
+            guard nativePowerObservation() == .intact,
                   privateAuthorityMatches(
                     expectedSession: sessionID,
                     peer: peer,
@@ -1071,8 +1120,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
                           sessionID: sessionID, store: store, transaction: transaction)
             return true
         }
-        guard power.sleepDisabled() == true,
-              power.acSleepMinutes() == 0,
+        guard nativePowerObservation() == .intact,
               privateAuthorityMatches(
                 expectedSession: sessionID,
                 peer: peer,
@@ -1384,6 +1432,7 @@ final class HelperSessionAuthority: @unchecked Sendable {
         // preventing a crash-left reserved record from reauthorizing a setter.
         let expectsReservation = expectsRecoveryReservation ?? (successfulOverrideRecoveries == 1)
         guard expected.isReconnectable,
+              (activeSession == nil || expected.powerPolicy == activePowerPolicy),
               expected.leaseExpiryMonotonic == expiry,
               let boot = bootIdentity(),
               expected.owner == Optional(peer.owner(bootID: boot)),
@@ -1465,7 +1514,8 @@ final class HelperSessionAuthority: @unchecked Sendable {
                               state: recoveryRequired ? 3 : (activeSession == nil ? (isPriorTerminal ? 2 : 0) : 1),
                               power: source == .ac ? 1 : (source == .battery ? 2 : 0),
                               sleepDisabled: power.sleepDisabled() ?? false,
-                              acSleepMinutes: power.acSleepMinutes() ?? -1)
+                              acSleepMinutes: power.acSleepMinutes() ?? -1,
+                              batterySleepMinutes: power.batterySleepMinutes() ?? -1)
     }
 
     private static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
@@ -1496,6 +1546,15 @@ final class HelperSessionAuthority: @unchecked Sendable {
 struct AuthorityReply {
     let result: Int32; let reason: String; let sessionID: UUID; let expiryMonotonic: TimeInterval
     let state: UInt32; let power: UInt32; let sleepDisabled: Bool; let acSleepMinutes: Int
+    let batterySleepMinutes: Int
+
+    init(result: Int32, reason: String, sessionID: UUID, expiryMonotonic: TimeInterval,
+         state: UInt32, power: UInt32, sleepDisabled: Bool, acSleepMinutes: Int, batterySleepMinutes: Int = -1) {
+        self.result = result; self.reason = reason; self.sessionID = sessionID
+        self.expiryMonotonic = expiryMonotonic; self.state = state; self.power = power
+        self.sleepDisabled = sleepDisabled; self.acSleepMinutes = acSleepMinutes
+        self.batterySleepMinutes = batterySleepMinutes
+    }
 }
 
 struct HelperControlServiceOperations: @unchecked Sendable {
@@ -1587,16 +1646,26 @@ enum HelperControlService {
         let context = Unmanaged.passRetained(authority).toOpaque()
         defer { Unmanaged<HelperSessionAuthority>.fromOpaque(context).release() }
         return runPreparedDaemon(authority: authority) {
-            Int32(ls_xpc_server_run(ReleaseIdentity.machService, clientPolicy, { context, connection, peer, operation, _, session, writer in
+            Int32(ls_xpc_server_run(ReleaseIdentity.machService, clientPolicy, { context, connection, peer, operation, _, session, powerPolicyMask, writer in
                 // `peer` is bridge-owned callback storage. Copy it synchronously
                 // into the authority; nothing in Swift retains that pointer.
                 guard let context, let peer, let session, let writer, let sessionID = UUID(uuidString: String(cString: session)) else { return }
                 BenchmarkProbe.record("xpc_authenticated_request")
                 BenchmarkProbe.record("xpc_identity_ns", count: Int(clamping: ls_xpc_last_identity_duration_ns()))
                 let authority = Unmanaged<HelperSessionAuthority>.fromOpaque(context).takeUnretainedValue()
-                let reply = authority.handle(connection: connection, peer: peer.pointee, operation: operation, sessionID: sessionID)
+                let powerPolicy: SessionPowerPolicy
+                if operation == UInt32(LS_OPERATION_BEGIN.rawValue) {
+                    guard let selected = SessionPowerPolicy(rawValue: powerPolicyMask) else { return }
+                    powerPolicy = selected
+                } else {
+                    guard powerPolicyMask == 0 else { return }
+                    powerPolicy = .pluggedInOnly
+                }
+                let reply = authority.handle(connection: connection, peer: peer.pointee, operation: operation,
+                                             sessionID: sessionID, powerPolicy: powerPolicy)
                 ls_reply_writer_set(writer, reply.result, reply.reason, reply.sessionID.uuidString.lowercased(),
-                                    reply.expiryMonotonic, reply.state, reply.power, reply.sleepDisabled, Int32(reply.acSleepMinutes))
+                                    reply.expiryMonotonic, reply.state, reply.power, reply.sleepDisabled,
+                                    Int32(reply.acSleepMinutes), Int32(reply.batterySleepMinutes))
             }, { context, connection, invalidated in
                 guard invalidated, let context else { return }
                 Unmanaged<HelperSessionAuthority>.fromOpaque(context).takeUnretainedValue().connectionInvalidated(connection)

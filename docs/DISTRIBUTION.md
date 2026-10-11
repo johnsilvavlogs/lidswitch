@@ -2,12 +2,12 @@
 
 ## Release status
 
-LidSwitch `0.2.16` build `11` is a source-bound candidate identity, not installed or release-qualified proof. A local immutable candidate path now exists, but it remains blocked until its held build receipt, emitted immutable manifest, benchmark evidence, and native canary are reviewed together.
+LidSwitch `0.3.0` build `12` is the source candidate identity. Installation and publication require the held build receipt, immutable package manifest, and native acceptance evidence for these exact bytes.
 
 The release tier is a public manual DMG with ad-hoc signing, no Developer ID
 signature, and no notarization; recipients use Gatekeeper’s **Open Anyway**
 flow. Do not claim App Store distribution, Apple notarization, automatic
-background protection, battery support, or compatibility beyond qualified
+background protection or compatibility beyond qualified
 build `25F84`.
 
 ## Local zero-cost immutable candidate path

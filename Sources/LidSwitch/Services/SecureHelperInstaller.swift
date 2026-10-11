@@ -108,7 +108,7 @@ enum SecureHelperInstaller {
         let prompt: String
         switch operation {
         case .install:
-            prompt = "LidSwitch needs administrator permission to install its authenticated crash-safe helper. Protection will remain off."
+            prompt = "LidSwitch needs administrator permission to install its helper. After setup, the Keep Mac awake switch works without repeated approval."
         case .uninstall:
             prompt = "LidSwitch needs administrator permission to restore system sleep before removing helper files."
         case .userRestore:

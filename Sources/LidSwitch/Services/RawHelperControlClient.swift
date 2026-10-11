@@ -61,6 +61,14 @@ struct HelperControlReply: Equatable, Sendable {
     let power: Power
     let sleepDisabled: Bool
     let acSleepMinutes: Int?
+    let batterySleepMinutes: Int?
+
+    init(reason: String, sessionID: UUID, expiryMonotonic: TimeInterval, state: State,
+         power: Power, sleepDisabled: Bool, acSleepMinutes: Int?, batterySleepMinutes: Int? = nil) {
+        self.reason = reason; self.sessionID = sessionID; self.expiryMonotonic = expiryMonotonic
+        self.state = state; self.power = power; self.sleepDisabled = sleepDisabled
+        self.acSleepMinutes = acSleepMinutes; self.batterySleepMinutes = batterySleepMinutes
+    }
 }
 
 enum HelperControlExchangeOutcome {
@@ -109,10 +117,10 @@ final class RawHelperControlClient: @unchecked Sendable {
     /// same-session RECONNECT on a newly authenticated connection. A
     /// RECONNECT proof that this exact generation is idle permits one fresh
     /// BEGIN; every other reconnect result remains terminal for this resolver.
-    func resolveBegin(sessionID: UUID) throws -> HelperLeaseBeginResolution {
+    func resolveBegin(sessionID: UUID, powerPolicy: SessionPowerPolicy = .pluggedInOnly) throws -> HelperLeaseBeginResolution {
         lock.lock(); defer { lock.unlock() }
         let resolution = try Self.resolveBegin(sessionID: sessionID) { operation, requestedSessionID in
-            try self.exchangeLocked(operation, sessionID: requestedSessionID)
+            try self.exchangeLocked(operation, sessionID: requestedSessionID, powerPolicy: powerPolicy)
         }
         recordBeginResolution(resolution, sessionID: sessionID)
         return resolution
@@ -484,6 +492,17 @@ final class RawHelperControlClient: @unchecked Sendable {
         try resolveBegin(sessionID: sessionID, exchange: exchange)
     }
 
+    static func resolveBeginForTesting(
+        sessionID: UUID,
+        powerPolicy: SessionPowerPolicy,
+        exchange: (UInt32, UUID, SessionPowerPolicy?) throws -> HelperControlExchangeOutcome
+    ) throws -> HelperLeaseBeginResolution {
+        try resolveBegin(sessionID: sessionID) { operation, requestedSessionID in
+            try exchange(operation, requestedSessionID,
+                         operation == UInt32(LS_OPERATION_BEGIN.rawValue) ? powerPolicy : nil)
+        }
+    }
+
     static func terminateGenerationForTesting(
         sessionID: UUID,
         intent: HelperGenerationTerminationIntent,
@@ -515,7 +534,8 @@ final class RawHelperControlClient: @unchecked Sendable {
     private func exchangeLocked(
         _ operation: UInt32,
         sessionID: UUID,
-        timeout: Double? = nil
+        timeout: Double? = nil,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly
     ) throws -> HelperControlExchangeOutcome {
         let client = try connectedClient()
         var rawReply: OpaquePointer?
@@ -524,6 +544,7 @@ final class RawHelperControlClient: @unchecked Sendable {
             operation,
             UUID().uuidString.lowercased(),
             sessionID.uuidString.lowercased(),
+            operation == UInt32(LS_OPERATION_BEGIN.rawValue) ? powerPolicy.rawValue : 0,
             timeout ?? Self.timeoutSeconds(for: operation),
             &rawReply
         )
@@ -563,10 +584,12 @@ final class RawHelperControlClient: @unchecked Sendable {
         }
         let reason = String(cString: reasonPointer)
         let ac = ls_xpc_reply_ac_sleep_minutes(rawReply)
+        let battery = ls_xpc_reply_battery_sleep_minutes(rawReply)
         let reply = HelperControlReply(reason: reason, sessionID: replySession,
                                        expiryMonotonic: ls_xpc_reply_expiry_monotonic(rawReply), state: state,
                                        power: power, sleepDisabled: ls_xpc_reply_sleep_disabled(rawReply),
-                                       acSleepMinutes: ac >= 0 ? Int(ac) : nil)
+                                       acSleepMinutes: ac >= 0 ? Int(ac) : nil,
+                                       batterySleepMinutes: battery >= 0 ? Int(battery) : nil)
         return result == 0 ? .accepted(reply) : .rejected(reply)
     }
 

@@ -22,9 +22,8 @@ enum PowerSource: Equatable, Sendable {
         return false
     }
 
-    /// Safe-idle proof may be reported on either known power source. Only a
-    /// new protected session requires AC; treating battery idle as unknown
-    /// would strand a correctly restored helper in recovery-required state.
+    /// A selected known source can authorize a session. Either known source
+    /// can prove restoration after that session ends.
     var isKnown: Bool {
         if case .unknown = self { return false }
         return true
@@ -133,6 +132,7 @@ struct PowerSnapshot: Equatable, Sendable {
     let sleepDisabled: Bool
     let sleepDisabledVerified: Bool
     let acIdleSleepMinutes: Int?
+    let batteryIdleSleepMinutes: Int?
     let preferences: PowerPreferences
     let desiredStateTruth: UserStatePersistenceTruth
     let helperArtifactsPresent: Bool
@@ -164,6 +164,7 @@ struct PowerSnapshot: Equatable, Sendable {
         sleepDisabled: Bool,
         sleepDisabledVerified: Bool,
         acIdleSleepMinutes: Int?,
+        batteryIdleSleepMinutes: Int? = nil,
         preferences: PowerPreferences,
         desiredStateTruth: UserStatePersistenceTruth = .valid,
         helperArtifactsPresent: Bool,
@@ -190,6 +191,7 @@ struct PowerSnapshot: Equatable, Sendable {
         self.sleepDisabled = sleepDisabled
         self.sleepDisabledVerified = sleepDisabledVerified
         self.acIdleSleepMinutes = acIdleSleepMinutes
+        self.batteryIdleSleepMinutes = batteryIdleSleepMinutes
         self.preferences = preferences
         self.desiredStateTruth = desiredStateTruth
         self.helperArtifactsPresent = helperArtifactsPresent
@@ -242,12 +244,44 @@ struct PowerSnapshot: Equatable, Sendable {
         legacyLaunchdState: .indeterminate
     )
 
+    func withPreferences(_ preferences: PowerPreferences) -> PowerSnapshot {
+        PowerSnapshot(
+            source: source,
+            sleepDisabled: sleepDisabled,
+            sleepDisabledVerified: sleepDisabledVerified,
+            acIdleSleepMinutes: acIdleSleepMinutes,
+            batteryIdleSleepMinutes: batteryIdleSleepMinutes,
+            preferences: preferences,
+            desiredStateTruth: desiredStateTruth,
+            helperArtifactsPresent: helperArtifactsPresent,
+            helperLoaded: helperLoaded,
+            helperNeedsUpdate: helperNeedsUpdate,
+            legacyLoginItemPresent: legacyLoginItemPresent,
+            legacyLoginItemLoaded: legacyLoginItemLoaded,
+            activationLease: activationLease,
+            activationLeaseTruth: activationLeaseTruth,
+            activationLeaseRecoveredLegacyEvidence: activationLeaseRecoveredLegacyEvidence,
+            staleCanonicalLegacyLeasePresent: staleCanonicalLegacyLeasePresent,
+            ownedSessionID: ownedSessionID,
+            helperStatus: helperStatus,
+            systemBuild: systemBuild,
+            systemBuildQualified: systemBuildQualified,
+            bundleIntegrityValid: bundleIntegrityValid,
+            bundleVersionValid: bundleVersionValid,
+            checkedAt: checkedAt,
+            installationInventoryState: installationInventoryState,
+            helperLaunchdState: helperLaunchdState,
+            legacyLaunchdState: legacyLaunchdState
+        )
+    }
+
     func withIndeterminateInstallationInventory(reason: String) -> PowerSnapshot {
         PowerSnapshot(
             source: source,
             sleepDisabled: sleepDisabled,
             sleepDisabledVerified: sleepDisabledVerified,
             acIdleSleepMinutes: acIdleSleepMinutes,
+            batteryIdleSleepMinutes: batteryIdleSleepMinutes,
             preferences: preferences,
             desiredStateTruth: desiredStateTruth,
             helperArtifactsPresent: helperArtifactsPresent,
@@ -301,7 +335,7 @@ struct PowerSnapshot: Equatable, Sendable {
 
     var sessionActive: Bool {
         guard let ownedSessionID else { return false }
-        return source.isAC
+        return preferences.allows(source)
             && sleepDisabledVerified
             && sleepDisabled
             && helperStatus?.state == "active"
@@ -405,7 +439,15 @@ struct PowerSnapshot: Equatable, Sendable {
     }
 
     var canStartSession: Bool {
-        source.isAC
+        preferences.allows(source)
+            && canStartSessionOnKnownSource
+    }
+
+    /// The same safe preflight also permits a live request to wait on an
+    /// excluded source without creating a helper generation.
+    var canStartSessionOnKnownSource: Bool {
+        ownedSessionID == nil
+            && source.isKnown
             && helperReady
             && !legacyResiduePresent
             && systemBuildQualified
@@ -467,7 +509,7 @@ struct PowerSnapshot: Equatable, Sendable {
             return "Power status unavailable"
         }
         if sessionActive {
-            return "Protection active — plugged in"
+            return source.isAC ? "Awake while plugged in" : "Awake on battery"
         }
         if installationInventoryPending {
             return "Checking installation"
@@ -493,9 +535,9 @@ struct PowerSnapshot: Equatable, Sendable {
         if helperReady {
             switch source {
             case .ac:
-                return "Ready for monitored session"
+                return "Ready"
             case .battery:
-                return "Connect power to start"
+                return preferences.allowBatteryKeepAwake ? "Ready" : "Battery keep-awake off"
             case .unknown:
                 return "Power source unavailable"
             }
@@ -526,7 +568,7 @@ struct PowerSnapshot: Equatable, Sendable {
             return "LidSwitch could not verify the live macOS sleep override. Starting a session is blocked."
         }
         if sessionActive {
-            return "Lid-close sleep is blocked for this session. Quit, unplug, restart, or a missed safety check ends it."
+            return "Your Mac stays awake with the lid closed. Turning off restores normal sleep."
         }
         if installationInventoryPending {
             return "Checking the installed helper and app bundle. Protection stays off until this exact check finishes."
@@ -554,12 +596,14 @@ struct PowerSnapshot: Equatable, Sendable {
         }
         if helperReady {
             if source.isAC {
-                return "Protection is off. LidSwitch starts only when you explicitly begin a plugged-in session."
+                return "Turn on Keep Mac awake to prevent sleep when the lid is closed."
             }
             if case .battery = source {
-                return "Protection remains off on battery. Reconnecting power never starts it automatically."
+                return preferences.allowBatteryKeepAwake
+                    ? "Turn on Keep Mac awake to keep running on battery."
+                    : "Enable On battery to keep your Mac awake without its charger."
             }
-            return "LidSwitch could not verify AC power. Starting a session is blocked."
+            return "LidSwitch could not verify the power source. Keep Mac awake stays off."
         }
         return "Helper Repair is required because the installed helper is unavailable. This one-time repair verifies safe idle and reinstalls the helper; protection remains off until you explicitly start a session."
     }

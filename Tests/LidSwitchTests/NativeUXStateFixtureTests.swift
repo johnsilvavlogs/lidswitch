@@ -276,7 +276,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         )
 
         XCTAssertFalse(previousBootTerminal.previousPeerProcessEndedSafely)
-        XCTAssertEqual(previousBootTerminal.statusTitle, "Ready for monitored session")
+        XCTAssertEqual(previousBootTerminal.statusTitle, "Ready")
         XCTAssertFalse(PowerSnapshot.isCurrentBootPeerProcessSafeIdle(
             helperStatus: HelperStatusRecord(
                 state: "terminal",
@@ -1219,7 +1219,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertEqual(controller.activeSessionIDForTesting, nextSessionID)
         XCTAssertEqual(controller.sessionEpochForTesting, nextEpoch)
         XCTAssertEqual(
-            announcements.read { $0.filter { $0 == "Protection active — plugged in." }.count },
+            announcements.read { $0.filter { $0 == "Keep Mac awake on while plugged in." }.count },
             0
         )
 
@@ -1238,7 +1238,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertEqual(controller.activeSessionIDForTesting, nextSessionID)
         XCTAssertEqual(controller.sessionEpochForTesting, nextEpoch)
         XCTAssertEqual(
-            announcements.read { $0.filter { $0 == "Protection active — plugged in." }.count },
+            announcements.read { $0.filter { $0 == "Keep Mac awake on while plugged in." }.count },
             1
         )
     }
@@ -1380,7 +1380,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertFalse(events.read { $0.contains("unexpected-remote-terminal") })
         XCTAssertFalse(events.read { $0.contains("activity-begin") })
         XCTAssertFalse(controller.requiresTerminationCleanup)
-        XCTAssertEqual(controller.displayedStatus.title, "Ready for monitored session")
+        XCTAssertEqual(controller.displayedStatus.title, "Ready")
         XCTAssertTrue(controller.errorMessage?.contains("Session did not start") == true)
         XCTAssertTrue(controller.errorMessage?.contains("no power rollback was claimed") == true)
         XCTAssertFalse(events.read { $0.contains("unexpected-remote-terminal") })

@@ -132,6 +132,29 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
             return self.runner(argv)
         return injected
 
+    def power_runner(self, source="AC Power", disabled=0, custom="Battery Power:\n sleep 10\nAC Power:\n sleep 0\n"):
+        def injected(argv):
+            outputs = {
+                ("/usr/bin/pmset", "-g", "batt"): "Now drawing from '%s'\n" % source,
+                ("/usr/bin/pmset", "-g", "live"): " SleepDisabled %s\n" % disabled,
+                ("/usr/bin/pmset", "-g", "custom"): custom,
+            }
+            if argv in outputs:
+                self.commands.append(argv)
+                return 0, outputs[argv]
+            return self.runner(argv)
+        return injected
+
+    def bind_fixture(self, source="AC Power", custom="Battery Power:\n sleep 10\nAC Power:\n sleep 0\n"):
+        value = preflight._observe_before(self.args(), self.power_runner(source, custom=custom))
+        preflight._write_new(str(self.receipt), value)
+        self.status.write_text(status("active", "steady", "12345678-1234-1234-1234-123456789abc"), encoding="utf-8")
+        preflight.bind_active(str(self.receipt), str(self.active), str(self.status), str(self.manifest), str(self.binding), "/Applications/LidSwitch.app", "/Library/Application Support/LidSwitch/Current/LidSwitchHelper", self.power_runner(source, 1, custom))
+        return value
+
+    def finalize_fixture(self, runner):
+        return preflight.finalize(str(self.active), str(self.final), str(self.status), str(self.manifest), str(self.binding), "/Applications/LidSwitch.app", "/Library/Application Support/LidSwitch/Current/LidSwitchHelper", runner)
+
     def args(self):
         class Args:
             candidate_manifest = str(self.manifest)
@@ -211,7 +234,7 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
     def test_preflight_then_exact_session_final_receipts_use_only_injected_observations(self):
         value = preflight._observe_before(self.args(), self.runner)
         preflight._write_new(str(self.receipt), value)
-        self.assertEqual(value["schema_version"], "lidswitch-candidate-canary-receipt-v2")
+        self.assertEqual(value["schema_version"], "lidswitch-candidate-canary-receipt-v3")
         self.assertEqual(value["lid_observation"], {
             "method": "human-assertion", "state": "open", "property": "lid",
             "value": "open", "raw_sha256": "unavailable",
@@ -228,6 +251,100 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
         self.assertEqual(final["rollback"]["terminal_reason"], "peer-process-invalid")
         self.assertTrue(all(command[0] in {"/usr/bin/shasum", "/usr/bin/codesign", "/usr/sbin/sysctl", "/usr/bin/pgrep", "/usr/bin/pmset"} for command in self.commands))
         self.assertNotIn(("/usr/bin/pmset", "-a", "disablesleep", "0"), self.commands)
+
+    def test_battery_receipt_chain_restores_both_original_sleep_timers(self):
+        custom = "AC Power:\n sleep 15\nBattery Power:\n sleep 10\n"
+        value = self.bind_fixture("Battery Power", custom)
+        self.assertEqual(value["before"]["power_source"], "Battery")
+        active, _ = preflight._load_receipt(str(self.active), "active")
+        self.assertEqual(active["baseline"], {"power_source": "Battery", "ac_sleep_minutes": 15, "battery_sleep_minutes": 10})
+        self.status.write_text(status("terminal", "peer-process-invalid", active["session_uuid"]), encoding="utf-8")
+        self.finalize_fixture(self.power_runner("Battery Power", custom=custom))
+        final = preflight._canonical_json(self.final.read_bytes())
+        self.assertEqual(final["rollback"]["ac_sleep_minutes"], 15)
+        self.assertEqual(final["rollback"]["battery_sleep_minutes"], 10)
+        self.assertEqual(final["rollback"]["pmset_custom_sha256"], hashlib.sha256(custom.encode()).hexdigest())
+        self.assertEqual(final["rollback"]["no_rearm_observation"], "validate_live_state-post-wait")
+
+    def test_unknown_and_ambiguous_power_sources_fail_closed(self):
+        for output in ("", "Now drawing from 'UPS Power'\n", "Now drawing from 'AC Power'\nNow drawing from 'Battery Power'\n", "Now drawing from 'AC Power'\nNow drawing from malformed\n"):
+            with self.subTest(output=output):
+                with self.assertRaisesRegex(preflight.PreflightError, "power-source-unknown"):
+                    preflight._power_source(output)
+        with self.assertRaisesRegex(preflight.PreflightError, "power-source-unknown"):
+            preflight._observe_before(self.args(), self.power_runner("UPS Power"))
+        self.bind_fixture("Battery Power")
+        with self.assertRaisesRegex(preflight.PreflightError, "power-source-unknown"):
+            preflight.bind_active(str(self.receipt), str(self.root / "unknown-active.json"), str(self.status), str(self.manifest), str(self.binding), "/Applications/LidSwitch.app", "/Library/Application Support/LidSwitch/Current/LidSwitchHelper", self.power_runner("UPS Power", 1))
+        self.status.write_text(status("terminal", "peer-process-invalid", "12345678-1234-1234-1234-123456789abc"), encoding="utf-8")
+        with self.assertRaisesRegex(preflight.PreflightError, "power-source-unknown"):
+            self.finalize_fixture(self.power_runner("UPS Power"))
+        self.assertFalse(self.final.exists())
+
+    def test_active_bind_requires_the_original_source_and_sleep_override(self):
+        for original, changed in (("AC Power", "Battery Power"), ("Battery Power", "AC Power")):
+            with self.subTest(original=original):
+                path = self.root / ("preflight-" + original.split()[0] + ".json")
+                self.status.write_text(status("inactive", "pristine", "none"), encoding="utf-8")
+                preflight._write_new(str(path), preflight._observe_before(self.args(), self.power_runner(original)))
+                self.status.write_text(status("active", "steady", "12345678-1234-1234-1234-123456789abc"), encoding="utf-8")
+                for source, disabled, error in ((changed, 1, "power-source-changed"), (original, 0, "active-session-unverified")):
+                    with self.assertRaisesRegex(preflight.PreflightError, error):
+                        preflight.bind_active(str(path), str(self.active), str(self.status), str(self.manifest), str(self.binding), "/Applications/LidSwitch.app", "/Library/Application Support/LidSwitch/Current/LidSwitchHelper", self.power_runner(source, disabled))
+                self.assertFalse(self.active.exists())
+
+    def test_finalization_rejects_drift_of_either_original_sleep_timer(self):
+        self.bind_fixture("Battery Power", "AC Power:\n sleep 15\nBattery Power:\n sleep 10\n")
+        self.status.write_text(status("terminal", "peer-process-invalid", "12345678-1234-1234-1234-123456789abc"), encoding="utf-8")
+        for ac, battery in ((0, 10), (15, 0)):
+            with self.subTest(ac=ac, battery=battery):
+                custom = "AC Power:\n sleep %s\nBattery Power:\n sleep %s\n" % (ac, battery)
+                with self.assertRaisesRegex(preflight.PreflightError, "sleep-timers-not-restored"):
+                    self.finalize_fixture(self.power_runner("Battery Power", custom=custom))
+                self.assertFalse(self.final.exists())
+
+    def test_baseline_schema_rejects_unknown_source_and_invalid_timers(self):
+        self.bind_fixture()
+        active = json.loads(self.active.read_text(encoding="utf-8"))
+        for key, value in (("power_source", "UPS"), ("ac_sleep_minutes", True), ("battery_sleep_minutes", -1), ("battery_sleep_minutes", "10")):
+            with self.subTest(key=key, value=value):
+                forged = json.loads(json.dumps(active))
+                forged["baseline"][key] = value
+                path = self.root / ("forged-" + key + "-" + str(value) + ".json")
+                preflight._write_new(str(path), forged)
+                error = "receipt-noncanonical" if value == -1 else "receipt-schema-invalid"
+                with self.assertRaisesRegex(preflight.PreflightError, error):
+                    preflight._load_receipt(str(path), "active")
+
+    def test_finalization_requires_peer_death_and_no_rearmed_override(self):
+        self.bind_fixture("Battery Power")
+        session = "12345678-1234-1234-1234-123456789abc"
+        for reason, disabled in (("user-end", 0), ("peer-process-invalid", 1)):
+            with self.subTest(reason=reason, disabled=disabled):
+                self.status.write_text(status("terminal", reason, session), encoding="utf-8")
+                with self.assertRaisesRegex(preflight.PreflightError, "rollback-or-terminal-unverified"):
+                    self.finalize_fixture(self.power_runner("Battery Power", disabled))
+                self.assertFalse(self.final.exists())
+
+    def test_legacy_ac_preflight_upgrades_but_legacy_active_cannot_finalize(self):
+        value = preflight._observe_before(self.args(), self.runner)
+        value["schema_version"] = preflight.LEGACY_RECEIPT_SCHEMA
+        preflight._write_new(str(self.receipt), value)
+        self.status.write_text(status("active", "steady", "12345678-1234-1234-1234-123456789abc"), encoding="utf-8")
+        preflight.bind_active(str(self.receipt), str(self.active), str(self.status), str(self.manifest), str(self.binding), "/Applications/LidSwitch.app", "/Library/Application Support/LidSwitch/Current/LidSwitchHelper", self.power_runner(disabled=1))
+        active, _ = preflight._load_receipt(str(self.active), "active")
+        self.assertEqual(active["schema_version"], preflight.RECEIPT_SCHEMA)
+        active["schema_version"] = preflight.LEGACY_RECEIPT_SCHEMA
+        del active["baseline"]
+        legacy = self.root / "legacy-active.json"
+        preflight._write_new(str(legacy), active)
+        with self.assertRaisesRegex(preflight.PreflightError, "receipt-phase-invalid"):
+            preflight._load_receipt(str(legacy), "active")
+        value["before"]["power_source"] = "Battery"
+        forged = self.root / "legacy-battery-preflight.json"
+        preflight._write_new(str(forged), value)
+        with self.assertRaisesRegex(preflight.PreflightError, "receipt-schema-invalid"):
+            preflight._load_receipt(str(forged), "preflight")
 
     def test_custom_sleep_accepts_both_native_section_orders_and_canonicalizes(self):
         expected = {"AC Power": 0, "Battery Power": 10}
@@ -348,8 +465,9 @@ class CandidateCanaryPreflightFixtures(unittest.TestCase):
 
     def test_live_script_requires_receipt_chain_without_removing_existing_rollback_checks(self):
         source = (pathlib.Path(__file__).resolve().parent / "validate_live_state.sh").read_text(encoding="utf-8")
-        for token in ("LIDSWITCH_CANARY_PREFLIGHT_RECEIPT", "LIDSWITCH_CANARY_ACTIVE_RECEIPT", "LIDSWITCH_CANARY_FINAL_RECEIPT", "bind-active", "finalize", "kill -KILL", "system sleep did not restore", "sleep override rearmed"):
+        for token in ("LIDSWITCH_CANARY_PREFLIGHT_RECEIPT", "LIDSWITCH_CANARY_ACTIVE_RECEIPT", "LIDSWITCH_CANARY_FINAL_RECEIPT", "bind-active", "finalize", "kill -KILL", "system sleep did not restore", "sleep override rearmed", "power_is_unchanged", "source_sleep_minutes", "active helper session changed", "terminal session is not the killed generation"):
             self.assertIn(token, source)
+        self.assertNotIn("power_is_ac", source)
 
     def test_peer_death_reason_is_bound_to_the_helper_source_contract(self):
         root = pathlib.Path(__file__).resolve().parent.parent

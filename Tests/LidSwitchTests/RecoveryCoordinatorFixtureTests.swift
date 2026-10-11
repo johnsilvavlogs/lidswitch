@@ -12,6 +12,84 @@ import XCTest
 final class RecoveryCoordinatorFixtureTests: XCTestCase {
     fileprivate static let boot = "00000000-0000-4000-8000-000000000001"
 
+    func testExplicitPolicySchemaRejectsUnknownMasksFieldsAndInconsistentBaselines() throws {
+        let owner = try XCTUnwrap(Mutation.both.state(session: UUID(), boot: Self.boot).owner)
+        let state = AppliedState.currentAuthority(
+            sessionID: UUID(), changedSleepDisabled: true, changedACSleep: false,
+            originalACSleep: 0, changedBatterySleep: true, originalBatterySleep: 12,
+            powerPolicy: .all, owner: owner, leaseExpiryMonotonic: 999
+        )
+        let bytes = state.storagePayload
+        XCTAssertEqual(AppliedState.parse(bytes), state)
+        XCTAssertTrue(bytes.hasPrefix("schema=4\n"))
+        for invalid in [
+            bytes.replacingOccurrences(of: "power_policy=3\n", with: "power_policy=0\n"),
+            bytes.replacingOccurrences(of: "power_policy=3\n", with: "power_policy=4\n"),
+            bytes.replacingOccurrences(of: "power_policy=3\n", with: "power_policy=03\n"),
+            bytes.replacingOccurrences(of: "power_policy=3\n", with: "power_policy=1\n"),
+            bytes.replacingOccurrences(of: "original_ac_sleep=0\n", with: "original_ac_sleep=unknown\n"),
+            bytes.replacingOccurrences(of: "changed_ac_sleep=0\n", with: "changed_ac_sleep=1\n"),
+            bytes.replacingOccurrences(of: "schema=4\n", with: "schema=3\n"),
+            bytes + "unknown=value\n",
+            bytes + "power_policy=3\n",
+        ] {
+            XCTAssertNil(AppliedState.parse(invalid))
+        }
+        let renewed = try XCTUnwrap(state.replacingLeaseExpiry(1_029))
+        XCTAssertEqual(renewed.powerPolicy, state.powerPolicy)
+        XCTAssertEqual(renewed.payloadShape, state.payloadShape)
+        XCTAssertEqual(renewed.originalACSleep, 0)
+        XCTAssertEqual(renewed.originalBatterySleep, 12)
+        XCTAssertEqual(AppliedState.parse(renewed.storagePayload), renewed)
+    }
+
+    func testExplicitBatteryAuthorityReconnectsAndRestoresBothOwnedTimers() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let owner = try XCTUnwrap(Mutation.both.state(session: UUID(), boot: Self.boot).owner)
+        let state = AppliedState.currentAuthority(
+            sessionID: UUID(), changedSleepDisabled: true, changedACSleep: true,
+            originalACSleep: 10, changedBatterySleep: true, originalBatterySleep: 12,
+            powerPolicy: .all, owner: owner, leaseExpiryMonotonic: 999
+        )
+        try fixture.installPrivateApplied(state)
+        fixture.power.source = .battery; fixture.power.disabled = true
+        fixture.power.ac = 0; fixture.power.battery = 0
+        XCTAssertEqual(fixture.coordinator.recover(intent: .startup, allowReconnect: true), .reconnectCandidate(state))
+        XCTAssertEqual(fixture.power.setCalls, [])
+        guard case .terminalIdle = fixture.coordinator.recover(intent: .userRestore, allowReconnect: false) else {
+            return XCTFail("explicit battery authority did not restore")
+        }
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0", "ac=10", "battery=12"])
+        XCTAssertEqual(fixture.power.disabled, false)
+        XCTAssertEqual(fixture.power.ac, 10); XCTAssertEqual(fixture.power.battery, 12)
+        XCTAssertEqual(fixture.store.appliedRecord(), .missing)
+    }
+
+    func testHistoricalCurrentRecordsKeepACOnlyAuthorityRegardlessOfBatteryMutationFlags() throws {
+        for shape in [AppliedState.PayloadShape.schemaTwelve, .schemaFourteen] {
+            let fixture = try Fixture()
+            defer { fixture.dispose() }
+            let owner = try XCTUnwrap(Mutation.both.state(session: UUID(), boot: Self.boot).owner)
+            let state = AppliedState(
+                sessionID: UUID(), changedSleepDisabled: true, changedACSleep: true,
+                originalACSleep: 10, changedBatterySleep: shape == .schemaFourteen,
+                originalBatterySleep: shape == .schemaFourteen ? 12 : nil,
+                owner: owner, leaseExpiryMonotonic: 999, provenance: .current, payloadShape: shape
+            )
+            XCTAssertEqual(AppliedState.parse(state.storagePayload), state)
+            XCTAssertEqual(state.powerPolicy, .pluggedInOnly)
+            try fixture.installPrivateApplied(state)
+            fixture.power.source = .battery; fixture.power.disabled = true
+            fixture.power.ac = 0; fixture.power.battery = shape == .schemaFourteen ? 0 : 12
+            guard case .terminalIdle = fixture.coordinator.recover(intent: .startup, allowReconnect: true) else {
+                return XCTFail("historical shape \(shape) expanded its source authority")
+            }
+            XCTAssertEqual(fixture.power.disabled, false)
+            XCTAssertEqual(fixture.power.ac, 10); XCTAssertEqual(fixture.power.battery, 12)
+        }
+    }
+
     func testLegacyWriterProbeAcceptsExactDarwinMissingAndDisabledDiagnostics() {
         let system = ContainedProcessResult(
             stdout: "",

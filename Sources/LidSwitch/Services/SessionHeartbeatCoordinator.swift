@@ -3,7 +3,7 @@ import Foundation
 import LidSwitchCore
 
 struct SessionHeartbeatObservation: Sendable {
-    enum Power: Equatable, Sendable { case ac, disconnected, unknown }
+    enum Power: Equatable, Sendable { case ac, battery, disconnected, unknown }
     enum Authority: Equatable, Sendable { case verified, indeterminate, terminal(String) }
 
     let power: Power
@@ -60,6 +60,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     private let observationInterval: TimeInterval
     private let renewalInterval: TimeInterval
     private let acknowledgementTimeout: TimeInterval
+    private let powerPolicy: SessionPowerPolicy
     private let now: @Sendable () -> Date
     private let monotonicNow: @Sendable () -> TimeInterval
     private let observe: @Sendable (UUID) -> SessionHeartbeatObservation
@@ -83,6 +84,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         observationInterval: TimeInterval = 1,
         renewalInterval: TimeInterval = 8,
         acknowledgementTimeout: TimeInterval = 20,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly,
         queueLabel: String = "com.johnsilva.lidswitch.session-heartbeat",
         now: @escaping @Sendable () -> Date = Date.init,
         monotonicNow: @escaping @Sendable () -> TimeInterval = MonotonicClock.seconds,
@@ -97,6 +99,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         self.observationInterval = observationInterval
         self.renewalInterval = renewalInterval
         self.acknowledgementTimeout = acknowledgementTimeout
+        self.powerPolicy = powerPolicy
         queue = DispatchQueue(label: queueLabel, qos: .userInitiated)
         self.now = now
         self.monotonicNow = monotonicNow
@@ -116,6 +119,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         observationInterval: TimeInterval = 1,
         renewalInterval: TimeInterval = 8,
         acknowledgementTimeout: TimeInterval = 20,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly,
         queueLabel: String = "com.johnsilva.lidswitch.session-heartbeat",
         now: @escaping @Sendable () -> Date = Date.init,
         monotonicNow: @escaping @Sendable () -> TimeInterval = MonotonicClock.seconds,
@@ -131,6 +135,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             observationInterval: observationInterval,
             renewalInterval: renewalInterval,
             acknowledgementTimeout: acknowledgementTimeout,
+            powerPolicy: powerPolicy,
             queueLabel: queueLabel,
             now: now,
             monotonicNow: monotonicNow,
@@ -151,6 +156,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         observationInterval: TimeInterval = 1,
         renewalInterval: TimeInterval = 8,
         acknowledgementTimeout: TimeInterval = 20,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly,
         queueLabel: String = "com.johnsilva.lidswitch.session-heartbeat",
         now: @escaping @Sendable () -> Date = Date.init,
         monotonicNow: @escaping @Sendable () -> TimeInterval = MonotonicClock.seconds,
@@ -163,7 +169,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         onEnded: @escaping @Sendable (UUID, String) -> Void
     ) {
         self.init(observationInterval: observationInterval, renewalInterval: renewalInterval,
-                  acknowledgementTimeout: acknowledgementTimeout, queueLabel: queueLabel,
+                  acknowledgementTimeout: acknowledgementTimeout, powerPolicy: powerPolicy, queueLabel: queueLabel,
                   now: now, monotonicNow: monotonicNow, observe: observe,
                   renew: { id, guardCommit in
                       .renewed(expiryMonotonic: try renew(id, guardCommit))
@@ -240,15 +246,15 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             return
         }
         switch observation.power {
-        case .ac:
-            break
+        case .ac, .battery:
+            guard allows(observation.power) else { return }
         case .disconnected:
             // Handled above so disconnect retains its immediate RESTORE even
             // when the same tick observes a locally expired lease.
             return
         case .unknown:
             // Unknown app-side power is not terminal evidence. Withhold RENEW
-            // and let the helper's existing hard lease bound rollback; an AC
+            // and let the helper's existing hard lease bound rollback; a selected
             // sample before expiry may continue this exact generation.
             return
         }
@@ -357,7 +363,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             if finishIfHardExpiry(sessionID: sessionID, at: reobservedMonotonic) {
                 return
             }
-            guard reobserved.power == .ac, case .verified = reobserved.authority,
+            guard allows(reobserved.power), case .verified = reobserved.authority,
                   let permit = renewalWritePermit(for: sessionID) else {
                 nextRenewalMonotonic = min(monotonicNow() + observationInterval, leaseExpiresMonotonic)
                 return
@@ -420,7 +426,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         if finishIfTerminalObservation(observation, sessionID: permit.sessionID) {
             return false
         }
-        guard observation.power == .ac,
+        guard allows(observation.power),
               case .verified = observation.authority
         else { return false }
         guard self.sessionID == permit.sessionID,
@@ -470,11 +476,23 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             finish(sessionID: sessionID, reason: "helper-terminal-\(normalized(reason))", notify: true)
             return true
         }
-        if observation.power == .disconnected {
+        if observation.power == .disconnected || (observation.power == .battery && !powerPolicy.onBattery) {
             finish(sessionID: sessionID, reason: "power-disconnected", notify: true)
             return true
         }
+        if observation.power == .ac && !powerPolicy.pluggedIn {
+            finish(sessionID: sessionID, reason: "power-source-excluded", notify: true)
+            return true
+        }
         return false
+    }
+
+    private func allows(_ power: SessionHeartbeatObservation.Power) -> Bool {
+        switch power {
+        case .ac: return powerPolicy.pluggedIn
+        case .battery: return powerPolicy.onBattery
+        case .disconnected, .unknown: return false
+        }
     }
 
     @discardableResult
