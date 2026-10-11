@@ -1227,7 +1227,9 @@ final class NativeUXStateFixtureTests: XCTestCase {
             sessionID: nextSessionID,
             epoch: nextEpoch
         )
-        XCTAssertFalse(controller.isStarting)
+        // This fixture never publishes the new session's active projection.
+        // Raw acknowledgement releases the mutation wait, not visual proof.
+        XCTAssertTrue(controller.isStarting)
         XCTAssertFalse(controller.isBusy)
         controller.simulateHeartbeatEndForTesting(
             sessionID: nextSessionID,
@@ -1239,7 +1241,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertEqual(controller.sessionEpochForTesting, nextEpoch)
         XCTAssertEqual(
             announcements.read { $0.filter { $0 == "Keep Mac awake on while plugged in." }.count },
-            1
+            0
         )
     }
 
@@ -1682,9 +1684,10 @@ final class NativeUXStateFixtureTests: XCTestCase {
         controller.startSession()
         await assertEventually {
             coordinatorBox.read { $0 != nil }
-                && !controller.isStarting
                 && !controller.isBusy
         }
+        XCTAssertTrue(controller.isStarting)
+        XCTAssertEqual(controller.displayedStatus.title, "Verifying…")
         XCTAssertNotNil(controller.cleanupOwnerSessionIDForTesting)
 
         controller.prepareForSystemTermination { restored in
