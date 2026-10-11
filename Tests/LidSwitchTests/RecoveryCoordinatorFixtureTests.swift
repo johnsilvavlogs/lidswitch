@@ -2887,6 +2887,7 @@ private final class Fixture {
                 ),
                 .pristineIdle
             )
+            XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
             XCTAssertEqual(coordinator.recover(intent: .startup, allowReconnect: true), .pristineIdle)
         }
         XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
