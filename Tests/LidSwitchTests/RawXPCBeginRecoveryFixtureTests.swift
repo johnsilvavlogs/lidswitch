@@ -1,9 +1,32 @@
 import Foundation
 import LidSwitchXPCBridge
+import LidSwitchCore
 import XCTest
 @testable import LidSwitch
 
 final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
+    func testIdleProofRetryPreservesExplicitBeginPolicyAndReconnectCannotChangeIt() throws {
+        let sessionID = UUID()
+        let idle = reply(reason: "reconnect-peer-mismatch", sessionID: sessionID,
+                         expiryMonotonic: 0, state: .idle)
+        let issued = reply(reason: "verified", sessionID: sessionID,
+                           expiryMonotonic: 1_234, state: .active)
+        var operations: [UInt32] = []
+        var policies: [SessionPowerPolicy?] = []
+        let resolution = try RawHelperControlClient.resolveBeginForTesting(
+            sessionID: sessionID, powerPolicy: .all
+        ) { operation, requested, policy in
+            XCTAssertEqual(requested, sessionID)
+            operations.append(operation); policies.append(policy)
+            if operation == UInt32(LS_OPERATION_RECONNECT.rawValue) { return .rejected(idle) }
+            if operations.count == 1 { throw HelperControlError.indeterminateTransport(60) }
+            return .accepted(issued)
+        }
+        XCTAssertEqual(resolution, .issued(issued))
+        XCTAssertEqual(operations, [1, 6, 1])
+        XCTAssertEqual(policies, [.all, nil, .all])
+    }
+
     func testDirectBeginReplyIsIssuedWithoutReconnect() throws {
         let sessionID = UUID()
         let issued = reply(

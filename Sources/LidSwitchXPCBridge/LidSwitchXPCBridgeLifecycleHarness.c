@@ -90,6 +90,7 @@ bool ls_xpc_request_lifecycle_harness(void) {
     if (states[0] > 3 || states[3] > 3 || states[4] <= 3 || powers[2] > 2 || powers[3] <= 2) return false;
     if (ac_sleep[0] < -1 || ac_sleep[2] > 1440 || ac_sleep[3] >= -1 || ac_sleep[4] <= 1440) return false;
     if (!isfinite(0.0) || isfinite(NAN) || isfinite(INFINITY)) return false;
+    if (!ls_xpc_request_power_policy_harness() || !ls_xpc_reply_battery_harness()) return false;
     return ls_xpc_status_is_indeterminate(LS_XPC_STATUS_INDETERMINATE_TIMEOUT) &&
         ls_xpc_status_is_indeterminate(LS_XPC_STATUS_INDETERMINATE_INTERRUPTED) &&
         !ls_xpc_status_is_indeterminate(LS_XPC_STATUS_AUTHENTICATION_OR_PROTOCOL_FAILURE);

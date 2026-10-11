@@ -8,7 +8,7 @@ enum NativeConfirmationAction: CaseIterable, Equatable {
 
     var title: String {
         switch self {
-        case .startSession: "Start Plugged-In Session?"
+        case .startSession: "Keep Mac Awake?"
         case .removeHelper: "Remove LidSwitch Helper?"
         case .quit: "Restore Sleep and Quit?"
         }
@@ -17,9 +17,9 @@ enum NativeConfirmationAction: CaseIterable, Equatable {
     var message: String {
         switch self {
         case .startSession:
-            "LidSwitch will block lid-close sleep for this session only. Unplugging, quitting, restarting, or a missed safety check ends it. Reconnecting power never starts it automatically."
+            "LidSwitch keeps this Mac awake on the selected power sources while the switch is on. Turning it off, quitting, restarting, or a missed safety check restores system sleep."
         case .removeHelper:
-            "This ends any active session, restores system sleep, and removes LidSwitch helper files."
+            "Restores sleep and removes the helper. macOS may require administrator approval."
         case .quit:
             "LidSwitch will stop this session and verify that the system sleep override is off before quitting."
         }

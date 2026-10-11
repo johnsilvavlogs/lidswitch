@@ -62,7 +62,7 @@ try: sys.argv=[p]+sys.argv[3:]; exec(code,{"__name__":"__main__","__file__":p,"_
 except BaseException:
  if isinstance(sys.exc_info()[1],SystemExit) and sys.exc_info()[1].code==74: raise
  raise SystemExit(74)
-' script/test_safe_envelope.py b5db815b79874a555270b1a6690eb6c6e63914801070cf2abfe9e7b1ed9caa2e
+' script/test_safe_envelope.py 2fe78df7fdfdbe96c3ccd6c04663f812ddf38e888dce506b377511788294da6c
 ```
 
 Do not substitute bare `python3`, `/usr/bin/env python`, an Anaconda/interpreter
@@ -569,9 +569,9 @@ Immutable candidate/DMG qualification is unavailable; `validate_dmg.sh` truthful
 than validating an artifact. Harmless source and fixture validation above remains the only current
 no-launch evidence, and it does not establish a candidate, DMG, native-macOS, or release verdict.
 
-The controlled live canary is a blocked future manual deployment step, intentionally excluded from
-every current gate. Do not run it until immutable candidate/DMG qualification exists and an
-independent release decision authorizes it. Before manually starting the candidate, a manager must
+The controlled live canary is a manual deployment check, excluded from no-launch gates.
+Run it only for an authorized installation after immutable candidate/DMG qualification exists.
+Before manually starting the candidate, a manager must
 run `script/candidate_canary_preflight.py preflight` against the canonical immutable-candidate-v3
 manifest and its separate canonical `lidswitch-candidate-canary-v1` binding. That binding is the
 candidate-lane integration seam: it names the manifest SHA-256/candidate ID plus the installed app
@@ -584,11 +584,11 @@ equal `manifest.app.cdhash`, and the observed helper SHA-256/CDHash must equal t
 The preflight is observation-only apart from its create-once receipt: it verifies the bound app and
 helper identities, no running LidSwitch process, an exact public safe-idle state (`inactive` with
 an approved no-session reason, or a normalized session-bound `terminal` `legacy-migration`,
-`peer-restore`, or `user-end` record), AC power, `SleepDisabled=0`, the current
+`peer-restore`, or `user-end` record), known AC or battery power, `SleepDisabled=0`, the current
 AC and battery sleep settings, and one explicit lid-open observation. The preferred autonomous mode
 is `--lid-open-observed programmatic-ioreg`: it runs only
 `/usr/sbin/ioreg -r -k AppleClamshellState -d 4`, requires exactly one unambiguous
-`"AppleClamshellState" = No` row, and binds the raw observation SHA-256 into the canonical v2
+`"AppleClamshellState" = No` row, and binds the raw observation SHA-256 into the canonical v3
 receipt. `--lid-open-observed human-confirmed` remains an explicit manual fallback and is labelled as
 such in the receipt. Closed, missing, malformed, or duplicate programmatic observations fail closed.
 The manager supplies three
@@ -598,7 +598,8 @@ safe-idle rather than being treated as an unrelated artifact. The live script re
 manifest/binding and re-verifies the installed app/helper digest/CDHash before binding the exact
 active session UUID and again before finalization. It creates the final receipt only after its
 existing SIGKILL rollback, applied-state disappearance, terminal peer-process-invalid, and no-rearm
-checks succeed.
+checks succeed. The source must remain unchanged throughout observation, and finalization requires
+both original sleep timers to match the preflight baseline.
 
 Create the binding once from manager-owned absolute paths and explicit bundle identity before the
 safe-idle preflight. This command only reads the candidate manifest, helper-version file, system
@@ -615,7 +616,7 @@ build, and installed app/helper signatures and bytes; it neither installs nor st
   --executable-relative-path Contents/MacOS/LidSwitch
 ```
 
-It requires `LIDSWITCH_CONTROLLED_CANARY=1`, qualified build `25F84`, AC power, a successfully bound
+It requires `LIDSWITCH_CONTROLLED_CANARY=1`, qualified build `25F84`, known AC or battery power, a successfully bound
 lid-open observation, a verified active session, and those preflight/receipt paths:
 
 ```bash
@@ -632,8 +633,8 @@ The script observes at least 40 seconds of fresh acknowledgements (`LIDSWITCH_LI
 
 To exercise the candidate's same-session recovery path, add the separate
 `LIDSWITCH_INJECT_OVERRIDE_DRIFT=1` opt-in. It first verifies the helper owns a
-current AC session, invokes only `sudo pmset -a disablesleep 0`, and waits at
-most 10 seconds for `SleepDisabled=1`, AC sleep `0`, a fresh `active`
+current session on the observed source, invokes only `sudo pmset -a disablesleep 0`, and waits at
+most 10 seconds for `SleepDisabled=1`, the observed source's sleep timer `0`, a fresh `active`
 `override-recovered` status, and the unchanged session UUID. It never edits
 root state files. Do not run this on a production session unless the explicit
 canary is intended.

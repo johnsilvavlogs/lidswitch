@@ -12,13 +12,14 @@ struct AppliedState: Equatable, Sendable {
         case legacySix
         case schemaTwelve
         case schemaFourteen
+        case schemaFifteen
 
         fileprivate var includesBattery: Bool {
-            self == .legacySix || self == .schemaFourteen
+            self == .legacySix || self == .schemaFourteen || self == .schemaFifteen
         }
 
         fileprivate var includesSchema: Bool {
-            self == .schemaTwelve || self == .schemaFourteen
+            self == .schemaTwelve || self == .schemaFourteen || self == .schemaFifteen
         }
     }
     /// Schema is provenance, not a property inferred from inode metadata.
@@ -54,12 +55,15 @@ struct AppliedState: Equatable, Sendable {
     let changedSleepDisabled: Bool
     let changedACSleep: Bool
     let originalACSleep: Int?
-    /// Legacy releases could also persist a battery sleep baseline. Current
-    /// sessions never mutate it, but native recovery must absorb and restore
-    /// that exact evidence before the shell fallback can be retired.
+    /// Exact battery baseline for an owned timer mutation, including legacy
+    /// restore evidence and explicitly selected current sessions.
     let changedBatterySleep: Bool
     let originalBatterySleep: Int?
-    /// Present only for schema-2 authority records. Legacy four-key records
+    /// Historical records grant only AC authority, independently of the
+    /// mutation flags. Schema 4 explicitly records source selection even when
+    /// a selected timer was already zero before BEGIN.
+    let powerPolicy: SessionPowerPolicy
+    /// Present only for process-bound authority records. Legacy four-key records
     /// remain parseable solely so recovery can restore their owned mutation.
     let owner: Owner?
     let leaseExpiryMonotonic: TimeInterval?
@@ -76,7 +80,8 @@ struct AppliedState: Equatable, Sendable {
         owner: Owner? = nil,
         leaseExpiryMonotonic: TimeInterval? = nil,
         provenance: Provenance = .legacy,
-        payloadShape: PayloadShape? = nil
+        payloadShape: PayloadShape? = nil,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly
     ) {
         self.sessionID = sessionID
         self.changedSleepDisabled = changedSleepDisabled
@@ -84,6 +89,7 @@ struct AppliedState: Equatable, Sendable {
         self.originalACSleep = originalACSleep
         self.changedBatterySleep = changedBatterySleep
         self.originalBatterySleep = originalBatterySleep
+        self.powerPolicy = powerPolicy
         self.owner = owner
         self.leaseExpiryMonotonic = leaseExpiryMonotonic
         self.provenance = provenance
@@ -112,14 +118,16 @@ struct AppliedState: Equatable, Sendable {
     }
 
     /// The live helper is the only writer allowed to originate a reconnectable
-    /// generation.  Keeping construction here makes schema-3 and the
-    /// battery-free schema-12 contract impossible to accidentally omit at a
-    /// BEGIN call site.
+    /// generation. Policy and both timer baselines are durable before BEGIN
+    /// mutates power; selected zero baselines remain explicit evidence.
     static func currentAuthority(
         sessionID: UUID,
         changedSleepDisabled: Bool,
         changedACSleep: Bool,
         originalACSleep: Int?,
+        changedBatterySleep: Bool = false,
+        originalBatterySleep: Int? = nil,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly,
         owner: Owner,
         leaseExpiryMonotonic: TimeInterval
     ) -> AppliedState {
@@ -127,24 +135,25 @@ struct AppliedState: Equatable, Sendable {
             sessionID: sessionID,
             changedSleepDisabled: changedSleepDisabled,
             changedACSleep: changedACSleep,
-            originalACSleep: originalACSleep,
+            originalACSleep: powerPolicy.pluggedIn ? originalACSleep : nil,
+            changedBatterySleep: changedBatterySleep,
+            originalBatterySleep: powerPolicy.onBattery ? originalBatterySleep : nil,
             owner: owner,
             leaseExpiryMonotonic: leaseExpiryMonotonic,
             provenance: .current,
-            payloadShape: .schemaTwelve
+            payloadShape: .schemaFifteen,
+            powerPolicy: powerPolicy
         )
     }
 
     /// Renewal is an exact replacement of the lease field.  It deliberately
-    /// preserves parsed 12/14-key shape, provenance, and every power field so
-    /// a future supported battery-bearing current authority cannot be silently
-    /// downgraded while it is active.
+    /// preserves shape, provenance, policy, and both timer baselines.
     func replacingLeaseExpiry(_ renewedExpiry: TimeInterval) -> AppliedState? {
         guard renewedExpiry.isFinite,
               renewedExpiry > 0,
               provenance == .current,
               owner?.isWellFormed == true,
-              payloadShape == .schemaTwelve || payloadShape == .schemaFourteen
+              payloadShape.includesSchema
         else { return nil }
         return AppliedState(
             sessionID: sessionID,
@@ -156,11 +165,12 @@ struct AppliedState: Equatable, Sendable {
             owner: owner,
             leaseExpiryMonotonic: renewedExpiry,
             provenance: provenance,
-            payloadShape: payloadShape
+            payloadShape: payloadShape,
+            powerPolicy: powerPolicy
         )
     }
 
-    /// Returns the exact historical 4/6-key or schema-2 12/14-key byte shape.
+    /// Returns the exact historical shape or explicit schema-4 policy shape.
     /// Parsing supplies the observed shape so a valid legacy six-key no-op
     /// record remains readable without weakening canonical byte equality.
     private func canonicalPayload(shape: PayloadShape) -> String {
@@ -176,12 +186,15 @@ struct AppliedState: Equatable, Sendable {
                 "original_battery_sleep=\(originalBatterySleep.map(String.init) ?? "unknown")",
             ]
         }
+        if shape == .schemaFifteen {
+            legacy.append("power_policy=\(powerPolicy.rawValue)")
+        }
         guard shape.includesSchema,
               let owner, let leaseExpiryMonotonic, let schema = provenance.schema else {
             return (legacy + [""]).joined(separator: "\n")
         }
         return ([
-            "schema=\(schema)",
+            "schema=\(shape == .schemaFifteen && provenance == .current ? "4" : schema)",
         ] + legacy + [
             "pid=\(owner.pid)",
             "start_sec=\(owner.startSeconds)",
@@ -203,7 +216,7 @@ struct AppliedState: Equatable, Sendable {
             guard values[key] == nil else { return nil }
             values[key] = String(parts[1])
         }
-        guard [4, 6, 12, 14].contains(values.count),
+        guard [4, 6, 12, 14, 15].contains(values.count),
               let sessionRaw = values["session"],
               let sessionID = UUID(uuidString: sessionRaw),
               let changedSleepRaw = values["changed_sleep_disabled"],
@@ -218,21 +231,36 @@ struct AppliedState: Equatable, Sendable {
         if originalRaw != "unknown", original == nil {
             return nil
         }
-        if changedAC {
+        let explicitPolicy = values.count == 15
+        let powerPolicy: SessionPowerPolicy
+        if explicitPolicy {
+            guard values["schema"] == "4",
+                  let mask = values["power_policy"].flatMap(UInt64.init),
+                  let selected = SessionPowerPolicy(rawValue: mask)
+            else { return nil }
+            powerPolicy = selected
+        } else {
+            powerPolicy = .pluggedInOnly
+        }
+        if explicitPolicy {
+            guard validBaseline(original, changed: changedAC, selected: powerPolicy.pluggedIn) else { return nil }
+        } else if changedAC {
             guard let original, original > 0, original <= 1_440 else { return nil }
         } else if original != nil {
             return nil
         }
         let changedBattery: Bool
         let originalBattery: Int?
-        if values.count == 6 || values.count == 14 {
+        if values.count == 6 || values.count == 14 || explicitPolicy {
             guard let changedRaw = values["changed_battery_sleep"],
                   let changed = parseFlag(changedRaw),
                   let originalRaw = values["original_battery_sleep"]
             else { return nil }
             let parsedOriginal = originalRaw == "unknown" ? nil : Int(originalRaw)
             guard originalRaw == "unknown" || parsedOriginal != nil else { return nil }
-            if changed {
+            if explicitPolicy {
+                guard validBaseline(parsedOriginal, changed: changed, selected: powerPolicy.onBattery) else { return nil }
+            } else if changed {
                 guard let parsedOriginal, parsedOriginal > 0, parsedOriginal <= 1_440 else { return nil }
             } else if parsedOriginal != nil {
                 return nil
@@ -249,6 +277,7 @@ struct AppliedState: Equatable, Sendable {
         case 6: shape = .legacySix
         case 12: shape = .schemaTwelve
         case 14: shape = .schemaFourteen
+        case 15: shape = .schemaFifteen
         default: return nil
         }
         let base = AppliedState(
@@ -258,12 +287,13 @@ struct AppliedState: Equatable, Sendable {
             originalACSleep: original,
             changedBatterySleep: changedBattery,
             originalBatterySleep: originalBattery,
-            payloadShape: shape
+            payloadShape: shape,
+            powerPolicy: powerPolicy
         )
-        guard values.count == 12 || values.count == 14 else {
+        guard shape.includesSchema else {
             return base.canonicalPayload(shape: shape) == raw ? base : nil
         }
-        guard let schema = values["schema"], ["2", "3"].contains(schema),
+        guard let schema = values["schema"], (explicitPolicy ? schema == "4" : ["2", "3"].contains(schema)),
               let pid = values["pid"].flatMap(Int32.init), pid > 0,
               let seconds = values["start_sec"].flatMap(UInt64.init), seconds > 0,
               let microseconds = values["start_usec"].flatMap(UInt64.init), microseconds < 1_000_000,
@@ -288,8 +318,9 @@ struct AppliedState: Equatable, Sendable {
                 bootID: boot
             ),
             leaseExpiryMonotonic: expiry,
-            provenance: schema == "3" ? .current : .legacy,
-            payloadShape: shape
+            provenance: schema == "3" || schema == "4" ? .current : .legacy,
+            payloadShape: shape,
+            powerPolicy: powerPolicy
         )
         return state.canonicalPayload(shape: shape) == raw ? state : nil
     }
@@ -298,6 +329,12 @@ struct AppliedState: Equatable, Sendable {
         if raw == "1" { return true }
         if raw == "0" { return false }
         return nil
+    }
+
+    private static func validBaseline(_ value: Int?, changed: Bool, selected: Bool) -> Bool {
+        guard selected else { return value == nil && !changed }
+        guard let value, (0...1_440).contains(value) else { return false }
+        return changed == (value != 0)
     }
 }
 

@@ -91,12 +91,39 @@ enum PowerInspector {
         let source: @Sendable () -> PowerSource
         let sleepDisabled: @Sendable () -> Bool?
         let acIdleSleep: @Sendable () -> Int?
+        let batteryIdleSleep: @Sendable () -> Int?
         let preferences: @Sendable () -> DesiredStateStore.ReadResult
         let systemBuild: @Sendable () -> String?
         let activationLease: @Sendable (String?) -> ActivationLeaseStore.ReadResult
         let helperStatus: @Sendable () -> HelperStatusRecord?
         let dynamicMetadata: @Sendable (String) -> String
         let now: @Sendable () -> Date
+
+        init(
+            dynamicPaths: (appliedState: String, helperStatus: String, originalAC: String, originalBattery: String, legacyRoot: String, legacyLogin: String),
+            source: @escaping @Sendable () -> PowerSource,
+            sleepDisabled: @escaping @Sendable () -> Bool?,
+            acIdleSleep: @escaping @Sendable () -> Int?,
+            preferences: @escaping @Sendable () -> DesiredStateStore.ReadResult,
+            systemBuild: @escaping @Sendable () -> String?,
+            activationLease: @escaping @Sendable (String?) -> ActivationLeaseStore.ReadResult,
+            helperStatus: @escaping @Sendable () -> HelperStatusRecord?,
+            dynamicMetadata: @escaping @Sendable (String) -> String,
+            now: @escaping @Sendable () -> Date,
+            batteryIdleSleep: @escaping @Sendable () -> Int? = { nil }
+        ) {
+            self.dynamicPaths = dynamicPaths
+            self.source = source
+            self.sleepDisabled = sleepDisabled
+            self.acIdleSleep = acIdleSleep
+            self.batteryIdleSleep = batteryIdleSleep
+            self.preferences = preferences
+            self.systemBuild = systemBuild
+            self.activationLease = activationLease
+            self.helperStatus = helperStatus
+            self.dynamicMetadata = dynamicMetadata
+            self.now = now
+        }
     }
 
     final class DynamicSnapshotEngine: @unchecked Sendable {
@@ -136,6 +163,7 @@ enum PowerInspector {
                 sleepDisabled: sleepDisabled ?? false,
                 sleepDisabledVerified: sleepDisabled != nil,
                 acIdleSleepMinutes: dependencies.acIdleSleep(),
+                batteryIdleSleepMinutes: dependencies.batteryIdleSleep(),
                 preferences: PowerInspector.resolvedPreferences(desired),
                 desiredStateTruth: PowerInspector.desiredStateTruth(desired),
                 helperArtifactsPresent: artifactsPresent,
@@ -486,7 +514,8 @@ enum PowerInspector {
         activationLease: validatedActivationLease,
         helperStatus: { helperStatus() },
         dynamicMetadata: structuralMetadataFingerprint,
-        now: Date.init
+        now: Date.init,
+        batteryIdleSleep: nativeBatteryIdleSleep
     ))
 
     private static let productionInstallationInventoryEngine = InstallationInventoryEngine(dependencies: InstallationInventoryDependencies(
@@ -722,6 +751,11 @@ enum PowerInspector {
         return strictInt(settings["System Sleep Timer"])
     }
 
+    private static func nativeBatteryIdleSleep() -> Int? {
+        guard let settings = currentPowerPreference("Battery Power") as? [String: Any] else { return nil }
+        return strictInt(settings["System Sleep Timer"])
+    }
+
     private static func currentPowerPreference(_ key: String) -> Any? {
         BenchmarkProbe.record("native_cfpreferences_read", count: 2)
         _ = CFPreferencesSynchronize(
@@ -889,7 +923,7 @@ enum PowerInspector {
                 if source == kIOPMACPowerKey {
                     power = .ac
                 } else if source == kIOPMBatteryPowerKey {
-                    power = .disconnected
+                    power = .battery
                 } else {
                     power = .unknown
                 }

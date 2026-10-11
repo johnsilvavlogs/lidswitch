@@ -921,7 +921,7 @@ private final class InspectionFixture: @unchecked Sendable {
 }
 
 final class SessionSafetyTests: XCTestCase {
-    func testNativeCleanupProofSourceIsGenerationBoundAndPreservesACIdleValue() throws {
+    func testNativeCleanupProofSourceIsGenerationBoundAndPreservesSelectedSleepValues() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
@@ -933,12 +933,17 @@ final class SessionSafetyTests: XCTestCase {
         let proofStart = try XCTUnwrap(controller.range(of: "func provesFullRollback"))
         let proofEnd = try XCTUnwrap(controller.range(of: "var hasAuthenticatedTerminalProof", range: proofStart.upperBound..<controller.endIndex))
         let proof = String(controller[proofStart.lowerBound..<proofEnd.lowerBound])
-        XCTAssertTrue(proof.contains("snapshot.acIdleSleepMinutes == originalACIdleSleepMinutes"))
+        XCTAssertTrue(proof.contains("selectedBaselinesMatch(ac: snapshot.acIdleSleepMinutes, battery: snapshot.batteryIdleSleepMinutes)"))
+        XCTAssertTrue(proof.contains("ac == originalACIdleSleepMinutes"))
+        XCTAssertTrue(proof.contains("battery == originalBatteryIdleSleepMinutes"))
+        XCTAssertTrue(proof.contains("!powerPolicy.pluggedIn"))
+        XCTAssertTrue(proof.contains("!powerPolicy.onBattery"))
         XCTAssertTrue(proof.contains("status.sessionID == sessionID"))
         XCTAssertTrue(proof.contains("status.isFresh(at: snapshot.checkedAt)"))
         XCTAssertTrue(proof.contains("status.state == \"inactive\" || status.state == \"terminal\""))
         XCTAssertFalse(proof.contains("helperStatus?.state != \"active\""))
-        XCTAssertTrue(controller.contains("guard let originalACIdleSleepMinutes = freshSnapshot.acIdleSleepMinutes"))
+        XCTAssertTrue(controller.contains("freshSnapshot.acIdleSleepMinutes.map { $0 >= 0 } == true"))
+        XCTAssertTrue(controller.contains("freshSnapshot.batteryIdleSleepMinutes.map { $0 >= 0 } == true"))
         XCTAssertTrue(controller.contains("reply.sessionID == sessionID"))
         XCTAssertTrue(controller.contains("no power rollback was claimed"))
     }
@@ -1384,7 +1389,7 @@ final class SessionSafetyTests: XCTestCase {
         let update = makeSnapshot(source: .ac, sleepDisabled: false, sleepDisabledVerified: true, helperNeedsUpdate: true)
         XCTAssertFalse(update.legacyResiduePresent)
         XCTAssertEqual(update.statusTitle, "Helper update required")
-        XCTAssertTrue(update.statusDetail.contains("newer crash-safe helper"))
+        XCTAssertTrue(update.statusDetail.contains("Turn on to update the helper"))
 
         let legacy = makeSnapshot(source: .ac, sleepDisabled: false, sleepDisabledVerified: true, legacyLoginPresent: true)
         XCTAssertTrue(legacy.legacyResiduePresent)
@@ -1404,7 +1409,7 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(stale.legacyResiduePresent)
         XCTAssertFalse(stale.canStartSession)
         XCTAssertEqual(stale.statusTitle, "Legacy lease needs reconciliation")
-        XCTAssertTrue(stale.statusDetail.contains("Prepare Safe Helper"))
+        XCTAssertTrue(stale.statusDetail.contains("Install Helper"))
         XCTAssertEqual(PowerControllerPrimaryAction.resolve(snapshot: stale, operationPhase: .idle), .prepareHelper)
 
         let genericResidue = makeSnapshot(
@@ -1499,7 +1504,7 @@ final class SessionSafetyTests: XCTestCase {
         )
 
         XCTAssertEqual(cleanInstall.helperPreparationCTA, .prepare)
-        XCTAssertEqual(cleanInstall.helperPreparationCTA.title, "Prepare Safe Helper")
+        XCTAssertEqual(cleanInstall.helperPreparationCTA.title, "Install Helper")
         XCTAssertEqual(
             cleanInstall.helperPreparationCTA.accessibilityHint,
             "Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off."
@@ -1637,7 +1642,7 @@ final class SessionSafetyTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("both bounded attempts"))
         XCTAssertTrue(controller.snapshot.statusDetail.contains("could not stabilize"))
-        XCTAssertTrue(controller.errorMessage?.contains("Session did not start") == true)
+        XCTAssertEqual(controller.errorMessage, controller.snapshot.statusDetail)
     }
 
     @MainActor
@@ -1676,7 +1681,7 @@ final class SessionSafetyTests: XCTestCase {
         }
         XCTAssertTrue(reason.contains("both bounded attempts"))
         XCTAssertTrue(controller.snapshot.statusDetail.contains("could not stabilize"))
-        XCTAssertTrue(controller.errorMessage?.contains("Session did not start") == true)
+        XCTAssertEqual(controller.errorMessage, controller.snapshot.statusDetail)
     }
 
     @MainActor
@@ -2064,7 +2069,7 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(snapshotCalls.value, 1)
         XCTAssertFalse(controller.isStarting)
         XCTAssertFalse(controller.isBusy)
-        XCTAssertTrue(controller.errorMessage?.contains("Session did not start.") == true)
+        XCTAssertTrue(controller.errorMessage?.contains("could not verify a selected power source.") == true)
         XCTAssertTrue(controller.errorMessage?.contains("Protection remains off.") == true)
     }
 
@@ -2370,7 +2375,7 @@ final class SessionSafetyTests: XCTestCase {
 
         controller.refresh()
         await waitForRefresh(controller)
-        XCTAssertEqual(controller.displayedStatus.title, "Ready for monitored session")
+        XCTAssertEqual(controller.displayedStatus.title, "Off")
         XCTAssertFalse(try XCTUnwrap(controller.snapshot.helperStatus).isFresh(at: now))
         XCTAssertFalse(controller.requiresTerminationCleanup)
 
@@ -2770,7 +2775,7 @@ final class SessionSafetyTests: XCTestCase {
         controller.refresh()
         await waitForRefresh(controller)
         XCTAssertNil(controller.alert)
-        XCTAssertEqual(controller.snapshot.statusTitle, "Ready for monitored session")
+        XCTAssertEqual(controller.snapshot.statusTitle, "Off")
 
         current.value = unsafe
         controller.refresh()
@@ -3363,7 +3368,7 @@ final class SessionSafetyTests: XCTestCase {
         )
 
         XCTAssertTrue(snapshot.sessionActive)
-        XCTAssertEqual(snapshot.statusTitle, "Protection active — plugged in")
+        XCTAssertEqual(snapshot.statusTitle, "Awake")
         XCTAssertFalse(snapshot.canStartSession)
     }
 
@@ -3461,7 +3466,7 @@ final class SessionSafetyTests: XCTestCase {
         )
 
         XCTAssertFalse(snapshot.canStartSession)
-        XCTAssertEqual(snapshot.statusTitle, "Power status unavailable")
+        XCTAssertEqual(snapshot.statusTitle, "Sleep status unavailable")
     }
 
     func testOldLoginItemLoadedIsDistinctLegacyResidue() {
@@ -3949,7 +3954,7 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertFalse(preferences.keepAwakeEnabled)
         XCTAssertTrue(preferences.legacyBatteryResidueDetected)
         XCTAssertFalse(preferences.allowBatteryKeepAwake)
-        XCTAssertEqual(preferences.storagePayload, "mode=disabled\nbattery=disabled\n")
+        XCTAssertEqual(preferences.storagePayload, "schema=2\nmode=disabled\nplugged_in=enabled\nbattery=disabled\n")
 
         let root = try temporaryDirectory()
         let file = root.appendingPathComponent("desired-state")

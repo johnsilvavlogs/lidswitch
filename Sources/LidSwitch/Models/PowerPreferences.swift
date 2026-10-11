@@ -1,23 +1,29 @@
 import Foundation
+import LidSwitchCore
 
 struct PowerPreferences: Equatable, Sendable {
     var keepAwakeEnabled: Bool
-    /// Legacy persisted battery intent is visible for remediation only; no new
-    /// runtime path can express or activate it.
+    /// Battery intent from the legacy format requires explicit remediation;
+    /// only schema 2 can persist a new, independent battery preference.
     var legacyBatteryResidueDetected: Bool
     /// A malformed or contradictory record is never permission to enable the
     /// feature. This lets the UI distinguish an intentionally-disabled record
     /// from a fail-safe disabled one without preserving activation authority.
     var invalidPersistenceDetected: Bool
-    var allowBatteryKeepAwake: Bool { false }
+    var allowBatteryKeepAwake: Bool
+    var allowPluggedInKeepAwake: Bool
 
     init(
         keepAwakeEnabled: Bool,
         allowBatteryKeepAwake: Bool,
-        invalidPersistenceDetected: Bool = false
+        invalidPersistenceDetected: Bool = false,
+        allowPluggedInKeepAwake: Bool = true,
+        legacyBatteryResidueDetected: Bool = false
     ) {
         self.keepAwakeEnabled = keepAwakeEnabled
-        legacyBatteryResidueDetected = allowBatteryKeepAwake
+        self.allowBatteryKeepAwake = allowBatteryKeepAwake
+        self.allowPluggedInKeepAwake = allowPluggedInKeepAwake
+        self.legacyBatteryResidueDetected = legacyBatteryResidueDetected
         self.invalidPersistenceDetected = invalidPersistenceDetected
     }
 
@@ -25,19 +31,33 @@ struct PowerPreferences: Equatable, Sendable {
     static let acOnlyEnabled = PowerPreferences(keepAwakeEnabled: true, allowBatteryKeepAwake: false)
 
     var storagePayload: String {
-        let mode = keepAwakeEnabled ? "enabled" : "disabled"
-        return "mode=\(mode)\nbattery=disabled\n"
+        // Activation belongs to this app process, never to a saved record.
+        return "schema=2\nmode=disabled\nplugged_in=\(allowPluggedInKeepAwake ? "enabled" : "disabled")\nbattery=\(allowBatteryKeepAwake ? "enabled" : "disabled")\n"
     }
 
     func withKeepAwakeEnabled(_ enabled: Bool) -> PowerPreferences {
         PowerPreferences(
             keepAwakeEnabled: enabled,
-            allowBatteryKeepAwake: enabled ? legacyBatteryResidueDetected : false
+            allowBatteryKeepAwake: allowBatteryKeepAwake,
+            allowPluggedInKeepAwake: allowPluggedInKeepAwake
         )
+    }
+
+    var sessionPowerPolicy: SessionPowerPolicy? {
+        SessionPowerPolicy(pluggedIn: allowPluggedInKeepAwake, onBattery: allowBatteryKeepAwake)
+    }
+
+    func allows(_ source: PowerSource) -> Bool {
+        switch source {
+        case .ac: allowPluggedInKeepAwake
+        case .battery: allowBatteryKeepAwake
+        case .unknown: false
+        }
     }
 
     static func parse(_ raw: String) -> PowerPreferences {
         let compact = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if compact.hasPrefix("schema=") { return parseCurrent(raw) }
         switch compact {
         case "enabled":
             return .acOnlyEnabled
@@ -98,8 +118,33 @@ struct PowerPreferences: Equatable, Sendable {
 
         return PowerPreferences(
             keepAwakeEnabled: invalid || battery == true ? false : mode ?? false,
-            allowBatteryKeepAwake: battery ?? false,
-            invalidPersistenceDetected: invalid || battery == true
+            allowBatteryKeepAwake: false,
+            invalidPersistenceDetected: invalid || battery == true,
+            legacyBatteryResidueDetected: battery == true
+        )
+    }
+
+    private static func parseCurrent(_ raw: String) -> PowerPreferences {
+        var values: [String: String] = [:]
+        for line in raw.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, values[String(parts[0])] == nil else {
+                return PowerPreferences(keepAwakeEnabled: false, allowBatteryKeepAwake: false, invalidPersistenceDetected: true)
+            }
+            values[String(parts[0])] = String(parts[1])
+        }
+        guard Set(values.keys) == ["schema", "mode", "plugged_in", "battery"],
+              values["schema"] == "2",
+              let mode = values["mode"], ["enabled", "disabled"].contains(mode),
+              let pluggedIn = values["plugged_in"], ["enabled", "disabled"].contains(pluggedIn),
+              let battery = values["battery"], ["enabled", "disabled"].contains(battery)
+        else {
+            return PowerPreferences(keepAwakeEnabled: false, allowBatteryKeepAwake: false, invalidPersistenceDetected: true)
+        }
+        return PowerPreferences(
+            keepAwakeEnabled: mode == "enabled",
+            allowBatteryKeepAwake: battery == "enabled",
+            allowPluggedInKeepAwake: pluggedIn == "enabled"
         )
     }
 

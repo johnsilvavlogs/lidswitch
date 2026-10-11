@@ -440,7 +440,7 @@ final class RecoveryCoordinator {
                recoveryBudgetAllowsReconnect(state, reservationEntries: reservationEntries, store: store),
                state.isReconnectable,
                state.owner?.bootID == bootIdentity(),
-               strictOwnedSnapshot() {
+               strictOwnedSnapshot(state.powerPolicy) {
                 // The daemon integration must still prove the exact live
                 // PID/start/EUID/ASID tuple, expiry, build, and boot before it
                 // binds a connection. This result alone grants no authority.
@@ -1436,8 +1436,12 @@ final class RecoveryCoordinator {
         )
     }
 
-    private func strictOwnedSnapshot() -> Bool {
-        guard let snapshot = strictSnapshot() else { return false }
-        return snapshot.source == .ac && snapshot.sleepDisabled && snapshot.acSleepMinutes == 0
+    private func strictOwnedSnapshot(_ policy: SessionPowerPolicy) -> Bool {
+        let source = power.powerSource()
+        guard source == .ac || source == .battery else { return false }
+        let selectedSource = source == .ac ? policy.pluggedIn : policy.onBattery
+        return selectedSource && power.sleepDisabled() == true
+            && (!policy.pluggedIn || power.acSleepMinutes() == 0)
+            && (!policy.onBattery || power.batterySleepMinutes() == 0)
     }
 }

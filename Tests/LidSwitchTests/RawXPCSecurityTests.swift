@@ -10,6 +10,206 @@ final class RawXPCSecurityTests: XCTestCase {
     private static let fixtureBootID = "00000000-0000-4000-8000-000000000001"
     private static let zeroUUID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
 
+    func testPowerPolicyRejectsEmptyAndUnknownMasksAndStrictWireFields() {
+        XCTAssertEqual(SessionPowerPolicy(pluggedIn: true, onBattery: false), .pluggedInOnly)
+        XCTAssertEqual(SessionPowerPolicy(pluggedIn: false, onBattery: true), .batteryOnly)
+        XCTAssertEqual(SessionPowerPolicy(pluggedIn: true, onBattery: true), .all)
+        XCTAssertNil(SessionPowerPolicy(pluggedIn: false, onBattery: false))
+        for mask in [UInt64(0), 4, 5, UInt64.max] {
+            XCTAssertNil(SessionPowerPolicy(rawValue: mask))
+        }
+        XCTAssertTrue(ls_xpc_request_power_policy_harness())
+        XCTAssertTrue(ls_xpc_reply_battery_harness())
+    }
+
+    func testBeginMutatesOnlySelectedTimersAndRestoresExactBaselines() throws {
+        for policy in [SessionPowerPolicy.pluggedInOnly, .batteryOnly, .all] {
+            for source in [HelperPowerSource.ac, .battery] {
+                let fixture = try AuthorityFixture()
+                defer { try? FileManager.default.removeItem(at: fixture.directory) }
+                fixture.power.source = source
+                let authority = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                                       recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                                       statusProjectionWriter: fixture.statusProjectionWriter,
+                                                       timerStarter: { _ in NSObject() })
+                XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+                let session = UUID()
+                let begun = authority.handle(connection: 1, operation: 1, sessionID: session, powerPolicy: policy)
+                let selectedSource = source == .ac ? policy.pluggedIn : policy.onBattery
+                if !selectedSource {
+                    XCTAssertEqual(begun.reason, "preflight-failed")
+                    XCTAssertNil(fixture.privateApplied())
+                    XCTAssertEqual(fixture.power.setCalls, [])
+                    continue
+                }
+                XCTAssertEqual(begun.result, 0)
+                XCTAssertEqual(fixture.power.ac, policy.pluggedIn ? 0 : 10)
+                XCTAssertEqual(fixture.power.battery, policy.onBattery ? 0 : 12)
+                XCTAssertEqual(begun.batterySleepMinutes, policy.onBattery ? 0 : 12)
+                let state = try XCTUnwrap(fixture.privateApplied())
+                XCTAssertEqual(state.powerPolicy, policy)
+                XCTAssertEqual(state.payloadShape, .schemaFifteen)
+                XCTAssertEqual(state.originalACSleep, policy.pluggedIn ? 10 : nil)
+                XCTAssertEqual(state.originalBatterySleep, policy.onBattery ? 12 : nil)
+                XCTAssertEqual(AppliedState.parse(state.storagePayload), state)
+                XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
+                let ended = authority.handle(connection: 1, operation: 3, sessionID: session)
+                XCTAssertEqual(ended.result, 0, ended.reason)
+                XCTAssertEqual(fixture.power.disabled, false)
+                XCTAssertEqual(fixture.power.ac, 10)
+                XCTAssertEqual(fixture.power.battery, 12)
+                if !policy.pluggedIn { XCTAssertFalse(fixture.power.setCalls.contains("ac=0")) }
+                if !policy.onBattery { XCTAssertFalse(fixture.power.setCalls.contains("battery=0")) }
+            }
+        }
+    }
+
+    func testBatteryOnlyBeginRejectsUnreadableACRestorationPreconditionWithoutMutation() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        fixture.power.source = .battery
+        let authority = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                               recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                               statusProjectionWriter: fixture.statusProjectionWriter,
+                                               timerStarter: { _ in NSObject() })
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        fixture.power.ac = nil
+        let session = UUID()
+        let denied = authority.handle(connection: 1, operation: 1, sessionID: session, powerPolicy: .batteryOnly)
+        XCTAssertEqual(denied.result, 74)
+        XCTAssertEqual(denied.reason, "preflight-failed")
+        XCTAssertEqual(denied.state, 0)
+        XCTAssertEqual(fixture.power.setCalls, [])
+        XCTAssertEqual(fixture.power.disabled, false)
+        XCTAssertEqual(fixture.power.battery, 12)
+        XCTAssertEqual(fixture.store.appliedRecord(), .missing)
+        XCTAssertFalse(fixture.store.privateLedger(RecoveryAuthorityStore.terminalBasename)?.contains(session) == true)
+    }
+
+    func testAllSourcesTransitionRenewRestartAndReconnectPreservePolicyAndBaselines() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let clock = SecurityBox<TimeInterval>(100)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let authority = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                               recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                               statusProjectionWriter: fixture.statusProjectionWriter,
+                                               monotonicNow: { clock.value }, peerIsLive: { _ in true },
+                                               bootIdentity: { Self.fixtureBootID }, timerStarter: { _ in NSObject() })
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        let session = UUID()
+        XCTAssertEqual(authority.handle(connection: 1, peer: peer, operation: 1, sessionID: session, powerPolicy: .all).result, 0)
+        fixture.power.source = .battery
+        clock.withValue { $0 = 108 }
+        let renewed = authority.handle(connection: 1, peer: peer, operation: 2, sessionID: session)
+        XCTAssertEqual(renewed.result, 0)
+        let beforeUnknown = try XCTUnwrap(fixture.privateApplied())
+        fixture.power.source = .unknown
+        clock.withValue { $0 = 112 }
+        XCTAssertEqual(authority.handle(connection: 1, peer: peer, operation: 2, sessionID: session).reason, "native-state-indeterminate")
+        XCTAssertEqual(fixture.privateApplied(), beforeUnknown, "unknown source must not extend authority")
+        fixture.power.source = .battery
+        let restarted = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                               recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                               statusProjectionWriter: fixture.statusProjectionWriter,
+                                               monotonicNow: { clock.value }, peerIsLive: { _ in true },
+                                               bootIdentity: { Self.fixtureBootID }, timerStarter: { _ in NSObject() })
+        XCTAssertEqual(restarted.prepareBeforeListening(), .ready)
+        let rebound = restarted.handle(connection: 2, peer: peer, operation: 6, sessionID: session)
+        XCTAssertEqual(rebound.result, 0)
+        XCTAssertEqual(rebound.expiryMonotonic, renewed.expiryMonotonic)
+        XCTAssertEqual(fixture.privateApplied(), beforeUnknown)
+        fixture.power.source = .ac
+        restarted.reconcileForTesting()
+        XCTAssertEqual(fixture.privateApplied(), beforeUnknown, "source transition must retain baselines and expiry")
+        XCTAssertEqual(restarted.handle(connection: 2, peer: peer, operation: 3, sessionID: session).result, 0)
+        XCTAssertEqual(fixture.power.ac, 10)
+        XCTAssertEqual(fixture.power.battery, 12)
+    }
+
+    func testExcludedSourceTerminalizesOnRenewTickAndReconnect() throws {
+        for operation in [UInt32(2), 4, 6] {
+            for policy in [SessionPowerPolicy.pluggedInOnly, .batteryOnly] {
+                let fixture = try AuthorityFixture()
+                defer { try? FileManager.default.removeItem(at: fixture.directory) }
+                fixture.power.source = policy.pluggedIn ? .ac : .battery
+                let authority = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                                       recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                                       statusProjectionWriter: fixture.statusProjectionWriter,
+                                                       timerStarter: { _ in NSObject() })
+                XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+                let session = UUID()
+                XCTAssertEqual(authority.handle(connection: 1, operation: 1, sessionID: session, powerPolicy: policy).result, 0)
+                fixture.power.source = policy.pluggedIn ? .battery : .ac
+                if operation == 4 {
+                    authority.reconcileForTesting()
+                } else {
+                    _ = authority.handle(connection: operation == 6 ? 2 : 1, operation: operation, sessionID: session,
+                                         powerPolicy: .all)
+                }
+                let terminal = authority.handle(connection: 2, operation: 4, sessionID: session)
+                XCTAssertEqual(terminal.state, 2)
+                XCTAssertEqual(terminal.expiryMonotonic, 0)
+                XCTAssertEqual(fixture.power.disabled, false)
+                XCTAssertEqual(fixture.power.ac, 10)
+                XCTAssertEqual(fixture.power.battery, 12)
+                XCTAssertNil(fixture.privateApplied())
+            }
+        }
+    }
+
+    func testZeroBaselinesKeepSelectionAcrossRestartAndAllowBatteryOverrideRepair() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        fixture.power.ac = 0; fixture.power.battery = 0; fixture.power.source = .battery
+        let authority = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                               recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                               statusProjectionWriter: fixture.statusProjectionWriter,
+                                                       timerStarter: { _ in NSObject() })
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        let session = UUID()
+        XCTAssertEqual(authority.handle(connection: 1, operation: 1, sessionID: session, powerPolicy: .all).result, 0)
+        let state = try XCTUnwrap(fixture.privateApplied())
+        XCTAssertFalse(state.changedACSleep); XCTAssertFalse(state.changedBatterySleep)
+        XCTAssertEqual(state.originalACSleep, 0); XCTAssertEqual(state.originalBatterySleep, 0)
+        XCTAssertEqual(state.powerPolicy, .all)
+        XCTAssertEqual(AppliedState.parse(state.storagePayload), state)
+        let restarted = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                               recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                               statusProjectionWriter: fixture.statusProjectionWriter,
+                                                       timerStarter: { _ in NSObject() })
+        XCTAssertEqual(restarted.prepareBeforeListening(), .ready)
+        XCTAssertEqual(restarted.handle(connection: 2, operation: 6, sessionID: session).result, 0)
+        fixture.power.setCalls.removeAll()
+        fixture.power.disabled = false
+        restarted.reconcileForTesting()
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=1"])
+        XCTAssertEqual(fixture.privateApplied()?.powerPolicy, .all)
+        XCTAssertEqual(restarted.handle(connection: 2, operation: 3, sessionID: session).result, 0)
+        XCTAssertEqual(fixture.power.ac, 0); XCTAssertEqual(fixture.power.battery, 0)
+    }
+
+    func testIndeterminateBatteryActivationRestoresBothBaselinesWithoutRetryingActivation() throws {
+        let fixture = try AuthorityFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        fixture.power.failNextBatterySetAfterApplying = true
+        let authority = HelperSessionAuthority(configuration: fixture.configuration, power: fixture.power,
+                                               recoveryStoreFactory: fixture.recoveryStoreFactory,
+                                               statusProjectionWriter: fixture.statusProjectionWriter,
+                                                       timerStarter: { _ in NSObject() })
+        XCTAssertEqual(authority.prepareBeforeListening(), .ready)
+        let session = UUID()
+        let failed = authority.handle(connection: 1, operation: 1, sessionID: session, powerPolicy: .all)
+        XCTAssertEqual(failed.reason, "activation-indeterminate")
+        XCTAssertNotEqual(failed.result, 0)
+        XCTAssertEqual(failed.state, 2)
+        XCTAssertEqual(fixture.power.setCalls, ["ac=0", "battery=0", "ac=10", "battery=12"])
+        XCTAssertEqual(fixture.power.disabled, false)
+        XCTAssertEqual(fixture.power.ac, 10); XCTAssertEqual(fixture.power.battery, 12)
+        XCTAssertNil(fixture.privateApplied())
+    }
+
     func testAuthorityFixtureBootIdentityIsNormalizedSchemaTwoUUID() {
         XCTAssertEqual(BootIdentity.normalizeBootSessionUUID(Self.fixtureBootID), Self.fixtureBootID)
     }
@@ -876,8 +1076,11 @@ final class RawXPCSecurityTests: XCTestCase {
 
     func testBridgeAuthenticatesBeforeDecodeAndReplyBeforeFields() throws {
         let bridge = try source("Sources/LidSwitchXPCBridge/LidSwitchXPCBridge.c")
-        let identity = try XCTUnwrap(bridge.range(of: "ls_validate_message_identity(message"))
-        let decode = try XCTUnwrap(bridge.range(of: "ls_decode_request(message"))
+        let serverStart = try XCTUnwrap(bridge.range(of: "int ls_xpc_server_run("))
+        let serverEnd = try XCTUnwrap(bridge.range(of: "static bool ls_decode_reply(", range: serverStart.upperBound..<bridge.endIndex))
+        let server = String(bridge[serverStart.lowerBound..<serverEnd.lowerBound])
+        let identity = try XCTUnwrap(server.range(of: "ls_validate_message_identity(message"))
+        let decode = try XCTUnwrap(server.range(of: "ls_decode_request(message"))
         XCTAssertLessThan(identity.lowerBound, decode.lowerBound)
         let replyIdentity = try XCTUnwrap(bridge.range(of: "ls_validate_message_identity(reply"))
         let replyDecode = try XCTUnwrap(bridge.range(of: "ls_decode_reply(reply"))
@@ -1474,10 +1677,13 @@ private final class SecurityFixturePower: HelperPowerSystem {
     var source: HelperPowerSource = .ac
     var disabled: Bool? = false
     var ac: Int? = 10
+    var battery: Int? = 12
+    var failNextBatterySetAfterApplying = false
     var setCalls: [String] = []
     func powerSource() -> HelperPowerSource { source }
     func sleepDisabled() -> Bool? { disabled }
     func acSleepMinutes() -> Int? { ac }
+    func batterySleepMinutes() -> Int? { battery }
     func setSleepDisabled(_ enabled: Bool) throws {
         setCalls.append("sleep=\(enabled ? 1 : 0)")
         disabled = enabled
@@ -1485,6 +1691,14 @@ private final class SecurityFixturePower: HelperPowerSystem {
     func setACSleepMinutes(_ minutes: Int) throws {
         setCalls.append("ac=\(minutes)")
         ac = minutes
+    }
+    func setBatterySleepMinutes(_ minutes: Int) throws {
+        setCalls.append("battery=\(minutes)")
+        battery = minutes
+        if failNextBatterySetAfterApplying {
+            failNextBatterySetAfterApplying = false
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 }
 

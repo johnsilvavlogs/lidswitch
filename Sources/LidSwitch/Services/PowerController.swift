@@ -98,7 +98,8 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
     static func make(
         snapshot: PowerSnapshot,
         operationPhase: PowerControllerOperationPhase,
-        isChecking: Bool
+        isChecking: Bool,
+        keepAwakeRequested: Bool = false
     ) -> Self {
         if operationPhase == .recoveryRequired {
             return Self(
@@ -117,7 +118,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .endingRestoring {
             return progress(
-                title: "Ending and restoring…",
+                title: "Restoring sleep…",
                 detail: "Protection is ending. LidSwitch is verifying safe idle before reporting success or recovery required.",
                 accessibility: "LidSwitch, ending and restoring. LidSwitch is not reporting protection as active while it verifies that the system sleep override is off.",
                 menuBarSymbol: "arrow.triangle.2.circlepath",
@@ -127,9 +128,9 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .preparingHelper {
             return progress(
-                title: "Preparing safe helper…",
-                detail: "LidSwitch is restoring safe idle, replacing old startup behavior, and verifying the crash-safe helper before reporting ready.",
-                accessibility: "LidSwitch, preparing safe helper. Protection is not being reported active while LidSwitch restores safe idle, replaces old startup behavior, and verifies the helper.",
+                title: "Setting up helper…",
+                detail: "Restoring sleep and checking the helper.",
+                accessibility: "LidSwitch, setting up helper. Protection is not being reported active while sleep restoration and setup are verified.",
                 menuBarSymbol: "shield.lefthalf.filled",
                 panelSymbol: "shield.lefthalf.filled"
             )
@@ -147,7 +148,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .cancelRestoring {
             return progress(
-                title: "Canceling and restoring…",
+                title: "Restoring sleep…",
                 detail: "Protection is ending. LidSwitch is verifying safe idle before reporting success.",
                 accessibility: "LidSwitch, canceling and restoring. Protection may still be ending while LidSwitch verifies that the system sleep override is off.",
                 menuBarSymbol: "arrow.triangle.2.circlepath",
@@ -158,9 +159,9 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .starting {
             return progress(
-                title: "Starting and verifying…",
-                detail: "Protection may not yet be active. Cancel and Restore remains available while LidSwitch waits for helper confirmation.",
-                accessibility: "LidSwitch, starting and verifying. Protection may not be active yet. Cancel and Restore is available.",
+                title: "Verifying…",
+                detail: "Waiting for helper confirmation. Turn off to cancel.",
+                accessibility: "LidSwitch, verifying. Protection may not be active yet. Turn off to cancel.",
                 menuBarSymbol: "clock.badge.checkmark",
                 panelSymbol: "clock.fill"
             )
@@ -170,7 +171,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
             && (isChecking || snapshot.installationInventoryPending)
         if isInitialCheck {
             return progress(
-                title: "Checking current macOS state…",
+                title: "Checking…",
                 detail: "Reading the current power source and system sleep override. Protection stays off until this check finishes.",
                 accessibility: "LidSwitch, checking current macOS state. Protection remains off until the initial safety check finishes.",
                 menuBarSymbol: "arrow.triangle.2.circlepath",
@@ -188,6 +189,19 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
                 panelSymbol: "arrow.triangle.2.circlepath",
                 tone: .neutral
             )
+        }
+
+        if keepAwakeRequested, !snapshot.sessionActive, !snapshot.sessionPending,
+           operationPhase == .idle, snapshot.canStartSessionOnKnownSource,
+           !snapshot.preferences.allows(snapshot.source) {
+            let onBattery = !snapshot.source.isAC
+            let title = "Paused"
+            let detail = onBattery
+                ? "Resumes when plugged in."
+                : "Resumes on battery."
+            return Self(title: title, detail: detail,
+                        accessibilityState: "LidSwitch, \(title). \(detail)",
+                        menuBarSymbol: "pause.circle", panelSymbol: "pause.circle", tone: .neutral)
         }
 
         let tone: PowerControllerStatusTone
@@ -355,6 +369,36 @@ enum PowerControllerLeaseIssueResolution: Equatable, Sendable {
     case authorityMayRemain(String)
 }
 
+/// The copied UI projection expires after 12 seconds, sooner than the 30-second
+/// inventory timer. Reuse fresh heartbeat observations to keep it current;
+/// neither this gate nor the refresh grants or extends a helper lease.
+final class ActiveSessionProjectionRefreshGate: @unchecked Sendable {
+    private let sessionID: UUID
+    private let powerPolicy: SessionPowerPolicy
+    private let lock = NSLock()
+    private var lastProjection: HelperStatusRecord?
+
+    init(sessionID: UUID, powerPolicy: SessionPowerPolicy) {
+        self.sessionID = sessionID
+        self.powerPolicy = powerPolicy
+    }
+
+    func shouldRefresh(_ observation: SessionHeartbeatObservation, at date: Date) -> Bool {
+        let selectedSource = (observation.power == .ac && powerPolicy.pluggedIn)
+            || (observation.power == .battery && powerPolicy.onBattery)
+        guard selectedSource,
+              let status = observation.helperStatus,
+              status.sessionID == sessionID,
+              status.state == "active",
+              status.reason != "override-recovered",
+              status.isFresh(at: date) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard status != lastProjection else { return false }
+        lastProjection = status
+        return true
+    }
+}
+
 // All controller-owned state transitions pass through this narrow boundary.
 // Production uses the same stores, heartbeat, activity, helper operations, and
 // termination behavior as before; tests inject the fixture instance so an
@@ -383,6 +427,16 @@ struct PowerControllerSideEffects: @unchecked Sendable {
     let restoreSleep: @Sendable () throws -> HelperControlReply
     let uninstallHelper: @Sendable () throws -> AdministratorOperationResult
     let terminateApplication: @MainActor @Sendable () -> Void
+    typealias PolicyHeartbeatFactory = @Sendable (
+        UUID, SessionPowerPolicy,
+        @escaping @Sendable (UUID) -> Void,
+        @escaping @Sendable (UUID, String) -> Void,
+        @escaping @Sendable () -> Bool
+    ) -> SessionHeartbeatCoordinator?
+    // Optional trailing seams preserve isolated AC-only fixture call sites.
+    var writePowerPreferences: (@Sendable (PowerPreferences) throws -> Void)? = nil
+    var issueLeaseWithPolicy: (@Sendable (UUID, SessionPowerPolicy) throws -> PowerControllerLeaseIssueResolution)? = nil
+    var makeHeartbeatWithPolicy: PolicyHeartbeatFactory? = nil
 
     // Production composition must inject the authenticated raw-XPC client.
     // The nil default exists only so fixture tests can prove the mutation guard;
@@ -392,23 +446,12 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         return Self(
         writeDesiredStateDisabled: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
-            try DesiredStateStore.write(.disabled)
+            try Self.persistDisabledPreferences()
         },
         issueLease: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
             guard let client else { throw HelperControlError.unavailable }
-            switch try client.resolveBegin(sessionID: $0) {
-            case let .issued(reply):
-                return .issued(Self.activationLease(sessionID: $0, reply: reply))
-            case let .reconnected(reply):
-                return .reconnected(Self.activationLease(sessionID: $0, reply: reply))
-            case let .idle(reply):
-                return .idle(reply)
-            case let .terminal(reply):
-                return .terminal(reply)
-            case let .authorityMayRemain(reason):
-                return .authorityMayRemain(reason)
-            }
+            return try Self.resolveLease(client: client, sessionID: $0, powerPolicy: .pluggedInOnly)
         },
         revokeLease: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
@@ -422,68 +465,9 @@ struct PowerControllerSideEffects: @unchecked Sendable {
             return client.terminateGeneration(sessionID: sessionID, intent: intent)
         },
         makeHeartbeat: { sessionID, onAcknowledged, onEnded, claimCleanup in
-            guard !testRuntimeDetector(), let client else { return nil }
-            return SessionHeartbeatCoordinator(
-                observe: { sessionID in
-                    // One-second heartbeat ticks intentionally avoid XPC
-                    // SNAPSHOT. Native AC plus durable terminal status are the
-                    // observation surface; BEGIN and eight-second RENEW are
-                    // the authenticated authority exchanges.
-                    // Native AC is the app-side renewal prerequisite. The
-                    // status file is diagnostic projection: a missing, stale,
-                    // or corrupt active publication cannot revoke the exact
-                    // in-memory generation that BEGIN/RENEW established.
-                    Self.rawXPCHeartbeatObservation(
-                        sessionID: sessionID,
-                        native: PowerInspector.sessionHeartbeatObservation(sessionID: sessionID),
-                        now: Date()
-                    )
-                },
-                renew: { sessionID, mode, commitGuard in
-                    try Self.guardedHeartbeatRenewal(
-                        testRuntimeDetector: testRuntimeDetector,
-                        renew: {
-                            guard commitGuard() else { throw HelperControlError.rejected("stale-renewal") }
-                            let advance: HelperLeaseAdvance
-                            switch mode {
-                            case .recoverTransportOnce:
-                                advance = try client.renew(sessionID: sessionID)
-                            case .directOnly:
-                                advance = try client.renewDirect(sessionID: sessionID)
-                            }
-                            switch advance {
-                            case let .renewed(expiryMonotonic):
-                                return .renewed(expiryMonotonic: expiryMonotonic)
-                            case let .reconnected(originalExpiryMonotonic):
-                                return .reconnected(originalExpiryMonotonic: originalExpiryMonotonic)
-                            case let .reconnectedButUnbound(reason):
-                                return .reconnectedButUnbound(reason: reason)
-                            case let .indeterminateNoAdvance(reason):
-                                return .indeterminateNoAdvance(reason: reason)
-                            }
-                        }
-                    )
-                },
-                revoke: {
-                    guard claimCleanup() else { return }
-                    let resolution = Self.guardedHeartbeatTermination(
-                        testRuntimeDetector: testRuntimeDetector,
-                        terminate: { client.terminateGeneration(sessionID: sessionID, intent: .restore) }
-                    )
-                    HeartbeatTerminalProofHandoff.record(sessionID: sessionID, resolution: resolution)
-                },
-                endRemote: { endedSessionID, reason in
-                    guard claimCleanup() else { return }
-                    let intent: HelperGenerationTerminationIntent = reason == "user-end" ? .end : .restore
-                    let resolution = Self.guardedHeartbeatTermination(
-                        testRuntimeDetector: testRuntimeDetector,
-                        terminate: { client.terminateGeneration(sessionID: endedSessionID, intent: intent) }
-                    )
-                    HeartbeatTerminalProofHandoff.record(sessionID: endedSessionID, resolution: resolution)
-                },
-                onAcknowledged: onAcknowledged,
-                onEnded: onEnded
-            )
+            Self.productionHeartbeat(client: client, powerPolicy: .pluggedInOnly,
+                                     testRuntimeDetector: testRuntimeDetector, sessionID: sessionID,
+                                     onAcknowledged: onAcknowledged, onEnded: onEnded, claimCleanup: claimCleanup)
         },
         beginActivity: {
             guard !testRuntimeDetector() else { return NSObject() }
@@ -499,7 +483,7 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         prepareHelper: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
             try ActivationLeaseStore.reconcileRecognizedLegacyLease()
-            try DesiredStateStore.write(.disabled)
+            try Self.persistDisabledPreferences()
             try LegacyAutostartManager.remove()
             return try PrivilegedHelperManager.install()
         },
@@ -510,14 +494,124 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         },
         uninstallHelper: {
             guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
-            try DesiredStateStore.write(.disabled)
+            try Self.persistDisabledPreferences()
             try LegacyAutostartManager.remove()
             return try PrivilegedHelperManager.uninstall()
         },
         terminateApplication: {
             guard !testRuntimeDetector() else { return }
             NSApplication.shared.terminate(nil)
+        },
+        writePowerPreferences: { preferences in
+            guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
+            try DesiredStateStore.write(preferences.withKeepAwakeEnabled(false))
+        },
+        issueLeaseWithPolicy: { sessionID, powerPolicy in
+            guard !testRuntimeDetector() else { throw PowerControllerSideEffectError.productionMutationBlockedInTest }
+            guard let client else { throw HelperControlError.unavailable }
+            return try Self.resolveLease(client: client, sessionID: sessionID, powerPolicy: powerPolicy)
+        },
+        makeHeartbeatWithPolicy: { sessionID, powerPolicy, onAcknowledged, onEnded, claimCleanup in
+            Self.productionHeartbeat(client: client, powerPolicy: powerPolicy,
+                                     testRuntimeDetector: testRuntimeDetector, sessionID: sessionID,
+                                     onAcknowledged: onAcknowledged, onEnded: onEnded, claimCleanup: claimCleanup)
         }
+        )
+    }
+
+    private static func persistDisabledPreferences() throws {
+        let preferences: PowerPreferences
+        if case let .value(saved) = DesiredStateStore.readPreferences() {
+            preferences = saved.withKeepAwakeEnabled(false)
+        } else {
+            preferences = .disabled
+        }
+        try DesiredStateStore.write(preferences)
+    }
+
+    private static func resolveLease(client: RawHelperControlClient, sessionID: UUID,
+                                     powerPolicy: SessionPowerPolicy) throws -> PowerControllerLeaseIssueResolution {
+        switch try client.resolveBegin(sessionID: sessionID, powerPolicy: powerPolicy) {
+        case let .issued(reply): return .issued(activationLease(sessionID: sessionID, reply: reply))
+        case let .reconnected(reply): return .reconnected(activationLease(sessionID: sessionID, reply: reply))
+        case let .idle(reply): return .idle(reply)
+        case let .terminal(reply): return .terminal(reply)
+        case let .authorityMayRemain(reason): return .authorityMayRemain(reason)
+        }
+    }
+
+    private static func productionHeartbeat(
+        client: RawHelperControlClient?, powerPolicy: SessionPowerPolicy,
+        testRuntimeDetector: @escaping @Sendable () -> Bool, sessionID: UUID,
+        onAcknowledged: @escaping @Sendable (UUID) -> Void,
+        onEnded: @escaping @Sendable (UUID, String) -> Void,
+        claimCleanup: @escaping @Sendable () -> Bool
+    ) -> SessionHeartbeatCoordinator? {
+        guard !testRuntimeDetector(), let client else { return nil }
+        let projectionRefresh = ActiveSessionProjectionRefreshGate(sessionID: sessionID, powerPolicy: powerPolicy)
+        return SessionHeartbeatCoordinator(
+            powerPolicy: powerPolicy,
+            observe: { sessionID in
+                // One-second heartbeat ticks intentionally avoid XPC
+                // SNAPSHOT. Known power and durable terminal status are the
+                // observation surface; BEGIN and eight-second RENEW are
+                // the authenticated authority exchanges.
+                // The selected power source is the renewal prerequisite. The
+                // status file is diagnostic projection: a missing, stale,
+                // or corrupt active publication cannot revoke the exact
+                // in-memory generation that BEGIN/RENEW established.
+                Self.observedHeartbeatProjection(
+                    sessionID: sessionID,
+                    native: PowerInspector.sessionHeartbeatObservation(sessionID: sessionID),
+                    now: Date(),
+                    refreshGate: projectionRefresh,
+                    onAcknowledged: onAcknowledged
+                )
+            },
+            renew: { sessionID, mode, commitGuard in
+                try Self.guardedHeartbeatRenewal(
+                    testRuntimeDetector: testRuntimeDetector,
+                    renew: {
+                        guard commitGuard() else { throw HelperControlError.rejected("stale-renewal") }
+                        let advance: HelperLeaseAdvance
+                        switch mode {
+                        case .recoverTransportOnce:
+                            advance = try client.renew(sessionID: sessionID)
+                        case .directOnly:
+                            advance = try client.renewDirect(sessionID: sessionID)
+                        }
+                        switch advance {
+                        case let .renewed(expiryMonotonic):
+                            return .renewed(expiryMonotonic: expiryMonotonic)
+                        case let .reconnected(originalExpiryMonotonic):
+                            return .reconnected(originalExpiryMonotonic: originalExpiryMonotonic)
+                        case let .reconnectedButUnbound(reason):
+                            return .reconnectedButUnbound(reason: reason)
+                        case let .indeterminateNoAdvance(reason):
+                            return .indeterminateNoAdvance(reason: reason)
+                        }
+                    }
+                )
+            },
+            revoke: {
+                guard claimCleanup() else { return }
+                let resolution = Self.guardedHeartbeatTermination(
+                    testRuntimeDetector: testRuntimeDetector,
+                    terminate: { client.terminateGeneration(sessionID: sessionID, intent: .restore) }
+                )
+                HeartbeatTerminalProofHandoff.record(sessionID: sessionID, resolution: resolution)
+            },
+            endRemote: { endedSessionID, reason in
+                guard claimCleanup() else { return }
+                let intent: HelperGenerationTerminationIntent = reason == "user-end" ? .end : .restore
+                let resolution = Self.guardedHeartbeatTermination(
+                    testRuntimeDetector: testRuntimeDetector,
+                    terminate: { client.terminateGeneration(sessionID: endedSessionID, intent: intent) }
+                )
+                HeartbeatTerminalProofHandoff.record(sessionID: endedSessionID, resolution: resolution)
+            },
+            onAcknowledged: onAcknowledged,
+            onEnded: onEnded
         )
     }
 
@@ -556,9 +650,20 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         let status = native.helperStatus
         return SessionHeartbeatObservation(
             power: native.power,
-            authority: native.power == .ac ? .verified : .indeterminate,
+            authority: native.power == .ac || native.power == .battery ? .verified : .indeterminate,
             helperStatus: status
         )
+    }
+
+    static func observedHeartbeatProjection(
+        sessionID: UUID,
+        native: SessionHeartbeatObservation,
+        now: Date,
+        refreshGate: ActiveSessionProjectionRefreshGate,
+        onAcknowledged: @Sendable (UUID) -> Void
+    ) -> SessionHeartbeatObservation {
+        if refreshGate.shouldRefresh(native, at: now) { onAcknowledged(sessionID) }
+        return rawXPCHeartbeatObservation(sessionID: sessionID, native: native, now: now)
     }
 
     private static func isXCTestRuntime(executable: String, environment: [String: String]) -> Bool {
@@ -809,15 +914,21 @@ private final class RemoteAuthorityCleanupOwnership: @unchecked Sendable {
     let generation: Int
     /// Captured from the force-fresh pre-BEGIN snapshot. Zero is a legitimate
     /// user setting and is deliberately preserved as a value, not a sentinel.
-    let originalACIdleSleepMinutes: Int
+    let powerPolicy: SessionPowerPolicy
+    let originalACIdleSleepMinutes: Int?
+    let originalBatteryIdleSleepMinutes: Int?
     private let lock = NSLock()
     private var state: State = .beginInFlight
     private var authenticatedTerminalProof: HelperControlReply?
 
-    init(sessionID: UUID, generation: Int, originalACIdleSleepMinutes: Int) {
+    init(sessionID: UUID, generation: Int, originalACIdleSleepMinutes: Int?,
+         powerPolicy: SessionPowerPolicy = .pluggedInOnly,
+         originalBatteryIdleSleepMinutes: Int? = nil) {
         self.sessionID = sessionID
         self.generation = generation
         self.originalACIdleSleepMinutes = originalACIdleSleepMinutes
+        self.powerPolicy = powerPolicy
+        self.originalBatteryIdleSleepMinutes = originalBatteryIdleSleepMinutes
     }
 
     func markAuthorityIssued() {
@@ -849,9 +960,9 @@ private final class RemoteAuthorityCleanupOwnership: @unchecked Sendable {
         guard let reply,
               reply.sessionID == sessionID,
               reply.state == .idle || reply.state == .terminal,
-              reply.power == .ac,
+              reply.power != .unknown,
               reply.sleepDisabled == false,
-              reply.acSleepMinutes == originalACIdleSleepMinutes
+              selectedBaselinesMatch(ac: reply.acSleepMinutes, battery: reply.batterySleepMinutes)
         else { return }
         lock.lock(); defer { lock.unlock() }
         authenticatedTerminalProof = reply
@@ -877,16 +988,21 @@ private final class RemoteAuthorityCleanupOwnership: @unchecked Sendable {
         let statusIsCurrent = status.isFresh(at: snapshot.checkedAt)
             || terminalPeerRestore
         guard snapshot.ownedSessionID == nil,
-              snapshot.source.isAC,
+              snapshot.source.isKnown,
               snapshot.sleepDisabledVerified,
               !snapshot.sleepDisabled,
-              snapshot.acIdleSleepMinutes == originalACIdleSleepMinutes,
+              selectedBaselinesMatch(ac: snapshot.acIdleSleepMinutes, battery: snapshot.batteryIdleSleepMinutes),
               status.sessionID == sessionID,
               statusIsCurrent,
               status.state == "inactive" || status.state == "terminal",
               !snapshot.helperRecoveryRequired
         else { return false }
         return true
+    }
+
+    private func selectedBaselinesMatch(ac: Int?, battery: Int?) -> Bool {
+        (!powerPolicy.pluggedIn || (originalACIdleSleepMinutes.map { $0 >= 0 } == true && ac == originalACIdleSleepMinutes))
+            && (!powerPolicy.onBattery || (originalBatteryIdleSleepMinutes.map { $0 >= 0 } == true && battery == originalBatteryIdleSleepMinutes))
     }
 
     var hasAuthenticatedTerminalProof: Bool {
@@ -932,6 +1048,11 @@ final class PowerController: ObservableObject {
     @Published private(set) var operationPhase: PowerControllerOperationPhase = .idle
     @Published private(set) var isChecking = false
     @Published private(set) var alert: PowerControllerAlert?
+    @Published private(set) var powerPreferences: PowerPreferences = .disabled
+    @Published private(set) var keepAwakeRequested = false
+
+    /// Saved source choices never carry activation authority across launches.
+    var isKeepAwakeOn: Bool { keepAwakeRequested || isStarting || activeSessionID != nil }
 
     var errorMessage: String? { alert?.message }
     var isStarting: Bool { operationPhase == .starting }
@@ -955,7 +1076,8 @@ final class PowerController: ObservableObject {
         .make(
             snapshot: snapshot,
             operationPhase: effectiveOperationPhase,
-            isChecking: isChecking
+            isChecking: isChecking,
+            keepAwakeRequested: keepAwakeRequested
         )
     }
 
@@ -1004,6 +1126,11 @@ final class PowerController: ObservableObject {
     // controller generation. Otherwise repeated external invalidation could
     // turn `.superseded` into an unbounded loop just as filesystem drift could.
     private var inventoryRetryGeneration: Int?
+    private var preferencesLoaded = false
+    private var sourcePreferencesEdited = false
+    private var startAfterHelperPreparation = false
+    private var automaticHelperPreparationAttempted = false
+    private var hasObservedReadyHelper = false
 
     init(
         bootstrap: Bool = true,
@@ -1138,6 +1265,102 @@ final class PowerController: ObservableObject {
         refresh(forceFresh: true)
     }
 
+    func setKeepAwakeEnabled(_ enabled: Bool) {
+        if !enabled {
+            keepAwakeRequested = false
+            startAfterHelperPreparation = false
+            if isStarting {
+                cancelPendingStart()
+            } else if activeSessionID != nil || cleanupOwnership != nil {
+                stopSession()
+            } else if operationPhase == .idle {
+                announce("Keep Mac awake off.")
+            }
+            return
+        }
+        guard !terminationInvalidated, !isBusy, !isChecking,
+              operationPhase == .idle, cleanupOwnership == nil,
+              activeSessionID == nil else { return }
+        guard powerPreferences.sessionPowerPolicy != nil else {
+            alert = .operationFailure(message: "Choose Plugged in or On battery before turning on Keep Mac awake.")
+            announce(errorMessage ?? "Choose a power source first.")
+            return
+        }
+        keepAwakeRequested = true
+        startSession()
+    }
+
+    func setAllowPluggedInKeepAwake(_ enabled: Bool) {
+        var preferences = powerPreferences
+        preferences.allowPluggedInKeepAwake = enabled
+        saveSourcePreferences(preferences)
+    }
+
+    func setAllowBatteryKeepAwake(_ enabled: Bool) {
+        var preferences = powerPreferences
+        preferences.allowBatteryKeepAwake = enabled
+        saveSourcePreferences(preferences)
+    }
+
+    private func saveSourcePreferences(_ preferences: PowerPreferences) {
+        guard !isBusy, !isChecking, operationPhase == .idle,
+              cleanupOwnership == nil || activeSessionID != nil else { return }
+        let saved = preferences.withKeepAwakeEnabled(false)
+        guard saved != powerPreferences else { return }
+        if activeSessionID != nil {
+            stopSession(quitWhenRestored: false, terminationReplyID: nil,
+                        preferencesAfterEnd: saved, preserveIntent: keepAwakeRequested)
+            return
+        }
+        do {
+            try persistSourcePreferences(saved)
+            alert = nil
+            if saved.sessionPowerPolicy == nil { keepAwakeRequested = false }
+            reconcileKeepAwakeIntent(after: snapshot)
+        } catch {
+            alert = .operationFailure(message: "Your power-source choice could not be saved. Refresh and try again.")
+            announce(errorMessage ?? "The power-source choice could not be saved.")
+        }
+    }
+
+    private func persistSourcePreferences(_ saved: PowerPreferences) throws {
+        try sideEffects.writePowerPreferences?(saved)
+        powerPreferences = saved
+        preferencesLoaded = true
+        sourcePreferencesEdited = true
+        snapshot = snapshot.withPreferences(saved)
+    }
+
+    private func applySavedPreferences(from next: PowerSnapshot) -> PowerSnapshot {
+        if next.helperReady { hasObservedReadyHelper = true }
+        if !preferencesLoaded || (!sourcePreferencesEdited && !isKeepAwakeOn) {
+            powerPreferences = next.preferences.withKeepAwakeEnabled(false)
+            preferencesLoaded = true
+        }
+        // Retain malformed/legacy intent as visible remediation evidence.
+        if next.preferences.invalidPersistenceDetected || next.preferences.keepAwakeEnabled {
+            return next
+        }
+        return next.withPreferences(powerPreferences)
+    }
+
+    private func reconcileKeepAwakeIntent(after next: PowerSnapshot) {
+        guard keepAwakeRequested, !terminationInvalidated,
+              pendingTerminationReply == nil,
+              activeSessionID == nil, !isBusy, !isChecking,
+              operationPhase == .idle, cleanupOwnership == nil,
+              activeRefreshPurpose == nil, pendingRefresh?.purpose == nil
+        else { return }
+        // An unavailable source or failed check cancels intent. A later good
+        // reading must never silently restart a faulted request.
+        guard next.source.isKnown, next.canStartSessionOnKnownSource,
+              powerPreferences.sessionPowerPolicy != nil else {
+            keepAwakeRequested = false
+            return
+        }
+        if powerPreferences.allows(next.source) { startSession() }
+    }
+
     private func launchRefresh(
         generation: Int,
         forceFresh: Bool,
@@ -1189,8 +1412,8 @@ final class PowerController: ObservableObject {
               epoch == sessionEpoch,
               generation == refreshGeneration
         else { return }
-        snapshot = next
-        reconcileRollbackVerificationFailure(after: next)
+        snapshot = applySavedPreferences(from: next)
+        reconcileRollbackVerificationFailure(after: snapshot)
     }
 
     private func completeRefresh(
@@ -1239,6 +1462,27 @@ final class PowerController: ObservableObject {
             }
         }
 
+        terminalSnapshot = applySavedPreferences(from: terminalSnapshot)
+        // Helper replacement can invalidate a timer/power-notification inventory
+        // while the authorized setup is still running. That observation cannot
+        // cancel the pending ON request. Final setup convergence remains strict.
+        let pendingInitialPreparation = operationPhase == .preparingHelper
+            && startAfterHelperPreparation && keepAwakeRequested
+            && activeRefreshPurpose == nil
+            && !terminationInvalidated && pendingTerminationReply == nil
+            && activeSessionID == nil && cleanupOwnership == nil
+            && terminalSnapshot.ownedSessionID == nil
+            && terminalSnapshot.source.isKnown
+            && terminalSnapshot.sleepDisabledVerified && !terminalSnapshot.sleepDisabled
+            && !terminalSnapshot.helperRecoveryRequired
+            && terminalSnapshot.desiredStateTruth == .valid
+            && terminalSnapshot.activationLeaseTruth == .missing
+            && terminalSnapshot.activationLease == nil
+        if !terminalSnapshot.source.isKnown || !terminalSnapshot.sleepDisabledVerified
+            || (terminalSnapshot.installationInventoryIndeterminate && !pendingInitialPreparation)
+            || terminalSnapshot.helperRecoveryRequired {
+            keepAwakeRequested = false
+        }
         let previousStatus = snapshot.statusTitle
         snapshot = terminalSnapshot
         isChecking = false
@@ -1253,7 +1497,7 @@ final class PowerController: ObservableObject {
         case let .some(.uninstallConvergence(operationEpoch)):
             completeUninstallConvergence(terminalSnapshot, operationEpoch: operationEpoch)
         case .none:
-            break
+            reconcileKeepAwakeIntent(after: terminalSnapshot)
         }
 
         // The serial heartbeat remains the sole termination authority for an
@@ -1374,6 +1618,8 @@ final class PowerController: ObservableObject {
               operationPhase == .preparingHelper
         else { return }
         guard Self.hasNoOwnedSession(next) else {
+            keepAwakeRequested = false
+            startAfterHelperPreparation = false
             alert = .operationFailure(message: "The helper transaction finished, but a fresh detached session state was not proved. LidSwitch is keeping recovery controls active.")
             announce(errorMessage ?? "A detached session state could not be verified.")
             operationPhase = .recoveryRequired
@@ -1390,21 +1636,29 @@ final class PowerController: ObservableObject {
             && !next.helperRecoveryRequired
         if prepared {
             alert = nil
-            announce("The crash-safe helper is ready. Protection remains off.")
+            announce(startAfterHelperPreparation && keepAwakeRequested
+                ? "The helper is ready. Turning on Keep Mac awake."
+                : "The crash-safe helper is ready. Protection remains off.")
         } else {
+            keepAwakeRequested = false
             alert = .operationFailure(message: "The helper was installed, but its exact safe ready state could not be verified. Protection remains off.")
             announce(errorMessage ?? "The helper safe state could not be verified.")
         }
         operationPhase = .idle
         isBusy = false
+        let shouldStart = prepared && startAfterHelperPreparation && keepAwakeRequested
+        startAfterHelperPreparation = false
+        if shouldStart { startSession() }
     }
 
     func startSession() {
         guard !terminationInvalidated,
               !isBusy,
               !isChecking,
+              operationPhase == .idle,
               cleanupOwnership == nil
         else { return }
+        keepAwakeRequested = true
         let requestID = UUID()
         startRequestID = requestID
         isBusy = true
@@ -1422,6 +1676,36 @@ final class PowerController: ObservableObject {
               startRequestID == requestID,
               isStarting
         else { return }
+        guard let powerPolicy = powerPreferences.sessionPowerPolicy,
+              freshSnapshot.source.isKnown else {
+            finishRejectedStart("Keep Mac awake could not verify a selected power source. Protection remains off.")
+            return
+        }
+
+        if !freshSnapshot.helperReady || freshSnapshot.legacyResiduePresent {
+            guard !hasObservedReadyHelper, !automaticHelperPreparationAttempted,
+                  freshSnapshot.canPrepareHelper, freshSnapshot.sleepDisabledVerified,
+                  Self.hasNoOwnedSession(freshSnapshot) else {
+                finishRejectedStart(freshSnapshot.statusDetail)
+                return
+            }
+            startRequestID = nil
+            operationPhase = .idle
+            isBusy = false
+            automaticHelperPreparationAttempted = true
+            startAfterHelperPreparation = true
+            prepareHelper()
+            return
+        }
+
+        if !powerPreferences.allows(freshSnapshot.source), freshSnapshot.canStartSessionOnKnownSource {
+            startRequestID = nil
+            operationPhase = .idle
+            isBusy = false
+            alert = nil
+            announce(displayedStatus.accessibilityState)
+            return
+        }
         guard freshSnapshot.canStartSession else {
             guard Self.hasNoOwnedSession(freshSnapshot) else {
                 alert = .operationFailure(message: "Session did not start because the fresh preflight retained an unexpected session identity. Cancel and Restore remains available.")
@@ -1431,21 +1715,17 @@ final class PowerController: ObservableObject {
             operationPhase = .idle
             isBusy = false
             startRequestID = nil
+            keepAwakeRequested = false
             alert = .operationFailure(message: "Session did not start. \(freshSnapshot.statusDetail) Protection remains off.")
             announce(errorMessage ?? "Session did not start. Protection remains off.")
             return
         }
 
-        // Full rollback is a value-preserving contract. Do not cross BEGIN if
-        // the force-fresh preflight could not capture the user's AC idle
-        // setting; treating unknown as a value could later report a changed
-        // setting as restored.
-        guard let originalACIdleSleepMinutes = freshSnapshot.acIdleSleepMinutes else {
-            operationPhase = .idle
-            isBusy = false
-            startRequestID = nil
-            alert = .operationFailure(message: "Session did not start because LidSwitch could not capture the current AC idle sleep setting. Protection remains off.")
-            announce(errorMessage ?? "The AC idle sleep setting could not be verified.")
+        // Capture every selected timer before BEGIN. An absent baseline can
+        // never later become a successful rollback by nil equality.
+        guard (!powerPolicy.pluggedIn || freshSnapshot.acIdleSleepMinutes.map { $0 >= 0 } == true),
+              (!powerPolicy.onBattery || freshSnapshot.batteryIdleSleepMinutes.map { $0 >= 0 } == true) else {
+            finishRejectedStart("LidSwitch could not verify the sleep settings for your selected power sources. Keep Mac awake stays off.")
             return
         }
 
@@ -1474,13 +1754,19 @@ final class PowerController: ObservableObject {
         let cleanupOwner = RemoteAuthorityCleanupOwnership(
             sessionID: sessionID,
             generation: generation,
-            originalACIdleSleepMinutes: originalACIdleSleepMinutes
+            originalACIdleSleepMinutes: freshSnapshot.acIdleSleepMinutes,
+            powerPolicy: powerPolicy,
+            originalBatteryIdleSleepMinutes: freshSnapshot.batteryIdleSleepMinutes
         )
         cleanupOwnership = cleanupOwner
 
         let resolution: PowerControllerLeaseIssueResolution
         do {
-            resolution = try sideEffects.issueLease(sessionID)
+            if let issue = sideEffects.issueLeaseWithPolicy {
+                resolution = try issue(sessionID, powerPolicy)
+            } else {
+                resolution = try sideEffects.issueLease(sessionID)
+            }
         } catch {
             beginFailedStartResolution(
                 sessionID: sessionID,
@@ -1527,6 +1813,16 @@ final class PowerController: ObservableObject {
         // Full UI inspection can be arbitrarily slow without starving start.
     }
 
+    private func finishRejectedStart(_ message: String) {
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
+        startRequestID = nil
+        operationPhase = .idle
+        isBusy = false
+        alert = .operationFailure(message: message)
+        announce(message)
+    }
+
     /// BEGIN/RECONNECT may authenticate that this exact generation never
     /// became active. That closes only this owner's authority question: it
     /// does not fabricate a power rollback, issue END/RESTORE, or turn an
@@ -1542,6 +1838,8 @@ final class PowerController: ObservableObject {
               reply.sessionID == sessionID,
               reply.state == .idle || reply.state == .terminal
         else { return }
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         startRequestID = nil
         sessionEpoch &+= 1
         endLocalSession(
@@ -1568,6 +1866,8 @@ final class PowerController: ObservableObject {
         } else {
             guard cleanupOwnership == nil else { return }
         }
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
 
         // Invalidate late preflight/heartbeat/activity publication first, then
         // claim at most one bounded raw terminal effect. Neither a failed send
@@ -1631,6 +1931,8 @@ final class PowerController: ObservableObject {
 
     private func cancelPendingStart(terminationReplyID: UUID?) {
         guard isStarting else { return }
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         // Invalidating before revocation makes every stale preflight or helper
         // acknowledgement inert. The generation-bound claim remains the only
         // owner shared by direct and heartbeat terminal mechanics.
@@ -1686,6 +1988,8 @@ final class PowerController: ObservableObject {
     }
 
     func stopSession() {
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         stopSession(
             quitWhenRestored: false,
             terminationReplyID: pendingTerminationReply?.id
@@ -1694,6 +1998,8 @@ final class PowerController: ObservableObject {
 
     func restoreNow() {
         guard !isBusy || isCancelRestoring else { return }
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         let terminationReplyID = pendingTerminationReply?.id
         let expectedOwner = cleanupOwnership
         operationPhase = .endingRestoring
@@ -1757,6 +2063,8 @@ final class PowerController: ObservableObject {
 
     func uninstallHelper() {
         guard !isBusy, !isChecking else { return }
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         let operationEpoch = beginAdministratorConvergence(
             reason: "uninstall-helper",
             phase: .removingHelper
@@ -1824,13 +2132,19 @@ final class PowerController: ObservableObject {
     }
 
     func quitSafely() {
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
+        if isStarting {
+            prepareForSystemTermination { [weak self] restored in
+                guard restored, let self else { return }
+                self.nextTerminationIsAuthorized = true
+                self.sideEffects.terminateApplication()
+            }
+            return
+        }
         guard !isBusy else { return }
-        // The panel has already collected an explicit Restore-and-Quit
-        // confirmation.  Match the application-delegate path: when this
-        // process owns no cleanup work, do not launch a redundant
-        // administrator transaction merely to quit an already-idle app.
-        // Mark the next AppKit termination callback as authorized so it does
-        // not present a second confirmation dialog.
+        // An idle app needs no privileged transaction to quit. An owned
+        // generation is restored through the installed authenticated helper.
         guard requiresTerminationCleanup else {
             nextTerminationIsAuthorized = true
             sideEffects.terminateApplication()
@@ -1840,6 +2154,8 @@ final class PowerController: ObservableObject {
     }
 
     func prepareForSystemTermination(completion: @escaping (Bool) -> Void) {
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         // Restore & Quit is an authoritative cancellation request, not an
         // ordinary busy-state query. Invalidate a pending Start generation
         // immediately so a held preflight cannot issue desired state, a lease,
@@ -1853,6 +2169,10 @@ final class PowerController: ObservableObject {
             alert = .operationFailure(message: "LidSwitch is still finishing a safety operation. Wait for it to complete, then use Restore and Quit again.")
             announce(errorMessage ?? "A LidSwitch safety operation is still in progress.")
             completion(false)
+            return
+        }
+        guard requiresTerminationCleanup else {
+            completion(true)
             return
         }
         guard let replyID = registerTerminationReply(completion) else { return }
@@ -1894,6 +2214,8 @@ final class PowerController: ObservableObject {
         let pendingReplyID = pendingTerminationReply?.id
         resolveTerminationReply(false, expectedID: pendingReplyID)
         terminationInvalidated = true
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
         sessionEpoch &+= 1
         startRequestID = nil
         activeRefreshPurpose = nil
@@ -1919,8 +2241,14 @@ final class PowerController: ObservableObject {
 
     private func stopSession(
         quitWhenRestored: Bool,
-        terminationReplyID: UUID?
+        terminationReplyID: UUID?,
+        preferencesAfterEnd: PowerPreferences? = nil,
+        preserveIntent: Bool = false
     ) {
+        keepAwakeRequested = preserveIntent
+            && preferencesAfterEnd?.sessionPowerPolicy != nil
+            && !terminationInvalidated && pendingTerminationReply == nil
+        startAfterHelperPreparation = false
         guard !isBusy || isCancelRestoring else {
             resolveTerminationReply(false, expectedID: terminationReplyID)
             return
@@ -1935,6 +2263,16 @@ final class PowerController: ObservableObject {
             reason: "user-end",
             operationPhaseAfterEnd: .endingRestoring
         )
+        var preferenceFailureMessage: String?
+        if let preferencesAfterEnd {
+            do {
+                try persistSourcePreferences(preferencesAfterEnd)
+            } catch {
+                keepAwakeRequested = false
+                preferenceFailureMessage = "Your power-source choice could not be saved. Keep Mac awake is off; refresh and try again."
+            }
+        }
+        let savedPreferenceFailure = preferenceFailureMessage
         let operationEpoch = sessionEpoch
         // If the normal authenticated END cannot prove idle, the fallback
         // administrator mutation must never race a cached installation view.
@@ -1966,8 +2304,12 @@ final class PowerController: ObservableObject {
             await MainActor.run {
                 guard self.sessionEpoch == operationEpoch, self.activeSessionID == nil else { return }
                 let restored = self.provesCompleteRollback(next, for: expectedOwner)
-                self.snapshot = next
+                self.snapshot = self.applySavedPreferences(from: next)
+                if !next.source.isKnown || !next.sleepDisabledVerified {
+                    self.keepAwakeRequested = false
+                }
                 guard Self.hasNoOwnedSession(next) else {
+                    self.keepAwakeRequested = false
                     self.alert = .operationFailure(message: "LidSwitch stopped renewing the session, but a fresh detached session state was not proved. Keep LidSwitch open and retry Restore Sleep.")
                     self.announce(self.errorMessage ?? "A detached session state could not be verified.")
                     self.operationPhase = .recoveryRequired
@@ -1977,7 +2319,14 @@ final class PowerController: ObservableObject {
                 }
                 if restored {
                     self.releaseCleanupOwnership(expectedOwner, afterSafeSnapshot: next)
-                    self.announce("Protection off. System sleep has been restored.")
+                    if let savedPreferenceFailure {
+                        self.alert = .operationFailure(message: savedPreferenceFailure)
+                        self.announce(savedPreferenceFailure)
+                    } else {
+                        self.announce(self.keepAwakeRequested
+                            ? "Normal sleep restored. Applying your power-source choice."
+                            : "Protection off. System sleep has been restored.")
+                    }
                     if quitWhenRestored {
                         self.nextTerminationIsAuthorized = true
                         self.sideEffects.terminateApplication()
@@ -1985,6 +2334,7 @@ final class PowerController: ObservableObject {
                         self.refresh(forceFresh: true)
                     }
                 } else {
+                    self.keepAwakeRequested = false
                     let detail = recoveryFailureMessage
                         ?? "macOS still reports an active sleep override."
                     self.alert = .operationFailure(message: "LidSwitch stopped renewing the session, but safe idle was not proved. \(detail) Keep LidSwitch open and retry Restore Sleep.")
@@ -2023,24 +2373,32 @@ final class PowerController: ObservableObject {
     nonisolated static func cleanupProofForTesting(
         sessionID: UUID,
         originalACIdleSleepMinutes: Int,
-        snapshot: PowerSnapshot
+        snapshot: PowerSnapshot,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly,
+        originalBatteryIdleSleepMinutes: Int? = nil
     ) -> Bool {
         RemoteAuthorityCleanupOwnership(
             sessionID: sessionID,
             generation: 1,
-            originalACIdleSleepMinutes: originalACIdleSleepMinutes
+            originalACIdleSleepMinutes: originalACIdleSleepMinutes,
+            powerPolicy: powerPolicy,
+            originalBatteryIdleSleepMinutes: originalBatteryIdleSleepMinutes
         ).provesFullRollback(snapshot)
     }
 
     nonisolated static func authenticatedCleanupReplyProofForTesting(
         sessionID: UUID,
         originalACIdleSleepMinutes: Int,
-        resolution: HelperGenerationTerminationResolution?
+        resolution: HelperGenerationTerminationResolution?,
+        powerPolicy: SessionPowerPolicy = .pluggedInOnly,
+        originalBatteryIdleSleepMinutes: Int? = nil
     ) -> Bool {
         let owner = RemoteAuthorityCleanupOwnership(
             sessionID: sessionID,
             generation: 1,
-            originalACIdleSleepMinutes: originalACIdleSleepMinutes
+            originalACIdleSleepMinutes: originalACIdleSleepMinutes,
+            powerPolicy: powerPolicy,
+            originalBatteryIdleSleepMinutes: originalBatteryIdleSleepMinutes
         )
         owner.recordAuthenticatedTerminalProof(resolution)
         return owner.hasAuthenticatedTerminalProof
@@ -2091,8 +2449,14 @@ final class PowerController: ObservableObject {
         else { return }
         heartbeat?.stop(reason: "superseded-session")
         let heartbeatEpoch = sessionEpoch
-        let coordinator = sideEffects.makeHeartbeat(
+        let legacyFactory = sideEffects.makeHeartbeat
+        let factory: PowerControllerSideEffects.PolicyHeartbeatFactory = sideEffects.makeHeartbeatWithPolicy
+            ?? { sessionID, _, onAcknowledged, onEnded, claimCleanup in
+                legacyFactory(sessionID, onAcknowledged, onEnded, claimCleanup)
+            }
+        let coordinator = factory(
             sessionID,
+            cleanupOwner.powerPolicy,
             { [weak self] acknowledgedID in
                 Task { @MainActor in
                     self?.heartbeatDidAcknowledge(acknowledgedID, epoch: heartbeatEpoch)
@@ -2132,11 +2496,14 @@ final class PowerController: ObservableObject {
             activeSessionID: activeSessionID,
             currentEpoch: sessionEpoch
         ) else { return }
+        let firstAcknowledgement = !sessionWasAcknowledged
         sessionWasAcknowledged = true
-        operationPhase = .idle
-        isBusy = false
-        startRequestID = nil
-        announce("Protection active — plugged in.")
+        if firstAcknowledgement {
+            operationPhase = .idle
+            isBusy = false
+            startRequestID = nil
+            announce(snapshot.source.isAC ? "Keep Mac awake on while plugged in." : "Keep Mac awake on battery.")
+        }
         refresh()
     }
 
@@ -2147,6 +2514,10 @@ final class PowerController: ObservableObject {
             activeSessionID: activeSessionID,
             currentEpoch: sessionEpoch
         ) else { return }
+        let preserveIntent = keepAwakeRequested
+            && (reason == "power-disconnected" || reason == "power-source-excluded")
+            && !terminationInvalidated && pendingTerminationReply == nil
+        if !preserveIntent { keepAwakeRequested = false }
         // Invalidate every detached inspection and restoration waiter before
         // publishing the terminal state. A snapshot captured for the just-ended
         // generation must never make the UI look active again after rollback.
@@ -2166,17 +2537,21 @@ final class PowerController: ObservableObject {
         endActivity()
         alert = nil
         announce(
-            reason == "power-disconnected"
-                ? "Power disconnected. The LidSwitch session ended and will not restart automatically."
-                : "The LidSwitch session ended and will not restart automatically."
+            preserveIntent
+                ? "Power source changed. Restoring normal sleep before pausing Keep Mac awake."
+                : "Keep Mac awake ended. Restoring normal sleep."
         )
         let safeRollbackWaiter = safeRollbackWaiter
         Task.detached {
             let next = safeRollbackWaiter()
             await MainActor.run {
                 guard self.sessionEpoch == terminationEpoch, self.activeSessionID == nil else { return }
-                self.snapshot = next
+                self.snapshot = self.applySavedPreferences(from: next)
+                if !next.source.isKnown || !next.sleepDisabledVerified {
+                    self.keepAwakeRequested = false
+                }
                 guard Self.hasNoOwnedSession(next) else {
+                    self.keepAwakeRequested = false
                     self.alert = .rollbackVerificationFailure(reason: reason)
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
                     self.operationPhase = .recoveryRequired
@@ -2190,6 +2565,7 @@ final class PowerController: ObservableObject {
                     self.announce("Protection off. System sleep has been restored.")
                     self.operationPhase = .idle
                 } else {
+                    self.keepAwakeRequested = false
                     self.alert = .rollbackVerificationFailure(reason: reason)
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
                     // Keep the primary action aligned with the retained cleanup
@@ -2198,7 +2574,13 @@ final class PowerController: ObservableObject {
                     self.operationPhase = .recoveryRequired
                 }
                 self.isBusy = false
-                if next.installationInventoryPending { self.refresh() }
+                if preserveIntent && self.keepAwakeRequested {
+                    // The rollback waiter supplies dynamic proof only. A fresh
+                    // installation check must authorize the next generation.
+                    self.refresh(forceFresh: true)
+                } else if next.installationInventoryPending {
+                    self.refresh()
+                }
             }
         }
     }
@@ -2340,6 +2722,8 @@ final class PowerController: ObservableObject {
               activeSessionID == nil,
               operationPhase == expectedPhase
         else { return }
+        keepAwakeRequested = false
+        startAfterHelperPreparation = false
 
         // The injected/production waiter is bounded and reads with no owned
         // session identity. A contract violation becomes an actionable warning

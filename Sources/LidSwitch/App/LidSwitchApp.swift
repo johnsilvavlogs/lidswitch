@@ -21,7 +21,7 @@ struct LidSwitchApp: App {
     var body: some Scene {
         MenuBarExtra {
             LidSwitchPanel(controller: controller, confirmationPresenter: confirmationPresenter)
-                .frame(width: 370)
+                .frame(width: 320)
         } label: {
             Label(controller.displayedStatus.title, systemImage: controller.menuBarSymbol)
                 .accessibilityLabel(controller.displayedStatus.accessibilityState)
@@ -40,16 +40,6 @@ final class LidSwitchApplicationDelegate: NSObject, NSApplicationDelegate {
         }
         if controller.consumeAuthorizedTermination() {
             return .terminateNow
-        }
-
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Restore sleep and quit LidSwitch?"
-        alert.informativeText = "LidSwitch will stop renewing any session and verify that the system sleep override is off before it quits."
-        alert.addButton(withTitle: "Restore and Quit")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return .terminateCancel
         }
 
         guard controller.requiresTerminationCleanup else {

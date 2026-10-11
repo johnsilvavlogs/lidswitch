@@ -597,7 +597,7 @@ final class UserStateDurabilityFixtureTests: XCTestCase {
         XCTAssertEqual(final.st_mode & 0o777, 0o600)
         XCTAssertEqual(
             DesiredStateStore.readPreferences(from: file, capabilityPolicy: try fixturePolicy(root)),
-            .value(.acOnlyEnabled)
+            .value(.disabled)
         )
 
         let unsafeRoot = try TestSandbox.makeDirectory(label: "user-state-legacy-bad").url
@@ -803,15 +803,16 @@ final class UserStateDurabilityFixtureTests: XCTestCase {
         let root = try TestSandbox.makeDirectory(label: "user-state-journal-steady").url
         let state = root.appendingPathComponent("desired-state")
         let policy = try fixturePolicy(root)
+        let battery = PowerPreferences(keepAwakeEnabled: false, allowBatteryKeepAwake: true)
         for index in 0..<100 {
             try DesiredStateStore.write(
-                index.isMultiple(of: 2) ? .disabled : .acOnlyEnabled,
+                index.isMultiple(of: 2) ? .disabled : battery,
                 supportDirectory: root, stateFile: state, ancestryPolicy: policy
             )
         }
         XCTAssertEqual(
             DesiredStateStore.readPreferences(from: state, capabilityPolicy: policy),
-            .value(.acOnlyEnabled)
+            .value(battery)
         )
         let residue = try FileManager.default.contentsOfDirectory(atPath: root.path)
             .filter { $0.hasPrefix(".lidswitch-") || $0.hasPrefix(".desired-state.") }

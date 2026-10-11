@@ -7,7 +7,7 @@ import XCTest
 /// Executable-but-unrun while the live-session safety gate is closed. These are
 /// pure argv/codec/dispatch fixtures and never launch a helper or subprocess.
 final class AdministratorRecoveryIntegrationTests: XCTestCase {
-    func testCurrentAuthorityBeginAndRenewalAreSchemaThreeAndShapePreserving() throws {
+    func testCurrentAuthorityBeginAndRenewalPreserveExplicitPolicyAndBaselines() throws {
         let session = UUID(uuidString: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")!
         let owner = AppliedState.Owner(
             pid: 42,
@@ -26,13 +26,26 @@ final class AdministratorRecoveryIntegrationTests: XCTestCase {
             leaseExpiryMonotonic: 30
         )
         XCTAssertEqual(current.provenance, .current)
-        XCTAssertEqual(current.payloadShape, .schemaTwelve)
-        XCTAssertTrue(current.storagePayload.hasPrefix("schema=3\n"))
-        XCTAssertEqual(current.storagePayload.split(separator: "\n").count, 12)
+        XCTAssertEqual(current.payloadShape, .schemaFifteen)
+        XCTAssertEqual(current.powerPolicy, .pluggedInOnly)
+        XCTAssertTrue(current.storagePayload.hasPrefix("schema=4\n"))
+        XCTAssertEqual(current.storagePayload.split(separator: "\n").count, 15)
         let renewed = try XCTUnwrap(current.replacingLeaseExpiry(60))
-        XCTAssertEqual(renewed.payloadShape, .schemaTwelve)
+        XCTAssertEqual(renewed.payloadShape, .schemaFifteen)
         XCTAssertEqual(renewed.provenance, .current)
         XCTAssertEqual(renewed.storagePayload.replacingOccurrences(of: "lease_expiry_mono=60.0", with: "lease_expiry_mono=30.0"), current.storagePayload)
+
+        let both = AppliedState.currentAuthority(
+            sessionID: session, changedSleepDisabled: true, changedACSleep: true,
+            originalACSleep: 10, changedBatterySleep: true, originalBatterySleep: 12,
+            powerPolicy: .all, owner: owner, leaseExpiryMonotonic: 30
+        )
+        let renewedBoth = try XCTUnwrap(both.replacingLeaseExpiry(60))
+        XCTAssertEqual(AppliedState.parse(renewedBoth.storagePayload), renewedBoth)
+        XCTAssertEqual(renewedBoth.powerPolicy, .all)
+        XCTAssertEqual(renewedBoth.originalACSleep, 10)
+        XCTAssertEqual(renewedBoth.originalBatterySleep, 12)
+        XCTAssertEqual(renewedBoth.storagePayload.replacingOccurrences(of: "lease_expiry_mono=60.0", with: "lease_expiry_mono=30.0"), both.storagePayload)
 
         let fourteen = AppliedState(
             sessionID: session,

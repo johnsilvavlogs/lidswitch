@@ -50,6 +50,9 @@ bool ls_xpc_status_is_indeterminate(int status);
    machine. It exercises callback-wins, timeout-wins, cancellation, wrapper
    release, and every pre-callback allocation failure without live XPC. */
 bool ls_xpc_request_lifecycle_harness(void);
+/* Exercises the production request decoder without a Mach service. */
+bool ls_xpc_request_power_policy_harness(void);
+bool ls_xpc_reply_battery_harness(void);
 
 /* Captured from documented XPC and libproc APIs after SecCode validation and
    before request decoding. The bridge passes this value synchronously; Swift
@@ -73,6 +76,7 @@ typedef void (*ls_server_handler_t)(
     uint32_t operation,
     const char *request_id,
     const char *session_id,
+    uint64_t begin_power_policy,
     void *reply_writer
 );
 
@@ -114,7 +118,8 @@ void ls_reply_writer_set(
     uint32_t state,
     uint32_t power_source,
     bool sleep_disabled,
-    int32_t ac_sleep_minutes
+    int32_t ac_sleep_minutes,
+    int32_t battery_sleep_minutes
 );
 
 ls_xpc_client_t *ls_xpc_client_create(
@@ -128,6 +133,8 @@ int ls_xpc_client_send(
     uint32_t operation,
     const char *request_id,
     const char *session_id,
+    /* BEGIN: source mask 1...3. Other operations: zero. */
+    uint64_t begin_power_policy,
     double timeout_seconds,
     ls_xpc_reply_t **reply
 );
@@ -140,6 +147,7 @@ uint32_t ls_xpc_reply_state(const ls_xpc_reply_t *reply);
 uint32_t ls_xpc_reply_power_source(const ls_xpc_reply_t *reply);
 bool ls_xpc_reply_sleep_disabled(const ls_xpc_reply_t *reply);
 int32_t ls_xpc_reply_ac_sleep_minutes(const ls_xpc_reply_t *reply);
+int32_t ls_xpc_reply_battery_sleep_minutes(const ls_xpc_reply_t *reply);
 void ls_xpc_reply_release(ls_xpc_reply_t *reply);
 
 typedef struct ls_code_identity ls_code_identity_t;

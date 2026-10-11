@@ -22,6 +22,7 @@ static const char *kSchema = "schema";
 static const char *kOperation = "operation";
 static const char *kRequestID = "request_id";
 static const char *kSessionID = "session_id";
+static const char *kPowerPolicy = "power_policy";
 static const char *kResult = "result";
 static const char *kReason = "reason";
 static const char *kExpiry = "expiry_monotonic";
@@ -29,12 +30,13 @@ static const char *kState = "state";
 static const char *kPower = "power_source";
 static const char *kSleepDisabled = "sleep_disabled";
 static const char *kACSleep = "ac_sleep_minutes";
+static const char *kBatterySleep = "battery_sleep_minutes";
 
 enum { LS_AC_SLEEP_MINUTES_MAX = 1440 };
 
 enum {
-    LS_REQUEST_LOGICAL_MAX = 4 * 32 + 2 * 16,
-    LS_REPLY_LOGICAL_MAX = 10 * 32 + 96 + 16,
+    LS_REQUEST_LOGICAL_MAX = 5 * 32 + 2 * 16 + 8,
+    LS_REPLY_LOGICAL_MAX = 11 * 32 + 96 + 16 + 8,
 };
 _Static_assert(LS_REQUEST_LOGICAL_MAX <= LS_XPC_MAX_LOGICAL_BYTES, "request exceeds protocol bound");
 _Static_assert(LS_REPLY_LOGICAL_MAX <= LS_XPC_MAX_LOGICAL_BYTES, "reply exceeds protocol bound");
@@ -64,6 +66,7 @@ struct ls_xpc_reply {
     uint32_t power_source;
     bool sleep_disabled;
     int32_t ac_sleep_minutes;
+    int32_t battery_sleep_minutes;
 };
 
 struct ls_reply_writer {
@@ -307,7 +310,7 @@ static bool ls_uuid_string(const uint8_t *bytes, char output[37]) {
 
 static bool ls_request_key_allowed(const char *key) {
     return strcmp(key, kSchema) == 0 || strcmp(key, kOperation) == 0 ||
-        strcmp(key, kRequestID) == 0 || strcmp(key, kSessionID) == 0;
+        strcmp(key, kRequestID) == 0 || strcmp(key, kSessionID) == 0 || strcmp(key, kPowerPolicy) == 0;
 }
 
 static bool ls_reply_key_allowed(const char *key) {
@@ -315,7 +318,7 @@ static bool ls_reply_key_allowed(const char *key) {
         strcmp(key, kResult) == 0 || strcmp(key, kReason) == 0 ||
         strcmp(key, kSessionID) == 0 || strcmp(key, kExpiry) == 0 ||
         strcmp(key, kState) == 0 || strcmp(key, kPower) == 0 ||
-        strcmp(key, kSleepDisabled) == 0 || strcmp(key, kACSleep) == 0;
+        strcmp(key, kSleepDisabled) == 0 || strcmp(key, kACSleep) == 0 || strcmp(key, kBatterySleep) == 0;
 }
 
 static bool ls_dictionary_exact(xpc_object_t dictionary, size_t count, bool reply) {
@@ -329,8 +332,9 @@ static bool ls_dictionary_exact(xpc_object_t dictionary, size_t count, bool repl
     return valid;
 }
 
-static bool ls_decode_request(xpc_object_t message, uint32_t *operation, char request_id[37], char session_id[37]) {
-    if (!ls_dictionary_exact(message, 4, false)) return false;
+static bool ls_decode_request(xpc_object_t message, uint32_t *operation, char request_id[37], char session_id[37],
+                              uint64_t *begin_power_policy) {
+    if (!ls_dictionary_exact(message, 4, false) && !ls_dictionary_exact(message, 5, false)) return false;
     xpc_object_t schema = xpc_dictionary_get_value(message, kSchema);
     xpc_object_t op = xpc_dictionary_get_value(message, kOperation);
     xpc_object_t request = xpc_dictionary_get_value(message, kRequestID);
@@ -340,21 +344,79 @@ static bool ls_decode_request(xpc_object_t message, uint32_t *operation, char re
         !session || xpc_get_type(session) != XPC_TYPE_UUID) return false;
     uint64_t raw_operation = xpc_uint64_get_value(op);
     if (raw_operation < LS_OPERATION_BEGIN || raw_operation > LS_OPERATION_RECONNECT) return false;
+    xpc_object_t selected = xpc_dictionary_get_value(message, kPowerPolicy);
+    uint64_t policy = 0;
+    if (raw_operation == LS_OPERATION_BEGIN) {
+        /* A historical four-field BEGIN retains only AC authority. Every
+           current client sends the explicit mask; zero/unknown bits reject. */
+        policy = 1;
+        if (selected) {
+            if (xpc_get_type(selected) != XPC_TYPE_UINT64) return false;
+            policy = xpc_uint64_get_value(selected);
+            if (policy < 1 || policy > 3) return false;
+        }
+    } else if (selected) {
+        return false;
+    }
     const uint8_t *request_bytes = xpc_uuid_get_bytes(request);
     const uint8_t *session_bytes = xpc_uuid_get_bytes(session);
     if (!request_bytes || !session_bytes || uuid_is_null(request_bytes)) return false;
     if (raw_operation == LS_OPERATION_RESTORE && !uuid_is_null(session_bytes)) return false;
     if (raw_operation != LS_OPERATION_RESTORE && raw_operation != LS_OPERATION_SNAPSHOT && uuid_is_null(session_bytes)) return false;
     *operation = (uint32_t)raw_operation;
+    *begin_power_policy = policy;
     return ls_uuid_string(request_bytes, request_id) && ls_uuid_string(session_bytes, session_id);
+}
+
+bool ls_xpc_request_power_policy_harness(void) {
+    xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
+    if (!message) return false;
+    uuid_t request = {1}, session = {2};
+    uint32_t operation = 0;
+    uint64_t policy = 0;
+    char request_id[37] = {0}, session_id[37] = {0};
+    xpc_dictionary_set_uint64(message, kSchema, LS_XPC_PROTOCOL_VERSION);
+    xpc_dictionary_set_uint64(message, kOperation, LS_OPERATION_BEGIN);
+    xpc_dictionary_set_uuid(message, kRequestID, request);
+    xpc_dictionary_set_uuid(message, kSessionID, session);
+    bool valid = ls_decode_request(message, &operation, request_id, session_id, &policy) && policy == 1;
+    const uint64_t masks[] = { 0, 1, 2, 3, 4, UINT64_MAX };
+    for (size_t index = 0; valid && index < sizeof(masks) / sizeof(masks[0]); index++) {
+        xpc_dictionary_set_uint64(message, kPowerPolicy, masks[index]);
+        const bool accepted = ls_decode_request(message, &operation, request_id, session_id, &policy);
+        valid = accepted == (masks[index] >= 1 && masks[index] <= 3);
+        if (accepted) valid = valid && policy == masks[index];
+    }
+    xpc_dictionary_set_int64(message, kPowerPolicy, 1);
+    valid = valid && !ls_decode_request(message, &operation, request_id, session_id, &policy);
+    xpc_dictionary_set_uint64(message, kPowerPolicy, 3);
+    xpc_dictionary_set_uint64(message, "unexpected", 1);
+    valid = valid && !ls_decode_request(message, &operation, request_id, session_id, &policy);
+    xpc_dictionary_set_value(message, "unexpected", NULL);
+    for (uint32_t next = LS_OPERATION_RENEW; valid && next <= LS_OPERATION_RECONNECT; next++) {
+        xpc_dictionary_set_uint64(message, kOperation, next);
+        if (next == LS_OPERATION_RESTORE) {
+            uuid_t idle_session = {0};
+            xpc_dictionary_set_uuid(message, kSessionID, idle_session);
+        } else {
+            xpc_dictionary_set_uuid(message, kSessionID, session);
+        }
+        xpc_dictionary_set_uint64(message, kPowerPolicy, 3);
+        valid = !ls_decode_request(message, &operation, request_id, session_id, &policy);
+        xpc_dictionary_set_value(message, kPowerPolicy, NULL);
+        valid = valid && ls_decode_request(message, &operation, request_id, session_id, &policy) && policy == 0;
+    }
+    xpc_release(message);
+    return valid;
 }
 
 void ls_reply_writer_set(void *opaque, int32_t result, const char *reason, const char *session_id,
                          double expiry, uint32_t state, uint32_t power, bool sleep_disabled,
-                         int32_t ac_sleep) {
+                         int32_t ac_sleep, int32_t battery_sleep) {
     struct ls_reply_writer *writer = opaque;
     if (!writer || writer->set || !reason || !session_id || !isfinite(expiry) || state > 3 || power > 2 ||
-        ac_sleep < -1 || ac_sleep > LS_AC_SLEEP_MINUTES_MAX) return;
+        ac_sleep < -1 || ac_sleep > LS_AC_SLEEP_MINUTES_MAX ||
+        battery_sleep < -1 || battery_sleep > LS_AC_SLEEP_MINUTES_MAX) return;
     if (!ls_safe_copy(writer->value.reason, sizeof(writer->value.reason), reason) ||
         !ls_safe_copy(writer->value.session_id, sizeof(writer->value.session_id), session_id)) return;
     uuid_t parsed;
@@ -365,6 +427,7 @@ void ls_reply_writer_set(void *opaque, int32_t result, const char *reason, const
     writer->value.power_source = power;
     writer->value.sleep_disabled = sleep_disabled;
     writer->value.ac_sleep_minutes = ac_sleep;
+    writer->value.battery_sleep_minutes = battery_sleep;
     writer->set = true;
 }
 
@@ -395,6 +458,7 @@ static xpc_object_t ls_encode_reply(xpc_object_t request, const struct ls_xpc_re
     xpc_dictionary_set_uint64(message, kPower, reply->power_source);
     xpc_dictionary_set_bool(message, kSleepDisabled, reply->sleep_disabled);
     xpc_dictionary_set_int64(message, kACSleep, reply->ac_sleep_minutes);
+    xpc_dictionary_set_int64(message, kBatterySleep, reply->battery_sleep_minutes);
     return message;
 }
 
@@ -439,14 +503,15 @@ int ls_xpc_server_run(const char *mach_service, const ls_identity_policy_t *poli
                 xpc_connection_cancel(peer);
                 return;
             }
-            uint32_t operation = 0; char request_id[37] = {0}; char session_id[37] = {0};
-            if (!ls_decode_request(message, &operation, request_id, session_id)) {
+            uint32_t operation = 0; uint64_t begin_power_policy = 0;
+            char request_id[37] = {0}; char session_id[37] = {0};
+            if (!ls_decode_request(message, &operation, request_id, session_id, &begin_power_policy)) {
                 pc->server->event(pc->server->swift_context, pc->identifier, true);
                 xpc_connection_cancel(peer);
                 return;
             }
             struct ls_reply_writer writer = {0};
-            pc->server->handler(pc->server->swift_context, pc->identifier, &peer_identity, operation, request_id, session_id, &writer);
+            pc->server->handler(pc->server->swift_context, pc->identifier, &peer_identity, operation, request_id, session_id, begin_power_policy, &writer);
             if (!writer.set) {
                 pc->server->event(pc->server->swift_context, pc->identifier, true);
                 xpc_connection_cancel(peer);
@@ -465,7 +530,7 @@ int ls_xpc_server_run(const char *mach_service, const ls_identity_policy_t *poli
 }
 
 static bool ls_decode_reply(xpc_object_t message, const char *expected_request, struct ls_xpc_reply *reply) {
-    if (!ls_dictionary_exact(message, 10, true)) return false;
+    if (!ls_dictionary_exact(message, 11, true)) return false;
     xpc_object_t schema = xpc_dictionary_get_value(message, kSchema);
     xpc_object_t request = xpc_dictionary_get_value(message, kRequestID);
     xpc_object_t session = xpc_dictionary_get_value(message, kSessionID);
@@ -484,15 +549,19 @@ static bool ls_decode_reply(xpc_object_t message, const char *expected_request, 
     xpc_object_t power = xpc_dictionary_get_value(message, kPower);
     xpc_object_t disabled = xpc_dictionary_get_value(message, kSleepDisabled);
     xpc_object_t ac = xpc_dictionary_get_value(message, kACSleep);
+    xpc_object_t battery = xpc_dictionary_get_value(message, kBatterySleep);
     if (!result || xpc_get_type(result) != XPC_TYPE_INT64 || !expiry || xpc_get_type(expiry) != XPC_TYPE_DOUBLE ||
         !state || xpc_get_type(state) != XPC_TYPE_UINT64 || !power || xpc_get_type(power) != XPC_TYPE_UINT64 ||
-        !disabled || xpc_get_type(disabled) != XPC_TYPE_BOOL || !ac || xpc_get_type(ac) != XPC_TYPE_INT64) return false;
+        !disabled || xpc_get_type(disabled) != XPC_TYPE_BOOL || !ac || xpc_get_type(ac) != XPC_TYPE_INT64 ||
+        !battery || xpc_get_type(battery) != XPC_TYPE_INT64) return false;
     const int64_t raw_result = xpc_int64_get_value(result);
     const int64_t raw_ac = xpc_int64_get_value(ac);
+    const int64_t raw_battery = xpc_int64_get_value(battery);
     const uint64_t raw_state = xpc_uint64_get_value(state);
     const uint64_t raw_power = xpc_uint64_get_value(power);
     const double raw_expiry = xpc_double_get_value(expiry);
     if (raw_result < INT32_MIN || raw_result > INT32_MAX || raw_ac < -1 || raw_ac > LS_AC_SLEEP_MINUTES_MAX ||
+        raw_battery < -1 || raw_battery > LS_AC_SLEEP_MINUTES_MAX ||
         raw_state > 3 || raw_power > 2 || !isfinite(raw_expiry)) return false;
     reply->result = (int32_t)raw_result;
     reply->expiry_monotonic = raw_expiry;
@@ -500,7 +569,42 @@ static bool ls_decode_reply(xpc_object_t message, const char *expected_request, 
     reply->power_source = (uint32_t)raw_power;
     reply->sleep_disabled = xpc_bool_get_value(disabled);
     reply->ac_sleep_minutes = (int32_t)raw_ac;
+    reply->battery_sleep_minutes = (int32_t)raw_battery;
     return true;
+}
+
+bool ls_xpc_reply_battery_harness(void) {
+    xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
+    if (!message) return false;
+    uuid_t request = {1}, session = {2};
+    char expected[37] = {0};
+    ls_uuid_string(request, expected);
+    xpc_dictionary_set_uint64(message, kSchema, LS_XPC_PROTOCOL_VERSION);
+    xpc_dictionary_set_uuid(message, kRequestID, request);
+    xpc_dictionary_set_uuid(message, kSessionID, session);
+    xpc_dictionary_set_int64(message, kResult, 0);
+    xpc_dictionary_set_string(message, kReason, "verified");
+    xpc_dictionary_set_double(message, kExpiry, 30);
+    xpc_dictionary_set_uint64(message, kState, 1);
+    xpc_dictionary_set_uint64(message, kPower, 2);
+    xpc_dictionary_set_bool(message, kSleepDisabled, true);
+    xpc_dictionary_set_int64(message, kACSleep, 10);
+    struct ls_xpc_reply reply = {0};
+    bool valid = !ls_decode_reply(message, expected, &reply);
+    const int64_t timers[] = { -1, 0, 1440, -2, 1441, INT64_MAX };
+    for (size_t index = 0; valid && index < sizeof(timers) / sizeof(timers[0]); index++) {
+        xpc_dictionary_set_int64(message, kBatterySleep, timers[index]);
+        const bool accepted = ls_decode_reply(message, expected, &reply);
+        valid = accepted == (timers[index] >= -1 && timers[index] <= 1440);
+        if (accepted) valid = valid && reply.battery_sleep_minutes == timers[index];
+    }
+    xpc_dictionary_set_uint64(message, kBatterySleep, 0);
+    valid = valid && !ls_decode_reply(message, expected, &reply);
+    xpc_dictionary_set_int64(message, kBatterySleep, 0);
+    xpc_dictionary_set_uint64(message, "unexpected", 1);
+    valid = valid && !ls_decode_reply(message, expected, &reply);
+    xpc_release(message);
+    return valid;
 }
 
 bool ls_xpc_status_is_indeterminate(int status) {
@@ -548,9 +652,11 @@ void ls_xpc_client_release(ls_xpc_client_t *client) {
 }
 
 int ls_xpc_client_send(ls_xpc_client_t *client, uint32_t operation, const char *request_id,
-                       const char *session_id, double timeout, ls_xpc_reply_t **output) {
+                       const char *session_id, uint64_t begin_power_policy, double timeout, ls_xpc_reply_t **output) {
     if (!client || !request_id || !session_id || !output || !isfinite(timeout) || timeout <= 0 || timeout > 10 ||
         operation < LS_OPERATION_BEGIN || operation > LS_OPERATION_RECONNECT) return LS_XPC_STATUS_INVALID_ARGUMENT;
+    if (operation == LS_OPERATION_BEGIN ? (begin_power_policy < 1 || begin_power_policy > 3) : begin_power_policy != 0)
+        return LS_XPC_STATUS_INVALID_ARGUMENT;
     *output = NULL;
     const int64_t timeout_ns = (int64_t)(timeout * (double)NSEC_PER_SEC);
     if (dispatch_semaphore_wait(client->serialization, dispatch_time(DISPATCH_TIME_NOW, timeout_ns)) != 0) {
@@ -585,6 +691,7 @@ int ls_xpc_client_send(ls_xpc_client_t *client, uint32_t operation, const char *
     xpc_dictionary_set_uint64(message, kOperation, operation);
     xpc_dictionary_set_uuid(message, kRequestID, request_uuid);
     xpc_dictionary_set_uuid(message, kSessionID, session_uuid);
+    if (operation == LS_OPERATION_BEGIN) xpc_dictionary_set_uint64(message, kPowerPolicy, begin_power_policy);
     xpc_connection_send_message_with_reply(client->connection, message, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(xpc_object_t reply) {
         int expected = LS_REQUEST_PENDING;
         if (atomic_load_explicit(&request_context->state, memory_order_acquire) == LS_REQUEST_PENDING) {
@@ -659,6 +766,7 @@ LS_REPLY_ACCESSOR(ls_xpc_reply_state, uint32_t, state, 0)
 LS_REPLY_ACCESSOR(ls_xpc_reply_power_source, uint32_t, power_source, 0)
 LS_REPLY_ACCESSOR(ls_xpc_reply_sleep_disabled, bool, sleep_disabled, false)
 LS_REPLY_ACCESSOR(ls_xpc_reply_ac_sleep_minutes, int32_t, ac_sleep_minutes, -1)
+LS_REPLY_ACCESSOR(ls_xpc_reply_battery_sleep_minutes, int32_t, battery_sleep_minutes, -1)
 void ls_xpc_reply_release(ls_xpc_reply_t *reply) { if (reply) { memset(reply, 0, sizeof(*reply)); free(reply); } }
 
 static ls_code_identity_t *ls_copy_identity(SecStaticCodeRef code, bool dynamic) {
