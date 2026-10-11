@@ -186,7 +186,11 @@ final class RawXPCSecurityTests: XCTestCase {
         restarted.reconcileForTesting()
         XCTAssertEqual(fixture.power.setCalls, ["sleep=1"])
         XCTAssertEqual(fixture.privateApplied()?.powerPolicy, .all)
-        XCTAssertEqual(restarted.handle(connection: 2, operation: 3, sessionID: session).result, 0)
+        // END's strict directory inspection must follow the asynchronous
+        // diagnostic publication, rather than race its file replacement.
+        XCTAssertTrue(StatusProjectionDispatcher.waitForIdleForTesting())
+        let ended = restarted.handle(connection: 2, operation: 3, sessionID: session)
+        XCTAssertEqual(ended.result, 0, ended.reason)
         XCTAssertEqual(fixture.power.ac, 0); XCTAssertEqual(fixture.power.battery, 0)
     }
 

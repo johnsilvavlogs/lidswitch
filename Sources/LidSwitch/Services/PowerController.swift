@@ -99,7 +99,8 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
         snapshot: PowerSnapshot,
         operationPhase: PowerControllerOperationPhase,
         isChecking: Bool,
-        keepAwakeRequested: Bool = false
+        keepAwakeRequested: Bool = false,
+        authenticatedOwnedSessionID: UUID? = nil
     ) -> Self {
         if operationPhase == .recoveryRequired {
             return Self(
@@ -165,6 +166,34 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
                 menuBarSymbol: "clock.badge.checkmark",
                 panelSymbol: "clock.fill"
             )
+        }
+
+        if operationPhase == .idle, let authenticatedOwnedSessionID {
+            let exactTerminal = snapshot.helperStatus?.sessionID == authenticatedOwnedSessionID
+                && (snapshot.helperStatus?.state == "terminal" || snapshot.helperStatus?.state == "inactive")
+            if exactTerminal, snapshot.sleepDisabledVerified, !snapshot.helperRecoveryRequired {
+                return Self(
+                    title: "Restore required",
+                    detail: "Keep-awake session ended. Turn off to restore sleep.",
+                    accessibilityState: "LidSwitch, restore required. Keep-awake session ended. Restored sleep has not been confirmed. Turn off to restore sleep.",
+                    menuBarSymbol: "exclamationmark.triangle.fill",
+                    panelSymbol: "exclamationmark.triangle.fill",
+                    tone: .warning
+                )
+            }
+            // BEGIN/RENEW authenticates the owned generation independently of
+            // its diagnostic status file. Only that projection gap is pending;
+            // native, recovery, persistence, and installation failures retain
+            // their ordinary warnings. This never changes snapshot authority.
+            if isAwaitingOwnedSessionProjection(snapshot, sessionID: authenticatedOwnedSessionID) {
+                return progress(
+                    title: "Verifying…",
+                    detail: "Turn off to stop.",
+                    accessibility: "LidSwitch, verifying. Protection may not be active yet. Turn off to stop.",
+                    menuBarSymbol: "clock.badge.checkmark",
+                    panelSymbol: "clock.fill"
+                )
+            }
         }
 
         let isInitialCheck = snapshot.checkedAt == .distantPast
@@ -235,6 +264,20 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
             panelSymbol: panelSymbol,
             tone: tone
         )
+    }
+
+    static func isAwaitingOwnedSessionProjection(_ snapshot: PowerSnapshot, sessionID: UUID) -> Bool {
+        let exactTerminal = snapshot.helperStatus?.sessionID == sessionID
+            && (snapshot.helperStatus?.state == "terminal" || snapshot.helperStatus?.state == "inactive")
+        return !(snapshot.ownedSessionID == sessionID && snapshot.sessionActive)
+            && snapshot.source.isKnown && snapshot.preferences.allows(snapshot.source)
+            && snapshot.sleepDisabledVerified && !snapshot.helperRecoveryRequired
+            && !exactTerminal && !snapshot.legacyResiduePresent
+            && snapshot.desiredStateTruth == .valid && snapshot.activationLeaseTruth == .missing
+            && snapshot.activationLease == nil && snapshot.systemBuildQualified
+            && !snapshot.installationInventoryIndeterminate
+            && (snapshot.installationInventoryPending
+                || (snapshot.helperReady && snapshot.bundleIntegrityValid && snapshot.bundleVersionValid))
     }
 
     private static func progress(
@@ -1010,6 +1053,12 @@ private final class RemoteAuthorityCleanupOwnership: @unchecked Sendable {
         return authenticatedTerminalProof != nil
     }
 
+    var hasIssuedAuthority: Bool {
+        lock.lock(); defer { lock.unlock() }
+        if case .authorityIssued = state { return true }
+        return false
+    }
+
     /// Returns true for exactly one caller. The transition happens before the
     /// raw side effect, so a lost terminal reply cannot enable a duplicate.
     func claimTerminalEffect() -> Bool {
@@ -1063,6 +1112,12 @@ final class PowerController: ObservableObject {
     /// status and action safe even if a recovery completion forgets to publish
     /// `.recoveryRequired` after retaining that owner.
     private var effectiveOperationPhase: PowerControllerOperationPhase {
+        // The start remains cancelable until current projection arrives, but
+        // authenticated ownership lets presentation distinguish a projection
+        // gap from an exact terminal or native safety failure.
+        if operationPhase == .starting, authenticatedOwnedSessionID != nil {
+            return .idle
+        }
         if operationPhase == .idle,
            activeSessionID == nil,
            cleanupOwnership?.requiresSafetyResolution == true
@@ -1072,17 +1127,32 @@ final class PowerController: ObservableObject {
         return operationPhase
     }
 
+    private var authenticatedOwnedSessionID: UUID? {
+        guard sessionWasAcknowledged, let activeSessionID, let cleanupOwnership,
+              cleanupOwnership.sessionID == activeSessionID,
+              cleanupOwnership.generation == sessionEpoch,
+              cleanupOwnership.hasIssuedAuthority
+        else { return nil }
+        return activeSessionID
+    }
+
     var displayedStatus: PowerControllerDisplayContract {
         .make(
             snapshot: snapshot,
             operationPhase: effectiveOperationPhase,
             isChecking: isChecking,
-            keepAwakeRequested: keepAwakeRequested
+            keepAwakeRequested: keepAwakeRequested,
+            authenticatedOwnedSessionID: authenticatedOwnedSessionID
         )
     }
 
     var primaryAction: PowerControllerPrimaryAction {
-        .resolve(snapshot: snapshot, operationPhase: effectiveOperationPhase)
+        // A held inspection can still contain the detached pre-BEGIN snapshot.
+        // The authenticated owner keeps Stop available before projection lands.
+        if effectiveOperationPhase == .idle, authenticatedOwnedSessionID != nil {
+            return .stopAndRestore
+        }
+        return .resolve(snapshot: snapshot, operationPhase: effectiveOperationPhase)
     }
 
     nonisolated private static let refreshInterval: TimeInterval = 30
@@ -1099,6 +1169,7 @@ final class PowerController: ObservableObject {
     private var activeSessionID: UUID?
     private var cleanupOwnership: RemoteAuthorityCleanupOwnership?
     private var sessionWasAcknowledged = false
+    private var sessionWasPresentedActive = false
     private var activityToken: NSObjectProtocol?
     private var powerSourceRunLoopSource: CFRunLoopSource?
     private var nextTerminationIsAuthorized = false
@@ -1269,7 +1340,7 @@ final class PowerController: ObservableObject {
         if !enabled {
             keepAwakeRequested = false
             startAfterHelperPreparation = false
-            if isStarting {
+            if isStarting, authenticatedOwnedSessionID == nil {
                 cancelPendingStart()
             } else if activeSessionID != nil || cleanupOwnership != nil {
                 stopSession()
@@ -1414,6 +1485,7 @@ final class PowerController: ObservableObject {
         else { return }
         snapshot = applySavedPreferences(from: next)
         reconcileRollbackVerificationFailure(after: snapshot)
+        reconcileAcknowledgedSessionPresentation()
     }
 
     private func completeRefresh(
@@ -1487,6 +1559,7 @@ final class PowerController: ObservableObject {
         snapshot = terminalSnapshot
         isChecking = false
         reconcileRollbackVerificationFailure(after: terminalSnapshot)
+        reconcileAcknowledgedSessionPresentation()
         let purpose = activeRefreshPurpose
         activeRefreshPurpose = nil
         switch purpose {
@@ -1734,6 +1807,7 @@ final class PowerController: ObservableObject {
         let generation = sessionEpoch
         activeSessionID = sessionID
         sessionWasAcknowledged = false
+        sessionWasPresentedActive = false
 
         do {
             try sideEffects.writeDesiredStateDisabled()
@@ -1809,8 +1883,8 @@ final class PowerController: ObservableObject {
             )
         }
 
-        // Acknowledgement is intentionally owned by the serial heartbeat.
-        // Full UI inspection can be arbitrarily slow without starving start.
+        // The serial heartbeat acknowledges remote authority. Presentation
+        // remains verifying and cancelable until this generation is projected.
     }
 
     private func finishRejectedStart(_ message: String) {
@@ -2134,7 +2208,7 @@ final class PowerController: ObservableObject {
     func quitSafely() {
         keepAwakeRequested = false
         startAfterHelperPreparation = false
-        if isStarting {
+        if isStarting, authenticatedOwnedSessionID == nil {
             prepareForSystemTermination { [weak self] restored in
                 guard restored, let self else { return }
                 self.nextTerminationIsAuthorized = true
@@ -2160,7 +2234,7 @@ final class PowerController: ObservableObject {
         // ordinary busy-state query. Invalidate a pending Start generation
         // immediately so a held preflight cannot issue desired state, a lease,
         // BEGIN, a heartbeat, or an activity after AppKit has asked to quit.
-        if isStarting {
+        if isStarting, authenticatedOwnedSessionID == nil {
             guard let replyID = registerTerminationReply(completion) else { return }
             cancelPendingStart(terminationReplyID: replyID)
             return
@@ -2499,12 +2573,31 @@ final class PowerController: ObservableObject {
         let firstAcknowledgement = !sessionWasAcknowledged
         sessionWasAcknowledged = true
         if firstAcknowledgement {
-            operationPhase = .idle
             isBusy = false
             startRequestID = nil
-            announce(snapshot.source.isAC ? "Keep Mac awake on while plugged in." : "Keep Mac awake on battery.")
         }
+        reconcileAcknowledgedSessionPresentation()
         refresh()
+    }
+
+    private func reconcileAcknowledgedSessionPresentation() {
+        guard operationPhase == .starting || operationPhase == .idle,
+              let authenticatedOwnedSessionID
+        else { return }
+        if snapshot.ownedSessionID == authenticatedOwnedSessionID,
+           snapshot.sessionActive, !snapshot.hasCriticalSafetyIssue {
+            operationPhase = .idle
+            if !sessionWasPresentedActive {
+                sessionWasPresentedActive = true
+                announce(snapshot.source.isAC ? "Keep Mac awake on while plugged in." : "Keep Mac awake on battery.")
+            }
+        } else if PowerControllerDisplayContract.isAwaitingOwnedSessionProjection(
+            snapshot, sessionID: authenticatedOwnedSessionID
+        ) {
+            // The panel's start phase keeps OFF available even while the next
+            // inspection is held. It adds no lease or helper authority.
+            operationPhase = .starting
+        }
     }
 
     private func heartbeatDidEnd(_ sessionID: UUID, epoch: Int, reason: String) {
@@ -2527,6 +2620,7 @@ final class PowerController: ObservableObject {
         heartbeat = nil
         activeSessionID = nil
         sessionWasAcknowledged = false
+        sessionWasPresentedActive = false
         operationPhase = .endingRestoring
         // Keep the UI in a bounded restoring state until the helper's rollback
         // becomes observable. An immediate snapshot can catch the helper's
@@ -2604,6 +2698,7 @@ final class PowerController: ObservableObject {
         heartbeat = nil
         activeSessionID = nil
         sessionWasAcknowledged = false
+        sessionWasPresentedActive = false
         operationPhase = operationPhaseAfterEnd
         startRequestID = nil
         if directCleanupOwned, let cleanupOwner {

@@ -402,6 +402,179 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
     }
 
     @MainActor
+    func testAcknowledgedMasterBeginWaitsForExactFreshProjectionWithoutRestoreWarning() async throws {
+        let previousSessionID = UUID()
+        let state = SwitchFixtureBox(SwitchFixtureState(
+            projectedStatus: .init(state: "terminal", reason: "peer-end", sessionID: previousSessionID,
+                                   updatedAt: Date())
+        ))
+        let holdProjection = SwitchFixtureBox(true)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let controller = makeHeldProjectionController(state, holdProjection: holdProjection,
+                                                      entered: entered, release: release)
+        controller.setKeepAwakeEnabled(true)
+        assertTrue(await issued(controller))
+        let sessionID = try XCTUnwrap(controller.activeSessionIDForTesting)
+        controller.simulateHeartbeatAcknowledgeForTesting(sessionID: sessionID,
+                                                          epoch: controller.sessionEpochForTesting)
+        let reached = await Task.detached { heldStartWasEntered(entered) }.value
+        XCTAssertTrue(reached)
+        assertPendingProjection(controller)
+        XCTAssertTrue(controller.isStarting)
+        XCTAssertTrue(controller.isChecking)
+
+        holdProjection.mutate { $0 = false }
+        release.signal()
+        assertTrue(await settles(controller))
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+        XCTAssertEqual(controller.snapshot.helperStatus?.sessionID, previousSessionID)
+        assertPendingProjection(controller)
+
+        for candidate in [
+            HelperStatusRecord(state: "active", reason: "verified", sessionID: sessionID,
+                               updatedAt: Date().addingTimeInterval(-20)),
+            HelperStatusRecord(state: "active", reason: "verified", sessionID: UUID(), updatedAt: Date()),
+        ] {
+            state.mutate { $0.projectedStatus = candidate }
+            controller.refresh()
+            assertTrue(await settles(controller))
+            XCTAssertTrue(controller.snapshot.restoreRequired)
+            assertPendingProjection(controller)
+        }
+        state.mutate { $0.omitProjectedStatus = true }
+        controller.refresh()
+        assertTrue(await settles(controller))
+        XCTAssertNil(controller.snapshot.helperStatus)
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+        assertPendingProjection(controller)
+
+        state.mutate {
+            $0.omitProjectedStatus = false
+            $0.projectedStatus = .init(state: "active", reason: "verified", sessionID: sessionID,
+                                       updatedAt: Date())
+        }
+        controller.refresh()
+        assertTrue(await settles(controller))
+        XCTAssertEqual(controller.displayedStatus.title, "Awake")
+        XCTAssertEqual(controller.displayedStatus.tone, .active)
+        XCTAssertFalse(controller.snapshot.restoreRequired)
+        XCTAssertEqual(state.read { $0.policies }, [.pluggedInOnly])
+        XCTAssertFalse(state.read { $0.events.contains("terminate") })
+        controller.setKeepAwakeEnabled(false)
+        assertTrue(await settles(controller))
+    }
+
+    @MainActor
+    func testSourcePolicyRestartWaitsForNewProjectionAndCanStopWhileDeliveryIsHeld() async throws {
+        let state = SwitchFixtureBox(SwitchFixtureState())
+        let holdProjection = SwitchFixtureBox(false)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let controller = makeHeldProjectionController(state, holdProjection: holdProjection,
+                                                      entered: entered, release: release)
+        controller.setKeepAwakeEnabled(true)
+        assertTrue(await issued(controller))
+        try await acknowledge(controller)
+        let previousSessionID = try XCTUnwrap(controller.activeSessionIDForTesting)
+        state.mutate {
+            $0.projectedStatus = .init(state: "terminal", reason: "peer-end", sessionID: previousSessionID,
+                                       updatedAt: Date())
+        }
+        holdProjection.mutate { $0 = true }
+        controller.setAllowBatteryKeepAwake(true)
+        assertTrue(await eventually {
+            controller.activeSessionIDForTesting != nil && controller.activeSessionIDForTesting != previousSessionID
+        })
+        let sessionID = try XCTUnwrap(controller.activeSessionIDForTesting)
+        controller.simulateHeartbeatAcknowledgeForTesting(sessionID: sessionID,
+                                                          epoch: controller.sessionEpochForTesting)
+        let reached = await Task.detached { heldStartWasEntered(entered) }.value
+        XCTAssertTrue(reached)
+        assertPendingProjection(controller)
+        holdProjection.mutate { $0 = false }
+        release.signal()
+        assertTrue(await settles(controller))
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+        assertPendingProjection(controller)
+        XCTAssertEqual(state.read { $0.policies }, [.pluggedInOnly, .all])
+
+        state.mutate {
+            $0.projectedStatus = .init(state: "active", reason: "verified", sessionID: sessionID,
+                                       updatedAt: Date())
+        }
+        controller.refresh()
+        assertTrue(await settles(controller))
+        XCTAssertEqual(controller.displayedStatus.title, "Awake")
+        XCTAssertFalse(controller.isStarting)
+        state.mutate {
+            $0.projectedStatus = .init(state: "active", reason: "verified", sessionID: sessionID,
+                                       updatedAt: Date().addingTimeInterval(-20))
+        }
+        controller.refresh()
+        assertTrue(await settles(controller))
+        assertPendingProjection(controller)
+        XCTAssertTrue(controller.isStarting)
+
+        holdProjection.mutate { $0 = true }
+        controller.refresh()
+        let heldAgain = await Task.detached { heldStartWasEntered(entered) }.value
+        XCTAssertTrue(heldAgain)
+        controller.setKeepAwakeEnabled(false)
+        assertTrue(await eventually { controller.activeSessionIDForTesting == nil && !controller.isBusy })
+        XCTAssertFalse(controller.isKeepAwakeOn)
+        XCTAssertNil(controller.cleanupOwnerSessionIDForTesting)
+        XCTAssertEqual(state.read { $0.events.filter { $0 == "terminate" }.count }, 2)
+        holdProjection.mutate { $0 = false }
+        release.signal()
+        assertTrue(await settles(controller))
+        XCTAssertEqual(state.read { $0.policies }, [.pluggedInOnly, .all])
+        XCTAssertNotEqual(controller.displayedStatus.title, "Awake")
+    }
+
+    @MainActor
+    func testAcknowledgedOwnedGenerationKeepsRecoveryTerminalAndUnknownSleepWarnings() async throws {
+        for warning in ["recovery-required", "terminal", "unknown-sleep"] {
+            let state = SwitchFixtureBox(SwitchFixtureState())
+            let controller = makeController(state)
+            controller.setKeepAwakeEnabled(true)
+            assertTrue(await issued(controller))
+            try await acknowledge(controller)
+            let sessionID = try XCTUnwrap(controller.activeSessionIDForTesting)
+            state.mutate {
+                if warning == "unknown-sleep" {
+                    $0.sleepDisabledVerified = false
+                } else {
+                    $0.projectedStatus = .init(state: warning, reason: "fixture", sessionID: sessionID,
+                                               updatedAt: Date())
+                    if warning == "terminal" { $0.sleepDisabled = false }
+                }
+            }
+            controller.refresh()
+            assertTrue(await settles(controller))
+            XCTAssertEqual(controller.displayedStatus.tone, .warning, warning)
+            XCTAssertNotEqual(controller.displayedStatus.title, "Verifying…", warning)
+            XCTAssertNotEqual(controller.displayedStatus.title, "Awake", warning)
+            XCTAssertEqual(controller.primaryAction, .stopAndRestore, warning)
+            state.mutate { $0.projectedStatus = nil; $0.sleepDisabledVerified = true }
+            controller.setKeepAwakeEnabled(false)
+            assertTrue(await settles(controller))
+        }
+
+        let state = SwitchFixtureBox(SwitchFixtureState(sleepDisabled: true))
+        let controller = makeController(state)
+        controller.refresh()
+        assertTrue(await settles(controller))
+        XCTAssertNil(controller.activeSessionIDForTesting)
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+        XCTAssertEqual(controller.displayedStatus.title, "Restore required")
+        XCTAssertEqual(controller.displayedStatus.tone, .warning)
+        XCTAssertEqual(controller.primaryAction, .restoreSleep)
+    }
+
+    @MainActor
     func testRenewedBatteryProjectionRefreshesAnAgedActiveDisplayWithoutRearmingOrAnnouncingAgain() async throws {
         let state = SwitchFixtureBox(SwitchFixtureState(
             source: .battery(percent: 72),
@@ -432,6 +605,7 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
         controller.refresh()
         assertTrue(await settles(controller))
         XCTAssertTrue(controller.snapshot.restoreRequired)
+        assertPendingProjection(controller)
 
         let fresh = HelperStatusRecord(state: "active", reason: "renewed", sessionID: sessionID,
                                        updatedAt: Date(), bootID: BootIdentity.current(),
@@ -472,6 +646,37 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
             XCTAssertEqual($0 as? PowerControllerSideEffectError, .productionMutationBlockedInTest)
         }
         XCTAssertNil(heartbeat(UUID(), .all, { _ in }, { _, _ in }, { true }))
+    }
+
+    @MainActor
+    private func makeHeldProjectionController(
+        _ state: SwitchFixtureBox<SwitchFixtureState>, holdProjection: SwitchFixtureBox<Bool>,
+        entered: DispatchSemaphore, release: DispatchSemaphore
+    ) -> PowerController {
+        PowerController(
+            bootstrap: false,
+            inventoryResultProvider: { owned, _ in
+                if owned != nil, holdProjection.read({ $0 }) {
+                    entered.signal()
+                    _ = release.wait(timeout: .now() + 5)
+                }
+                return .init(snapshot: state.read { $0.snapshot(owned: owned) }, rejection: nil)
+            },
+            sideEffects: effects(state),
+            safeRollbackWaiter: { state.read { $0.snapshot(owned: nil) } },
+            restoreVerificationWaiter: { state.read { $0.snapshot(owned: nil) } },
+            announcementHandler: { _ in }
+        )
+    }
+
+    @MainActor
+    private func assertPendingProjection(_ controller: PowerController,
+                                         file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(controller.isKeepAwakeOn, file: file, line: line)
+        XCTAssertEqual(controller.displayedStatus.title, "Verifying…", file: file, line: line)
+        XCTAssertEqual(controller.displayedStatus.tone, .progress, file: file, line: line)
+        XCTAssertEqual(controller.primaryAction, .stopAndRestore, file: file, line: line)
+        XCTAssertFalse(controller.snapshot.sessionActive, file: file, line: line)
     }
 
     @MainActor
@@ -613,10 +818,12 @@ private struct SwitchFixtureState {
     var preferences: PowerPreferences = .disabled
     var helperReady = true
     var sleepDisabled = false
+    var sleepDisabledVerified = true
     var acSleep: Int? = 5
     var batterySleep: Int? = 7
     var terminalSession: UUID?
     var projectedStatus: HelperStatusRecord?
+    var omitProjectedStatus = false
     var policies: [SessionPowerPolicy] = []
     var heartbeatPolicies: [SessionPowerPolicy] = []
     var events: [String] = []
@@ -628,13 +835,14 @@ private struct SwitchFixtureState {
 
     func snapshot(owned: UUID?) -> PowerSnapshot {
         let now = Date()
-        return PowerSnapshot(source: source, sleepDisabled: sleepDisabled, sleepDisabledVerified: true,
+        return PowerSnapshot(source: source, sleepDisabled: sleepDisabled, sleepDisabledVerified: sleepDisabledVerified,
                              acIdleSleepMinutes: acSleep, batteryIdleSleepMinutes: batterySleep,
                              preferences: preferences, helperArtifactsPresent: helperReady, helperLoaded: helperReady,
                              helperNeedsUpdate: false, legacyLoginItemPresent: false, legacyLoginItemLoaded: false,
                              activationLease: nil, ownedSessionID: owned,
-                             helperStatus: projectedStatus ?? .init(state: sleepDisabled ? "active" : "terminal", reason: "fixture",
-                                                                    sessionID: owned ?? terminalSession, updatedAt: now),
+                             helperStatus: omitProjectedStatus ? nil : projectedStatus ?? .init(
+                                state: sleepDisabled ? "active" : "terminal", reason: "fixture",
+                                sessionID: owned ?? terminalSession, updatedAt: now),
                              systemBuild: "fixture", systemBuildQualified: true, bundleIntegrityValid: true,
                              bundleVersionValid: true, checkedAt: now, installationInventoryState: .valid)
     }
