@@ -12,11 +12,11 @@ final class NativeUXStateFixtureTests: XCTestCase {
             isChecking: true
         )
 
-        XCTAssertEqual(contract.title, "Checking current macOS state…")
+        XCTAssertEqual(contract.title, "Checking…")
         XCTAssertEqual(contract.menuBarSymbol, "arrow.triangle.2.circlepath")
         XCTAssertEqual(contract.panelSymbol, "arrow.triangle.2.circlepath")
         XCTAssertEqual(contract.tone, .neutral)
-        XCTAssertFalse(contract.accessibilityState.contains("Power status unavailable"))
+        XCTAssertFalse(contract.accessibilityState.contains("Sleep status unavailable"))
         XCTAssertTrue(contract.accessibilityState.contains("initial safety check"))
     }
 
@@ -27,11 +27,11 @@ final class NativeUXStateFixtureTests: XCTestCase {
             isChecking: true
         )
 
-        XCTAssertEqual(contract.title, "Starting and verifying…")
+        XCTAssertEqual(contract.title, "Verifying…")
         XCTAssertEqual(contract.menuBarSymbol, "clock.badge.checkmark")
         XCTAssertEqual(contract.panelSymbol, "clock.fill")
         XCTAssertEqual(contract.tone, .progress)
-        XCTAssertTrue(contract.detail.contains("Cancel and Restore remains available"))
+        XCTAssertTrue(contract.detail.contains("Turn off to cancel"))
         XCTAssertEqual(
             PowerControllerPrimaryAction.resolve(snapshot: .empty, operationPhase: .starting),
             .cancelStart
@@ -46,7 +46,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
             isChecking: false
         )
 
-        XCTAssertEqual(contract.title, "Ending and restoring…")
+        XCTAssertEqual(contract.title, "Restoring sleep…")
         XCTAssertEqual(contract.menuBarSymbol, "arrow.triangle.2.circlepath")
         XCTAssertEqual(contract.panelSymbol, "arrow.triangle.2.circlepath")
         XCTAssertEqual(contract.tone, .progress)
@@ -86,7 +86,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
             isChecking: false
         )
 
-        XCTAssertEqual(contract.title, "Canceling and restoring…")
+        XCTAssertEqual(contract.title, "Restoring sleep…")
         XCTAssertEqual(contract.tone, .neutral)
         XCTAssertEqual(contract.menuBarSymbol, "arrow.triangle.2.circlepath")
         XCTAssertEqual(
@@ -116,9 +116,9 @@ final class NativeUXStateFixtureTests: XCTestCase {
         )] = [
             (
                 .preparingHelper,
-                "Preparing safe helper…",
+                "Setting up helper…",
                 "shield.lefthalf.filled",
-                "replacing old startup behavior",
+                "checking the helper",
                 .preparingHelperProgress
             ),
             (
@@ -266,7 +266,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertFalse(delayedRelaunchTerminal.sessionPending)
         XCTAssertFalse(delayedRelaunchTerminal.restoreRequired)
         XCTAssertTrue(delayedRelaunchTerminal.canStartSession)
-        XCTAssertEqual(delayedRelaunchTerminal.statusTitle, "Previous session ended safely")
+        XCTAssertEqual(delayedRelaunchTerminal.statusTitle, "Off")
         XCTAssertTrue(delayedRelaunchTerminal.statusDetail.contains("LidSwitch stopped running"))
         XCTAssertTrue(delayedRelaunchTerminal.statusDetail.contains("restored system sleep"))
         XCTAssertEqual(
@@ -276,7 +276,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         )
 
         XCTAssertFalse(previousBootTerminal.previousPeerProcessEndedSafely)
-        XCTAssertEqual(previousBootTerminal.statusTitle, "Ready")
+        XCTAssertEqual(previousBootTerminal.statusTitle, "Off")
         XCTAssertFalse(PowerSnapshot.isCurrentBootPeerProcessSafeIdle(
             helperStatus: HelperStatusRecord(
                 state: "terminal",
@@ -794,7 +794,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertTrue(controller.isBusy)
         XCTAssertTrue(controller.isCancelRestoring)
         XCTAssertEqual(controller.operationPhase, .cancelRestoring)
-        XCTAssertEqual(controller.displayedStatus.title, "Canceling and restoring…")
+        XCTAssertEqual(controller.displayedStatus.title, "Restoring sleep…")
         XCTAssertEqual(controller.primaryAction, .cancelRestoringProgress)
 
         releaseWaiter.signal()
@@ -1101,7 +1101,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         assertAdministratorProgressTruth(
             controller,
             phase: .preparingHelper,
-            title: "Preparing safe helper…",
+            title: "Setting up helper…",
             symbol: "shield.lefthalf.filled"
         )
 
@@ -1285,7 +1285,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
 
         XCTAssertTrue(controller.isBusy)
         XCTAssertTrue(controller.isCancelRestoring)
-        XCTAssertEqual(controller.displayedStatus.title, "Canceling and restoring…")
+        XCTAssertEqual(controller.displayedStatus.title, "Restoring sleep…")
         XCTAssertNotNil(controller.cleanupOwnerSessionIDForTesting)
         XCTAssertNotNil(controller.cleanupOwnerGenerationForTesting)
         XCTAssertEqual(events.read { $0.filter { $0 == "lease-issue" }.count }, 1)
@@ -1380,7 +1380,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertFalse(events.read { $0.contains("unexpected-remote-terminal") })
         XCTAssertFalse(events.read { $0.contains("activity-begin") })
         XCTAssertFalse(controller.requiresTerminationCleanup)
-        XCTAssertEqual(controller.displayedStatus.title, "Ready")
+        XCTAssertEqual(controller.displayedStatus.title, "Off")
         XCTAssertTrue(controller.errorMessage?.contains("Session did not start") == true)
         XCTAssertTrue(controller.errorMessage?.contains("no power rollback was claimed") == true)
         XCTAssertFalse(events.read { $0.contains("unexpected-remote-terminal") })
@@ -2057,7 +2057,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
         XCTAssertTrue(controller.requiresTerminationCleanup, file: file, line: line)
         XCTAssertTrue(controller.isEndingRestoring, file: file, line: line)
         XCTAssertEqual(controller.operationPhase, .endingRestoring, file: file, line: line)
-        XCTAssertEqual(controller.displayedStatus.title, "Ending and restoring…", file: file, line: line)
+        XCTAssertEqual(controller.displayedStatus.title, "Restoring sleep…", file: file, line: line)
         XCTAssertEqual(
             controller.displayedStatus.menuBarSymbol,
             "arrow.triangle.2.circlepath",

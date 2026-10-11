@@ -19,7 +19,7 @@ enum NativeConfirmationAction: CaseIterable, Equatable {
         case .startSession:
             "LidSwitch keeps this Mac awake on the selected power sources while the switch is on. Turning it off, quitting, restarting, or a missed safety check restores system sleep."
         case .removeHelper:
-            "This ends any active session, restores system sleep, and removes LidSwitch helper files."
+            "Restores sleep and removes the helper. macOS may require administrator approval."
         case .quit:
             "LidSwitch will stop this session and verify that the system sleep override is off before quitting."
         }

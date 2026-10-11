@@ -36,7 +36,7 @@ enum HelperPreparationCTA: Equatable, Sendable {
 
     var title: String {
         switch self {
-        case .prepare: "Prepare Safe Helper"
+        case .prepare: "Install Helper"
         case .repair: "Repair Helper"
         }
     }
@@ -503,13 +503,13 @@ struct PowerSnapshot: Equatable, Sendable {
             return "Restore required"
         }
         if previousPeerProcessEndedSafely {
-            return "Previous session ended safely"
+            return "Off"
         }
         if !sleepDisabledVerified {
-            return "Power status unavailable"
+            return "Sleep status unavailable"
         }
         if sessionActive {
-            return source.isAC ? "Awake while plugged in" : "Awake on battery"
+            return "Awake"
         }
         if installationInventoryPending {
             return "Checking installation"
@@ -530,14 +530,14 @@ struct PowerSnapshot: Equatable, Sendable {
             return "Old startup files found"
         }
         if sessionPending {
-            return "Starting monitored session"
+            return "Verifying…"
         }
         if helperReady {
             switch source {
             case .ac:
-                return "Ready"
+                return "Off"
             case .battery:
-                return preferences.allowBatteryKeepAwake ? "Ready" : "Battery keep-awake off"
+                return "Off"
             case .unknown:
                 return "Power source unavailable"
             }
@@ -547,7 +547,7 @@ struct PowerSnapshot: Equatable, Sendable {
 
     var statusDetail: String {
         if staleCanonicalLegacyLeasePresent {
-            return "A prior installed activation lease is no longer active. Prepare Safe Helper archives the exact record and verifies its canonical absence before a new session can start."
+            return "A prior activation record needs cleanup. Install Helper archives it before a new session can start."
         }
         if desiredStateTruth != .valid || activationLeaseTruth == .unsafe || activationLeaseTruth == .invalid || activationLeaseTruth == .io || activationLeaseTruth == .indeterminate || activationLeaseTruth == .valid {
             return "LidSwitch could not establish the exact user-state record. Protection remains off; refresh after resolving the local record."
@@ -586,7 +586,7 @@ struct PowerSnapshot: Equatable, Sendable {
             return "This macOS build has not passed LidSwitch safety checks. Protection remains off."
         }
         if helperNeedsUpdate {
-            return "A newer crash-safe helper is available. Prepare Safe Helper before starting a new session."
+            return "Turn on to update the helper. macOS requires administrator approval."
         }
         if legacyResiduePresent {
             return "Disabled legacy components remain on this Mac. Replace them before starting a new session."
@@ -605,7 +605,7 @@ struct PowerSnapshot: Equatable, Sendable {
             }
             return "LidSwitch could not verify the power source. Keep Mac awake stays off."
         }
-        return "Helper Repair is required because the installed helper is unavailable. This one-time repair verifies safe idle and reinstalls the helper; protection remains off until you explicitly start a session."
+        return "The helper is unavailable. Choose Repair Helper to restore it. macOS requires administrator approval."
     }
 
     var systemSummary: String {

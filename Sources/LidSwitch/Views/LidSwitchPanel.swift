@@ -5,58 +5,47 @@ struct LidSwitchPanel: View {
     @ObservedObject var controller: PowerController
     let confirmationPresenter: NativeConfirmationPresenter
     @Environment(\.colorSchemeContrast) private var accessibilityContrast
+    @State private var powerSourcesExpanded = false
+    @State private var disclosureInitialized = false
+    @FocusState private var masterHasFocus: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 12) {
             header
-
             Divider()
-                .padding(.horizontal, 6)
-                .padding(.bottom, 14)
-
             masterCard
-                .padding(.bottom, 10)
-
-            powerSourceControls
-
-            Text("Turning off restores normal sleep.")
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
-                .frame(minHeight: 17, alignment: .leading)
-                .padding(.horizontal, 6)
-                .padding(.top, 14)
-                .padding(.bottom, 16)
-
+            powerSourceDisclosure
             Divider()
-                .padding(.horizontal, 6)
-
             controls
-                .padding(.horizontal, 6)
         }
-        .padding(14)
-        .frame(minHeight: 438, alignment: .top)
+        .padding(16)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
+            if !disclosureInitialized {
+                powerSourcesExpanded = controller.isKeepAwakeOn || noPowerSourceSelected
+                disclosureInitialized = true
+            }
             // Opening the panel refreshes live power and safety truth.
             controller.refresh()
+        }
+        .onChange(of: noPowerSourceSelected) { empty in
+            if empty { powerSourcesExpanded = true }
         }
     }
 
     private var header: some View {
         Text("LidSwitch")
-            .font(.system(size: 27, weight: .semibold))
-            .tracking(-0.5)
-            .frame(maxWidth: .infinity, minHeight: 45, maxHeight: 45, alignment: .leading)
-            .padding(.horizontal, 6)
+            .font(.headline)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityAddTraits(.isHeader)
     }
 
     private var masterCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             keepAwakeSwitch
 
             statusBlock
-                .padding(.leading, 62)
+                .padding(.leading, 30)
 
             if let errorMessage = controller.errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -73,50 +62,63 @@ struct LidSwitchPanel: View {
 
             recoveryAction
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, minHeight: 106, alignment: .leading)
-        .background(cardSurface)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var keepAwakeSwitch: some View {
-        HStack(spacing: 22) {
+        HStack(spacing: 10) {
             Image(systemName: "laptopcomputer")
-                .font(.system(size: 31))
+                .font(.system(size: 20))
                 .foregroundStyle(.secondary)
-                .frame(width: 40, height: 28)
+                .frame(width: 20)
                 .accessibilityHidden(true)
 
+            Text("Keep Mac awake")
+                .font(.system(size: 15, weight: .semibold))
+                .accessibilityHidden(true)
+            Spacer(minLength: 8)
             Toggle("Keep Mac awake", isOn: Binding(
                 get: { controller.isKeepAwakeOn },
-                set: { controller.setKeepAwakeEnabled($0) }
+                set: { enabled in
+                    if enabled {
+                        powerSourcesExpanded = true
+                    } else if !noPowerSourceSelected {
+                        // Explicit OFF may hide a focused source control.
+                        masterHasFocus = true
+                        powerSourcesExpanded = false
+                    }
+                    controller.setKeepAwakeEnabled(enabled)
+                }
             ))
+            .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.regular)
-            .font(.system(size: 20, weight: .medium))
+            .focused($masterHasFocus)
             .disabled(!canChangeKeepAwake)
             .keyboardShortcut("k", modifiers: [.command])
             .accessibilityHint(
                 controller.operationPhase == .starting
                     ? "Turn off to cancel the pending start and restore system sleep."
-                    : "Keeps this Mac awake on the power sources selected below. Turn off to restore system sleep."
+                    : "Keeps this Mac awake on the selected power sources. Turn off to restore system sleep."
             )
         }
         .frame(minHeight: 28)
     }
 
     private var statusBlock: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 6) {
             statusIndicator
-                .frame(width: 14, height: 19)
+                .frame(width: 12, height: 16)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(controller.displayedStatus.title)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(statusColor)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text(controller.snapshot.source.title)
-                    .font(.system(size: 14))
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -136,10 +138,43 @@ struct LidSwitchPanel: View {
         } else {
             Image(systemName: controller.displayedStatus.tone == .active
                   ? "circle.fill" : controller.displayedStatus.panelSymbol)
-                .font(.system(size: 14))
+                .font(.system(size: 11))
                 .foregroundStyle(statusColor)
                 .accessibilityHidden(true)
         }
+    }
+
+    private var noPowerSourceSelected: Bool {
+        !controller.powerPreferences.allowPluggedInKeepAwake
+            && !controller.powerPreferences.allowBatteryKeepAwake
+    }
+
+    private var powerSourceSummary: String {
+        switch (controller.powerPreferences.allowPluggedInKeepAwake,
+                controller.powerPreferences.allowBatteryKeepAwake) {
+        case (true, true): "Plugged in and on battery"
+        case (true, false): "Plugged in only"
+        case (false, true): "Battery only"
+        case (false, false): "None selected"
+        }
+    }
+
+    private var powerSourceDisclosure: some View {
+        DisclosureGroup(isExpanded: $powerSourcesExpanded) {
+            powerSourceControls
+                .padding(.top, 6)
+        } label: {
+            HStack(spacing: 8) {
+                Text("Power sources")
+                    .font(.system(size: 13))
+                Spacer(minLength: 0)
+                Text(powerSourceSummary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+        }
+        .accessibilityHint("Saved preferences. Expand to choose when Keep Mac awake applies.")
     }
 
     private var powerSourceControls: some View {
@@ -155,8 +190,8 @@ struct LidSwitchPanel: View {
             )
 
             Divider()
-                .padding(.leading, 66)
-                .padding(.trailing, 16)
+                .padding(.leading, 42)
+                .padding(.trailing, 12)
 
             sourceToggle(
                 "On battery",
@@ -184,36 +219,37 @@ struct LidSwitchPanel: View {
         isOn: Binding<Bool>,
         hint: String
     ) -> some View {
-        Toggle(isOn: isOn) {
-            HStack(spacing: 10) {
-                Image(systemName: symbol)
-                    .font(.system(size: 27))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40)
-                    .accessibilityHidden(true)
-
-                Text(title)
-                    .font(.system(size: 17))
-            }
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+                .font(.system(size: 18))
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(.system(size: 13))
+                .accessibilityHidden(true)
+            Spacer(minLength: 8)
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.regular)
+                .accessibilityHint(hint)
         }
-        .toggleStyle(.switch)
-        .controlSize(.regular)
-        .frame(minHeight: 52)
-        .padding(.horizontal, 16)
-        .accessibilityHint(hint)
+        .frame(minHeight: 40)
+        .padding(.horizontal, 12)
     }
 
     private var cardSurface: some View {
         RoundedRectangle(cornerRadius: 10, style: .continuous)
             .fill(Color(nsColor: .controlBackgroundColor).opacity(
-                accessibilityContrast == .increased ? 1 : 0.65
+                accessibilityContrast == .increased ? 1 : 0.35
             ))
             .overlay {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .strokeBorder(
                         accessibilityContrast == .increased
                             ? Color.primary.opacity(0.45)
-                            : Color(nsColor: .separatorColor).opacity(0.55),
+                            : Color(nsColor: .separatorColor).opacity(0.3),
                         lineWidth: 1
                     )
             }
@@ -243,24 +279,24 @@ struct LidSwitchPanel: View {
     private var inlineGuidance: String? {
         if !controller.powerPreferences.allowPluggedInKeepAwake,
            !controller.powerPreferences.allowBatteryKeepAwake {
-            return "Choose Plugged in or On battery to turn on."
+            return "Choose a power source."
         }
         switch controller.operationPhase {
         case .starting:
-            return "Verifying protection. Turn off to cancel and restore sleep."
+            return "Turn off to cancel."
         case .cancelRestoring, .endingRestoring:
-            return "Verifying that normal sleep is restored."
+            return nil
         case .preparingHelper:
-            return "Approve the macOS request to continue. Protection stays off until verified."
+            return "Approve the macOS request to continue."
         case .removingHelper:
-            return "Restoring sleep and removing the helper."
+            return nil
         case .idle, .recoveryRequired:
             break
         }
         if controller.primaryAction == .prepareHelper,
            controller.snapshot.helperPreparationCTA == .prepare,
            canChangeKeepAwake {
-            return "Turn on to install once with macOS administrator approval."
+            return "Turn on to set up. macOS requires administrator approval."
         }
         if controller.displayedStatus.tone == .warning
             || !controller.snapshot.source.isKnown
@@ -305,7 +341,7 @@ struct LidSwitchPanel: View {
     }
 
     private var controls: some View {
-        VStack(spacing: 0) {
+        HStack(spacing: 12) {
             Menu {
                 Text(controller.snapshot.systemSummary)
                 Text(controller.displayedStatus.detail)
@@ -331,16 +367,18 @@ struct LidSwitchPanel: View {
                     .accessibilityHint("Asks for confirmation, restores system sleep, and removes LidSwitch helper files.")
                 }
             } label: {
-                utilityRow("Options", symbol: "gearshape", showsChevron: true)
+                Label("Options", systemImage: "gearshape")
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
+            .fixedSize()
             .accessibilityHint("Shows technical status, Refresh, and helper removal.")
 
+            Spacer(minLength: 0)
             Button {
                 controller.quitSafely()
             } label: {
-                utilityRow("Quit", symbol: "power", showsChevron: false)
+                Text("Quit")
             }
             .buttonStyle(.plain)
             .disabled(controller.isBusy && controller.operationPhase != .starting)
@@ -348,30 +386,8 @@ struct LidSwitchPanel: View {
             .accessibilityLabel("Restore and quit LidSwitch")
             .accessibilityHint("Verifies that system sleep is restored before quitting.")
         }
-    }
-
-    private func utilityRow(_ title: String, symbol: String, showsChevron: Bool) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 22))
-                .foregroundStyle(.secondary)
-                .frame(width: 24)
-                .accessibilityHidden(true)
-
-            Text(title)
-                .font(.system(size: 17))
-                .foregroundStyle(.primary)
-
-            Spacer(minLength: 0)
-
-            if showsChevron {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+        .font(.system(size: 12))
+        .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
         .contentShape(Rectangle())
     }
 

@@ -1389,7 +1389,7 @@ final class SessionSafetyTests: XCTestCase {
         let update = makeSnapshot(source: .ac, sleepDisabled: false, sleepDisabledVerified: true, helperNeedsUpdate: true)
         XCTAssertFalse(update.legacyResiduePresent)
         XCTAssertEqual(update.statusTitle, "Helper update required")
-        XCTAssertTrue(update.statusDetail.contains("newer crash-safe helper"))
+        XCTAssertTrue(update.statusDetail.contains("Turn on to update the helper"))
 
         let legacy = makeSnapshot(source: .ac, sleepDisabled: false, sleepDisabledVerified: true, legacyLoginPresent: true)
         XCTAssertTrue(legacy.legacyResiduePresent)
@@ -1409,7 +1409,7 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertTrue(stale.legacyResiduePresent)
         XCTAssertFalse(stale.canStartSession)
         XCTAssertEqual(stale.statusTitle, "Legacy lease needs reconciliation")
-        XCTAssertTrue(stale.statusDetail.contains("Prepare Safe Helper"))
+        XCTAssertTrue(stale.statusDetail.contains("Install Helper"))
         XCTAssertEqual(PowerControllerPrimaryAction.resolve(snapshot: stale, operationPhase: .idle), .prepareHelper)
 
         let genericResidue = makeSnapshot(
@@ -1504,7 +1504,7 @@ final class SessionSafetyTests: XCTestCase {
         )
 
         XCTAssertEqual(cleanInstall.helperPreparationCTA, .prepare)
-        XCTAssertEqual(cleanInstall.helperPreparationCTA.title, "Prepare Safe Helper")
+        XCTAssertEqual(cleanInstall.helperPreparationCTA.title, "Install Helper")
         XCTAssertEqual(
             cleanInstall.helperPreparationCTA.accessibilityHint,
             "Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off."
@@ -2375,7 +2375,7 @@ final class SessionSafetyTests: XCTestCase {
 
         controller.refresh()
         await waitForRefresh(controller)
-        XCTAssertEqual(controller.displayedStatus.title, "Ready")
+        XCTAssertEqual(controller.displayedStatus.title, "Off")
         XCTAssertFalse(try XCTUnwrap(controller.snapshot.helperStatus).isFresh(at: now))
         XCTAssertFalse(controller.requiresTerminationCleanup)
 
@@ -2775,7 +2775,7 @@ final class SessionSafetyTests: XCTestCase {
         controller.refresh()
         await waitForRefresh(controller)
         XCTAssertNil(controller.alert)
-        XCTAssertEqual(controller.snapshot.statusTitle, "Ready")
+        XCTAssertEqual(controller.snapshot.statusTitle, "Off")
 
         current.value = unsafe
         controller.refresh()
@@ -3368,7 +3368,7 @@ final class SessionSafetyTests: XCTestCase {
         )
 
         XCTAssertTrue(snapshot.sessionActive)
-        XCTAssertEqual(snapshot.statusTitle, "Awake while plugged in")
+        XCTAssertEqual(snapshot.statusTitle, "Awake")
         XCTAssertFalse(snapshot.canStartSession)
     }
 
@@ -3466,7 +3466,7 @@ final class SessionSafetyTests: XCTestCase {
         )
 
         XCTAssertFalse(snapshot.canStartSession)
-        XCTAssertEqual(snapshot.statusTitle, "Power status unavailable")
+        XCTAssertEqual(snapshot.statusTitle, "Sleep status unavailable")
     }
 
     func testOldLoginItemLoadedIsDistinctLegacyResidue() {

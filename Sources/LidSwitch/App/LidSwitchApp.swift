@@ -21,7 +21,7 @@ struct LidSwitchApp: App {
     var body: some Scene {
         MenuBarExtra {
             LidSwitchPanel(controller: controller, confirmationPresenter: confirmationPresenter)
-                .frame(width: 370)
+                .frame(width: 320)
         } label: {
             Label(controller.displayedStatus.title, systemImage: controller.menuBarSymbol)
                 .accessibilityLabel(controller.displayedStatus.accessibilityState)

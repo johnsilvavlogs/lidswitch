@@ -118,7 +118,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .endingRestoring {
             return progress(
-                title: "Ending and restoring…",
+                title: "Restoring sleep…",
                 detail: "Protection is ending. LidSwitch is verifying safe idle before reporting success or recovery required.",
                 accessibility: "LidSwitch, ending and restoring. LidSwitch is not reporting protection as active while it verifies that the system sleep override is off.",
                 menuBarSymbol: "arrow.triangle.2.circlepath",
@@ -128,9 +128,9 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .preparingHelper {
             return progress(
-                title: "Preparing safe helper…",
-                detail: "LidSwitch is restoring safe idle, replacing old startup behavior, and verifying the crash-safe helper before reporting ready.",
-                accessibility: "LidSwitch, preparing safe helper. Protection is not being reported active while LidSwitch restores safe idle, replaces old startup behavior, and verifies the helper.",
+                title: "Setting up helper…",
+                detail: "Restoring sleep and checking the helper.",
+                accessibility: "LidSwitch, setting up helper. Protection is not being reported active while sleep restoration and setup are verified.",
                 menuBarSymbol: "shield.lefthalf.filled",
                 panelSymbol: "shield.lefthalf.filled"
             )
@@ -148,7 +148,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .cancelRestoring {
             return progress(
-                title: "Canceling and restoring…",
+                title: "Restoring sleep…",
                 detail: "Protection is ending. LidSwitch is verifying safe idle before reporting success.",
                 accessibility: "LidSwitch, canceling and restoring. Protection may still be ending while LidSwitch verifies that the system sleep override is off.",
                 menuBarSymbol: "arrow.triangle.2.circlepath",
@@ -159,9 +159,9 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
 
         if operationPhase == .starting {
             return progress(
-                title: "Starting and verifying…",
-                detail: "Protection may not yet be active. Cancel and Restore remains available while LidSwitch waits for helper confirmation.",
-                accessibility: "LidSwitch, starting and verifying. Protection may not be active yet. Cancel and Restore is available.",
+                title: "Verifying…",
+                detail: "Waiting for helper confirmation. Turn off to cancel.",
+                accessibility: "LidSwitch, verifying. Protection may not be active yet. Turn off to cancel.",
                 menuBarSymbol: "clock.badge.checkmark",
                 panelSymbol: "clock.fill"
             )
@@ -171,7 +171,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
             && (isChecking || snapshot.installationInventoryPending)
         if isInitialCheck {
             return progress(
-                title: "Checking current macOS state…",
+                title: "Checking…",
                 detail: "Reading the current power source and system sleep override. Protection stays off until this check finishes.",
                 accessibility: "LidSwitch, checking current macOS state. Protection remains off until the initial safety check finishes.",
                 menuBarSymbol: "arrow.triangle.2.circlepath",
@@ -195,10 +195,10 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
            operationPhase == .idle, snapshot.canStartSessionOnKnownSource,
            !snapshot.preferences.allows(snapshot.source) {
             let onBattery = !snapshot.source.isAC
-            let title = onBattery ? "Paused on battery" : "Paused while plugged in"
+            let title = "Paused"
             let detail = onBattery
-                ? "Keep Mac awake is on. Normal sleep is restored on battery; protection resumes when you plug in."
-                : "Keep Mac awake is on. Normal sleep is restored while plugged in; protection resumes on battery."
+                ? "Resumes when plugged in."
+                : "Resumes on battery."
             return Self(title: title, detail: detail,
                         accessibilityState: "LidSwitch, \(title). \(detail)",
                         menuBarSymbol: "pause.circle", panelSymbol: "pause.circle", tone: .neutral)
