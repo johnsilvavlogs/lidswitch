@@ -266,6 +266,98 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
         XCTAssertEqual(unknown.authority, .indeterminate)
     }
 
+    func testHeartbeatRefreshUsesOnlyNewFreshExactSessionProjectionsOnSelectedPower() {
+        let sessionID = UUID()
+        let now = Date()
+        let callbacks = SwitchFixtureBox([UUID]())
+        let gate = ActiveSessionProjectionRefreshGate(sessionID: sessionID, powerPolicy: .all)
+        let first = HelperStatusRecord(state: "active", reason: "verified", sessionID: sessionID, updatedAt: now)
+        let renewed = HelperStatusRecord(state: "active", reason: "renewed", sessionID: sessionID,
+                                         updatedAt: now.addingTimeInterval(8))
+        let candidates: [(SessionHeartbeatObservation.Power, HelperStatusRecord, Date)] = [
+            (.battery, first, now),
+            (.battery, first, now),
+            (.battery, renewed, now.addingTimeInterval(8)),
+            (.unknown, renewed, now.addingTimeInterval(8)),
+            (.battery, .init(state: "active", reason: "renewed", sessionID: UUID(), updatedAt: now), now),
+            (.battery, first, now.addingTimeInterval(13)),
+            (.battery, .init(state: "terminal", reason: "peer-end", sessionID: sessionID, updatedAt: now), now),
+            (.battery, renewed, now)
+        ]
+        for (power, status, checkedAt) in candidates {
+            let native = SessionHeartbeatObservation(power: power, authority: .indeterminate, helperStatus: status)
+            let observation = PowerControllerSideEffects.observedHeartbeatProjection(
+                sessionID: sessionID, native: native, now: checkedAt, refreshGate: gate,
+                onAcknowledged: { callbackID in callbacks.mutate { $0.append(callbackID) } }
+            )
+            XCTAssertEqual(observation.helperStatus, status)
+        }
+        XCTAssertEqual(callbacks.read { $0 }, [sessionID, sessionID])
+        let pluggedInGate = ActiveSessionProjectionRefreshGate(sessionID: sessionID, powerPolicy: .pluggedInOnly)
+        XCTAssertFalse(pluggedInGate.shouldRefresh(
+            .init(power: .battery, authority: .verified, helperStatus: first), at: now
+        ))
+    }
+
+    @MainActor
+    func testRenewedBatteryProjectionRefreshesAnAgedActiveDisplayWithoutRearmingOrAnnouncingAgain() async throws {
+        let state = SwitchFixtureBox(SwitchFixtureState(
+            source: .battery(percent: 72),
+            preferences: PowerPreferences(keepAwakeEnabled: false, allowBatteryKeepAwake: true)
+        ))
+        let announcements = SwitchFixtureBox([String]())
+        let controller = PowerController(
+            bootstrap: false, snapshotProvider: { owned in state.read { $0.snapshot(owned: owned) } },
+            sideEffects: effects(state),
+            safeRollbackWaiter: { state.read { $0.snapshot(owned: nil) } },
+            restoreVerificationWaiter: { state.read { $0.snapshot(owned: nil) } },
+            announcementHandler: { message in announcements.mutate { $0.append(message) } }
+        )
+        controller.setKeepAwakeEnabled(true)
+        assertTrue(await issued(controller))
+        try await acknowledge(controller)
+        let sessionID = try XCTUnwrap(controller.activeSessionIDForTesting)
+        let epoch = controller.sessionEpochForTesting
+        let monotonic = MonotonicClock.seconds()
+        let now = Date()
+        state.mutate {
+            $0.projectedStatus = HelperStatusRecord(
+                state: "active", reason: "verified", sessionID: sessionID,
+                updatedAt: now.addingTimeInterval(-20), bootID: BootIdentity.current(),
+                updatedMonotonic: monotonic - 20
+            )
+        }
+        controller.refresh()
+        assertTrue(await settles(controller))
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+
+        let fresh = HelperStatusRecord(state: "active", reason: "renewed", sessionID: sessionID,
+                                       updatedAt: Date(), bootID: BootIdentity.current(),
+                                       updatedMonotonic: MonotonicClock.seconds())
+        state.mutate { $0.projectedStatus = fresh }
+        let gate = ActiveSessionProjectionRefreshGate(sessionID: sessionID, powerPolicy: .all)
+        _ = PowerControllerSideEffects.observedHeartbeatProjection(
+            sessionID: sessionID, native: .init(power: .battery, authority: .indeterminate, helperStatus: fresh),
+            now: Date(), refreshGate: gate,
+            onAcknowledged: { acknowledgedID in
+                Task { @MainActor in
+                    controller.simulateHeartbeatAcknowledgeForTesting(sessionID: acknowledgedID, epoch: epoch)
+                }
+            }
+        )
+        assertTrue(await eventually { !controller.isChecking && controller.snapshot.sessionActive })
+        XCTAssertEqual(controller.displayedStatus.title, "Awake")
+        XCTAssertFalse(controller.snapshot.restoreRequired)
+        XCTAssertTrue(controller.isKeepAwakeOn)
+        XCTAssertTrue(controller.powerPreferences.allowBatteryKeepAwake)
+        XCTAssertEqual(controller.activeSessionIDForTesting, sessionID)
+        XCTAssertEqual(state.read { $0.policies }, [.all])
+        XCTAssertEqual(announcements.read { $0.filter { $0 == "Keep Mac awake on battery." }.count }, 1)
+        state.mutate { $0.projectedStatus = nil }
+        controller.setKeepAwakeEnabled(false)
+        assertTrue(await settles(controller))
+    }
+
     func testPolicySeamsRespectTheProductionMutationGuardInXCTest() throws {
         let effects = PowerControllerSideEffects.production()
         let writer = try XCTUnwrap(effects.writePowerPreferences)
@@ -386,6 +478,7 @@ private struct SwitchFixtureState {
     var acSleep: Int? = 5
     var batterySleep: Int? = 7
     var terminalSession: UUID?
+    var projectedStatus: HelperStatusRecord?
     var policies: [SessionPowerPolicy] = []
     var heartbeatPolicies: [SessionPowerPolicy] = []
     var events: [String] = []
@@ -402,8 +495,8 @@ private struct SwitchFixtureState {
                              preferences: preferences, helperArtifactsPresent: helperReady, helperLoaded: helperReady,
                              helperNeedsUpdate: false, legacyLoginItemPresent: false, legacyLoginItemLoaded: false,
                              activationLease: nil, ownedSessionID: owned,
-                             helperStatus: .init(state: sleepDisabled ? "active" : "terminal", reason: "fixture",
-                                                 sessionID: owned ?? terminalSession, updatedAt: now),
+                             helperStatus: projectedStatus ?? .init(state: sleepDisabled ? "active" : "terminal", reason: "fixture",
+                                                                    sessionID: owned ?? terminalSession, updatedAt: now),
                              systemBuild: "fixture", systemBuildQualified: true, bundleIntegrityValid: true,
                              bundleVersionValid: true, checkedAt: now, installationInventoryState: .valid)
     }

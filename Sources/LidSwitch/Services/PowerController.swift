@@ -369,6 +369,36 @@ enum PowerControllerLeaseIssueResolution: Equatable, Sendable {
     case authorityMayRemain(String)
 }
 
+/// The copied UI projection expires after 12 seconds, sooner than the 30-second
+/// inventory timer. Reuse fresh heartbeat observations to keep it current;
+/// neither this gate nor the refresh grants or extends a helper lease.
+final class ActiveSessionProjectionRefreshGate: @unchecked Sendable {
+    private let sessionID: UUID
+    private let powerPolicy: SessionPowerPolicy
+    private let lock = NSLock()
+    private var lastProjection: HelperStatusRecord?
+
+    init(sessionID: UUID, powerPolicy: SessionPowerPolicy) {
+        self.sessionID = sessionID
+        self.powerPolicy = powerPolicy
+    }
+
+    func shouldRefresh(_ observation: SessionHeartbeatObservation, at date: Date) -> Bool {
+        let selectedSource = (observation.power == .ac && powerPolicy.pluggedIn)
+            || (observation.power == .battery && powerPolicy.onBattery)
+        guard selectedSource,
+              let status = observation.helperStatus,
+              status.sessionID == sessionID,
+              status.state == "active",
+              status.reason != "override-recovered",
+              status.isFresh(at: date) else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard status != lastProjection else { return false }
+        lastProjection = status
+        return true
+    }
+}
+
 // All controller-owned state transitions pass through this narrow boundary.
 // Production uses the same stores, heartbeat, activity, helper operations, and
 // termination behavior as before; tests inject the fixture instance so an
@@ -518,6 +548,7 @@ struct PowerControllerSideEffects: @unchecked Sendable {
         claimCleanup: @escaping @Sendable () -> Bool
     ) -> SessionHeartbeatCoordinator? {
         guard !testRuntimeDetector(), let client else { return nil }
+        let projectionRefresh = ActiveSessionProjectionRefreshGate(sessionID: sessionID, powerPolicy: powerPolicy)
         return SessionHeartbeatCoordinator(
             powerPolicy: powerPolicy,
             observe: { sessionID in
@@ -529,10 +560,12 @@ struct PowerControllerSideEffects: @unchecked Sendable {
                 // status file is diagnostic projection: a missing, stale,
                 // or corrupt active publication cannot revoke the exact
                 // in-memory generation that BEGIN/RENEW established.
-                Self.rawXPCHeartbeatObservation(
+                Self.observedHeartbeatProjection(
                     sessionID: sessionID,
                     native: PowerInspector.sessionHeartbeatObservation(sessionID: sessionID),
-                    now: Date()
+                    now: Date(),
+                    refreshGate: projectionRefresh,
+                    onAcknowledged: onAcknowledged
                 )
             },
             renew: { sessionID, mode, commitGuard in
@@ -620,6 +653,17 @@ struct PowerControllerSideEffects: @unchecked Sendable {
             authority: native.power == .ac || native.power == .battery ? .verified : .indeterminate,
             helperStatus: status
         )
+    }
+
+    static func observedHeartbeatProjection(
+        sessionID: UUID,
+        native: SessionHeartbeatObservation,
+        now: Date,
+        refreshGate: ActiveSessionProjectionRefreshGate,
+        onAcknowledged: @Sendable (UUID) -> Void
+    ) -> SessionHeartbeatObservation {
+        if refreshGate.shouldRefresh(native, at: now) { onAcknowledged(sessionID) }
+        return rawXPCHeartbeatObservation(sessionID: sessionID, native: native, now: now)
     }
 
     private static func isXCTestRuntime(executable: String, environment: [String: String]) -> Bool {
@@ -2434,11 +2478,14 @@ final class PowerController: ObservableObject {
             activeSessionID: activeSessionID,
             currentEpoch: sessionEpoch
         ) else { return }
+        let firstAcknowledgement = !sessionWasAcknowledged
         sessionWasAcknowledged = true
-        operationPhase = .idle
-        isBusy = false
-        startRequestID = nil
-        announce(snapshot.source.isAC ? "Keep Mac awake on while plugged in." : "Keep Mac awake on battery.")
+        if firstAcknowledgement {
+            operationPhase = .idle
+            isBusy = false
+            startRequestID = nil
+            announce(snapshot.source.isAC ? "Keep Mac awake on while plugged in." : "Keep Mac awake on battery.")
+        }
         refresh()
     }
 
