@@ -190,6 +190,108 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
     }
 
     @MainActor
+    func testHeldInitialPreparationPreservesOnAcrossInterimInventoryChangesAndStartsExactlyOnce() async throws {
+        let state = SwitchFixtureBox(SwitchFixtureState(helperReady: false))
+        let inventoryInTransition = SwitchFixtureBox(false)
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        let controller = makeHeldPreparationController(state, inventoryInTransition: inventoryInTransition,
+                                                      entered: entered, release: release)
+        controller.setKeepAwakeEnabled(true)
+        let reached = await Task.detached { heldStartWasEntered(entered) }.value
+        XCTAssertTrue(reached)
+        XCTAssertTrue(controller.isKeepAwakeOn)
+        XCTAssertEqual(controller.operationPhase, .preparingHelper)
+
+        inventoryInTransition.mutate { $0 = true }
+        controller.refresh()
+        assertTrue(await eventually { !controller.isChecking && controller.snapshot.installationInventoryIndeterminate })
+        XCTAssertTrue(controller.isKeepAwakeOn)
+        XCTAssertEqual(controller.operationPhase, .preparingHelper)
+        XCTAssertTrue(state.read { $0.policies.isEmpty })
+
+        inventoryInTransition.mutate { $0 = false }
+        release.signal()
+        assertTrue(await issued(controller))
+        try await acknowledge(controller)
+        controller.refresh()
+        assertTrue(await settles(controller))
+        XCTAssertTrue(controller.isKeepAwakeOn)
+        XCTAssertTrue(controller.snapshot.sessionActive)
+        XCTAssertEqual(state.read { $0.policies }, [.pluggedInOnly])
+        XCTAssertEqual(state.read { $0.events.filter { $0 == "prepare" }.count }, 1)
+        XCTAssertEqual(state.read { $0.events.filter { $0 == "begin" }.count }, 1)
+        controller.setKeepAwakeEnabled(false)
+        assertTrue(await settles(controller))
+    }
+
+    @MainActor
+    func testHeldPreparationCannotResumeAfterCancellationSafetyFailureOrFailedFinalConvergence() async {
+        for cancellation in HeldPreparationCancellation.allCases {
+            let state = SwitchFixtureBox(SwitchFixtureState(helperReady: false))
+            let inventoryInTransition = SwitchFixtureBox(false)
+            let entered = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            defer { release.signal() }
+            let controller = makeHeldPreparationController(
+                state, inventoryInTransition: inventoryInTransition, entered: entered, release: release,
+                failPreparation: cancellation == .administratorFailure
+            )
+            controller.setKeepAwakeEnabled(true)
+            let reached = await Task.detached { heldStartWasEntered(entered) }.value
+            XCTAssertTrue(reached, cancellation.rawValue)
+            inventoryInTransition.mutate { $0 = true }
+            controller.refresh()
+            assertTrue(await eventually { !controller.isChecking && controller.snapshot.installationInventoryIndeterminate })
+            XCTAssertTrue(controller.isKeepAwakeOn, cancellation.rawValue)
+
+            switch cancellation {
+            case .unknownSource:
+                state.mutate { $0.source = .unknown("fixture") }
+                controller.refresh()
+                assertTrue(await eventually { !controller.isChecking })
+                XCTAssertFalse(controller.isKeepAwakeOn)
+                state.mutate { $0.source = .ac }
+            case .recoveryRequired:
+                state.mutate {
+                    $0.projectedStatus = .init(state: "recovery-required", reason: "fixture",
+                                              sessionID: nil, updatedAt: Date())
+                }
+                controller.refresh()
+                assertTrue(await eventually { !controller.isChecking })
+                XCTAssertFalse(controller.isKeepAwakeOn)
+                state.mutate { $0.projectedStatus = nil }
+            case .explicitOff:
+                controller.setKeepAwakeEnabled(false)
+                XCTAssertFalse(controller.isKeepAwakeOn)
+            case .termination:
+                let replies = SwitchFixtureBox([Bool]())
+                controller.prepareForSystemTermination { restored in replies.mutate { $0.append(restored) } }
+                XCTAssertEqual(replies.read { $0 }, [false])
+                XCTAssertFalse(controller.isKeepAwakeOn)
+            case .finalVerificationFailure, .administratorFailure:
+                break
+            }
+            if cancellation != .finalVerificationFailure { inventoryInTransition.mutate { $0 = false } }
+            release.signal()
+            assertTrue(await settles(controller))
+            XCTAssertFalse(controller.isKeepAwakeOn, cancellation.rawValue)
+            XCTAssertTrue(state.read { $0.policies.isEmpty }, cancellation.rawValue)
+            if cancellation == .finalVerificationFailure || cancellation == .administratorFailure {
+                XCTAssertNotNil(controller.errorMessage)
+            }
+
+            inventoryInTransition.mutate { $0 = false }
+            state.mutate { $0.helperReady = true }
+            controller.refresh()
+            assertTrue(await settles(controller))
+            XCTAssertFalse(controller.isKeepAwakeOn, cancellation.rawValue)
+            XCTAssertTrue(state.read { $0.policies.isEmpty }, cancellation.rawValue)
+        }
+    }
+
+    @MainActor
     func testOffCancelsHeldStartBeforeAnyAuthorityOrPreferenceMutation() async {
         let state = SwitchFixtureBox(SwitchFixtureState())
         let entered = DispatchSemaphore(value: 0)
@@ -416,19 +518,51 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
     }
 
     private func replacingPrepare(_ base: PowerControllerSideEffects,
-                                  state: SwitchFixtureBox<SwitchFixtureState>) -> PowerControllerSideEffects {
-        PowerControllerSideEffects(
+                                  state: SwitchFixtureBox<SwitchFixtureState>,
+                                  preparation: (@Sendable () throws -> AdministratorOperationResult)? = nil) -> PowerControllerSideEffects {
+        let prepare: @Sendable () throws -> AdministratorOperationResult = preparation ?? {
+            state.mutate { $0.events.append("prepare"); $0.helperReady = true }
+            return .safeIdle(.init(transactionID: UUID(), operation: .install, state: .terminal,
+                                   outcome: .safeIdle, sessionID: nil, reason: "fixture"))
+        }
+        return PowerControllerSideEffects(
             writeDesiredStateDisabled: base.writeDesiredStateDisabled, issueLease: base.issueLease,
             revokeLease: base.revokeLease, terminateLease: base.terminateLease, makeHeartbeat: base.makeHeartbeat,
             beginActivity: base.beginActivity, endActivity: base.endActivity,
-            prepareHelper: {
-                state.mutate { $0.events.append("prepare"); $0.helperReady = true }
-                return .safeIdle(.init(transactionID: UUID(), operation: .install, state: .terminal,
-                                       outcome: .safeIdle, sessionID: nil, reason: "fixture"))
-            },
+            prepareHelper: prepare,
             restoreSleep: base.restoreSleep, uninstallHelper: base.uninstallHelper,
             terminateApplication: base.terminateApplication, writePowerPreferences: base.writePowerPreferences,
             issueLeaseWithPolicy: base.issueLeaseWithPolicy, makeHeartbeatWithPolicy: base.makeHeartbeatWithPolicy
+        )
+    }
+
+    @MainActor
+    private func makeHeldPreparationController(
+        _ state: SwitchFixtureBox<SwitchFixtureState>, inventoryInTransition: SwitchFixtureBox<Bool>,
+        entered: DispatchSemaphore, release: DispatchSemaphore, failPreparation: Bool = false
+    ) -> PowerController {
+        let heldEffects = replacingPrepare(effects(state), state: state, preparation: {
+            state.mutate { $0.events.append("prepare") }
+            entered.signal()
+            guard release.wait(timeout: .now() + 5) == .success, !failPreparation else {
+                throw NSError(domain: "HeldPreparationFixture", code: 1)
+            }
+            state.mutate { $0.helperReady = true }
+            return .safeIdle(.init(transactionID: UUID(), operation: .install, state: .terminal,
+                                   outcome: .safeIdle, sessionID: nil, reason: "fixture"))
+        })
+        return PowerController(
+            bootstrap: false,
+            snapshotProvider: { owned in
+                let snapshot = state.read { $0.snapshot(owned: owned) }
+                return inventoryInTransition.read { $0 }
+                    ? snapshot.withIndeterminateInstallationInventory(reason: "Helper replacement is in progress.")
+                    : snapshot
+            },
+            sideEffects: heldEffects,
+            safeRollbackWaiter: { state.read { $0.snapshot(owned: nil) } },
+            restoreVerificationWaiter: { state.read { $0.snapshot(owned: nil) } },
+            announcementHandler: { _ in }
         )
     }
 
@@ -468,6 +602,10 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
 // DispatchSemaphore.wait is unavailable directly from an async context.
 private func heldStartWasEntered(_ semaphore: DispatchSemaphore) -> Bool {
     semaphore.wait(timeout: .now() + 2) == .success
+}
+
+private enum HeldPreparationCancellation: String, CaseIterable, Equatable {
+    case unknownSource, recoveryRequired, explicitOff, termination, finalVerificationFailure, administratorFailure
 }
 
 private struct SwitchFixtureState {

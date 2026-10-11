@@ -1463,8 +1463,24 @@ final class PowerController: ObservableObject {
         }
 
         terminalSnapshot = applySavedPreferences(from: terminalSnapshot)
+        // Helper replacement can invalidate a timer/power-notification inventory
+        // while the authorized setup is still running. That observation cannot
+        // cancel the pending ON request. Final setup convergence remains strict.
+        let pendingInitialPreparation = operationPhase == .preparingHelper
+            && startAfterHelperPreparation && keepAwakeRequested
+            && activeRefreshPurpose == nil
+            && !terminationInvalidated && pendingTerminationReply == nil
+            && activeSessionID == nil && cleanupOwnership == nil
+            && terminalSnapshot.ownedSessionID == nil
+            && terminalSnapshot.source.isKnown
+            && terminalSnapshot.sleepDisabledVerified && !terminalSnapshot.sleepDisabled
+            && !terminalSnapshot.helperRecoveryRequired
+            && terminalSnapshot.desiredStateTruth == .valid
+            && terminalSnapshot.activationLeaseTruth == .missing
+            && terminalSnapshot.activationLease == nil
         if !terminalSnapshot.source.isKnown || !terminalSnapshot.sleepDisabledVerified
-            || terminalSnapshot.installationInventoryIndeterminate || terminalSnapshot.helperRecoveryRequired {
+            || (terminalSnapshot.installationInventoryIndeterminate && !pendingInitialPreparation)
+            || terminalSnapshot.helperRecoveryRequired {
             keepAwakeRequested = false
         }
         let previousStatus = snapshot.statusTitle
@@ -1602,6 +1618,8 @@ final class PowerController: ObservableObject {
               operationPhase == .preparingHelper
         else { return }
         guard Self.hasNoOwnedSession(next) else {
+            keepAwakeRequested = false
+            startAfterHelperPreparation = false
             alert = .operationFailure(message: "The helper transaction finished, but a fresh detached session state was not proved. LidSwitch is keeping recovery controls active.")
             announce(errorMessage ?? "A detached session state could not be verified.")
             operationPhase = .recoveryRequired
