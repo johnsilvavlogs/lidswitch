@@ -92,6 +92,7 @@ struct LidSwitchPanel: View {
                 }
             ))
             .labelsHidden()
+            .accessibilityLabel("Keep Mac awake")
             .toggleStyle(.switch)
             .controlSize(.regular)
             .focused($masterHasFocus)
@@ -231,6 +232,7 @@ struct LidSwitchPanel: View {
             Spacer(minLength: 8)
             Toggle(title, isOn: isOn)
                 .labelsHidden()
+                .accessibilityLabel(title)
                 .toggleStyle(.switch)
                 .controlSize(.regular)
                 .accessibilityHint(hint)
@@ -317,7 +319,8 @@ struct LidSwitchPanel: View {
             Button {
                 controller.prepareHelper()
             } label: {
-                Label("Repair Helper", systemImage: "shield.lefthalf.filled")
+                Label(controller.snapshot.helperNeedsUpdate ? "Update Helper" : "Repair Helper",
+                      systemImage: "shield.lefthalf.filled")
             }
             .buttonStyle(.bordered)
             .keyboardShortcut("p", modifiers: [.command])
