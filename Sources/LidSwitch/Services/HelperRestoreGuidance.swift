@@ -9,7 +9,7 @@ extension HelperControlError: LocalizedError {
         case .unavailable:
             return "LidSwitch could not connect to its installed helper."
         case .indeterminateTransport:
-            return "The helper's reply was interrupted or timed out. Sleep restoration is not yet verified."
+            return "The helper's reply was interrupted or timed out. The requested change is not yet verified."
         case let .transport(status):
             if status == Int32(LS_XPC_STATUS_AUTHENTICATION_OR_PROTOCOL_FAILURE.rawValue) {
                 return "LidSwitch could not verify the installed helper's identity or reply."
@@ -20,16 +20,16 @@ extension HelperControlError: LocalizedError {
             case "containment-pending", "containment-extinction-unproven":
                 return "The helper cannot prove that an earlier power-setting process has stopped. Sleep restoration remains blocked for safety."
             default:
-                return "The helper could not safely complete sleep restoration."
+                return "The helper could not safely complete this request."
             }
         case .malformedReply:
-            return "The helper's reply did not prove a safe sleep state."
+            return "The helper's reply could not be verified."
         }
     }
 
-    /// A timeout/interruption may still converge through ordinary RESTORE.
-    /// A rejected containment recovery has already attempted the read-only
-    /// extinction check. Do not automatically retry it or request admin access.
+    /// A timeout/interruption or pending cleanup may still converge through
+    /// ordinary RESTORE. Only a definite failure offers explicit repair.
+    /// This classification never requests administrator access by itself.
     var requiresInlineRepair: Bool {
         switch self {
         case .unavailable, .malformedReply:
@@ -37,8 +37,7 @@ extension HelperControlError: LocalizedError {
         case let .transport(status):
             return status == Int32(LS_XPC_STATUS_AUTHENTICATION_OR_PROTOCOL_FAILURE.rawValue)
         case let .rejected(reason):
-            return reason == "containment-pending"
-                || reason == "containment-extinction-unproven"
+            return reason == "containment-extinction-unproven"
         case .indeterminateTransport:
             return false
         }

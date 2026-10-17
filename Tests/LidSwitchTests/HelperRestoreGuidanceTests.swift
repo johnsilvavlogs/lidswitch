@@ -8,7 +8,7 @@ final class HelperRestoreGuidanceTests: XCTestCase {
         let authentication = Int32(LS_XPC_STATUS_AUTHENTICATION_OR_PROTOCOL_FAILURE.rawValue)
         for error in [
             HelperControlError.unavailable, .transport(authentication), .malformedReply,
-            .rejected("containment-pending"), .rejected("containment-extinction-unproven"),
+            .rejected("containment-extinction-unproven"),
         ] {
             XCTAssertTrue(error.requiresInlineRepair)
             XCTAssertFalse(error.localizedDescription.contains("HelperControlError"))
@@ -17,7 +17,7 @@ final class HelperRestoreGuidanceTests: XCTestCase {
         }
         for error in [
             HelperControlError.indeterminateTransport(60), .indeterminateTransport(57),
-            .transport(12), .rejected("native-state-indeterminate"),
+            .transport(12), .rejected("native-state-indeterminate"), .rejected("containment-pending"),
         ] {
             XCTAssertFalse(error.requiresInlineRepair)
             XCTAssertFalse(error.localizedDescription.contains("HelperControlError"))
