@@ -10,12 +10,13 @@ enum PowerControllerAlert: Equatable {
     // clear it, but only after the exact same safe-idle predicate succeeds.
     case rollbackVerificationFailure(reason: String)
     case operationFailure(message: String)
+    case installedHelperRestoreFailure(message: String)
 
     var message: String {
         switch self {
         case let .rollbackVerificationFailure(reason):
             return "The safety monitor ended this session (\(reason)), and LidSwitch could not verify a complete rollback. Use Restore Sleep before starting another session or quitting."
-        case let .operationFailure(message):
+        case let .operationFailure(message), let .installedHelperRestoreFailure(message):
             return message
         }
     }
@@ -61,7 +62,8 @@ enum PowerControllerPrimaryAction: Equatable, Sendable {
 
     static func resolve(
         snapshot: PowerSnapshot,
-        operationPhase: PowerControllerOperationPhase
+        operationPhase: PowerControllerOperationPhase,
+        restoreRequiresRepair: Bool = false
     ) -> Self {
         if operationPhase == .starting { return .cancelStart }
         // Authoritative safety actions outrank any outstanding rollback waiter.
@@ -70,7 +72,8 @@ enum PowerControllerPrimaryAction: Equatable, Sendable {
         // authenticated helper. If its installation is unavailable or invalid,
         // route to the explicit one-time preparation/repair boundary instead
         // of looping an impossible Restore action.
-        if (snapshot.restoreRequired || operationPhase == .recoveryRequired), !snapshot.helperReady {
+        if (snapshot.restoreRequired || operationPhase == .recoveryRequired || restoreRequiresRepair),
+           !snapshot.helperReady || restoreRequiresRepair {
             return .prepareHelper
         }
         if snapshot.restoreRequired { return .restoreSleep }
@@ -100,8 +103,22 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
         operationPhase: PowerControllerOperationPhase,
         isChecking: Bool,
         keepAwakeRequested: Bool = false,
-        authenticatedOwnedSessionID: UUID? = nil
+        authenticatedOwnedSessionID: UUID? = nil,
+        restoreRequiresRepair: Bool = false
     ) -> Self {
+        if (operationPhase == .idle || operationPhase == .recoveryRequired),
+           authenticatedOwnedSessionID == nil, snapshot.ownedSessionID == nil,
+           (snapshot.restoreRequired || operationPhase == .recoveryRequired || restoreRequiresRepair),
+           restoreRequiresRepair {
+            return Self(
+                title: "Helper repair required",
+                detail: HelperRestoreGuidance.repairDetail,
+                accessibilityState: "LidSwitch, helper repair required. " + HelperRestoreGuidance.repairDetail,
+                menuBarSymbol: "exclamationmark.triangle.fill",
+                panelSymbol: "exclamationmark.triangle.fill",
+                tone: .warning
+            )
+        }
         if operationPhase == .recoveryRequired {
             return Self(
                 title: snapshot.helperReady ? "Restore required" : "Helper repair required",
@@ -1099,6 +1116,9 @@ final class PowerController: ObservableObject {
     @Published private(set) var alert: PowerControllerAlert?
     @Published private(set) var powerPreferences: PowerPreferences = .disabled
     @Published private(set) var keepAwakeRequested = false
+    /// Set only by a typed ordinary-RESTORE failure; a fresh safe-idle proof
+    /// clears it. Merely refreshing a ready installation must not hide it.
+    @Published private(set) var restoreRequiresHelperRepair = false
 
     /// Saved source choices never carry activation authority across launches.
     var isKeepAwakeOn: Bool { keepAwakeRequested || isStarting || activeSessionID != nil }
@@ -1142,7 +1162,8 @@ final class PowerController: ObservableObject {
             operationPhase: effectiveOperationPhase,
             isChecking: isChecking,
             keepAwakeRequested: keepAwakeRequested,
-            authenticatedOwnedSessionID: authenticatedOwnedSessionID
+            authenticatedOwnedSessionID: authenticatedOwnedSessionID,
+            restoreRequiresRepair: restoreRequiresHelperRepair
         )
     }
 
@@ -1152,7 +1173,8 @@ final class PowerController: ObservableObject {
         if effectiveOperationPhase == .idle, authenticatedOwnedSessionID != nil {
             return .stopAndRestore
         }
-        return .resolve(snapshot: snapshot, operationPhase: effectiveOperationPhase)
+        return .resolve(snapshot: snapshot, operationPhase: effectiveOperationPhase,
+                        restoreRequiresRepair: restoreRequiresHelperRepair)
     }
 
     nonisolated private static let refreshInterval: TimeInterval = 30
@@ -1661,10 +1683,23 @@ final class PowerController: ObservableObject {
         Task.detached {
             do {
                 let result = try self.sideEffects.prepareHelper()
-                try Self.requireAdministratorSafeIdle(
-                    result,
-                    fallback: "The helper transaction did not prove a safe idle state."
-                )
+                if case let .recoveryRequired(receipt) = result,
+                   receipt.requiresInstalledHelperRestore {
+                    // Installation only brought back a recovery-only listener.
+                    // The surviving helper must establish its timer, enqueue
+                    // status and publish the safe proof through authenticated
+                    // RESTORE; the administrator receipt is not success.
+                    let restored = try self.sideEffects.restoreSleep()
+                    try Self.requireInstalledHelperSafeIdle(
+                        restored,
+                        fallback: "The repaired helper did not verify normal sleep."
+                    )
+                } else {
+                    try Self.requireAdministratorSafeIdle(
+                        result,
+                        fallback: "The helper transaction did not prove a safe idle state."
+                    )
+                }
                 await MainActor.run {
                     guard self.sessionEpoch == operationEpoch, self.activeSessionID == nil else { return }
                     self.refresh(
@@ -1701,12 +1736,14 @@ final class PowerController: ObservableObject {
         }
         if Self.isVerifiedSafeIdle(next) {
             releaseCleanupOwnership(cleanupOwnership, afterSafeSnapshot: next)
+            restoreRequiresHelperRepair = false
         }
         let prepared = next.helperReady
             && !next.legacyResiduePresent
             && next.sleepDisabledVerified
             && !next.sleepDisabled
             && !next.helperRecoveryRequired
+            && !restoreRequiresHelperRepair
         if prepared {
             alert = nil
             announce(startAfterHelperPreparation && keepAwakeRequested
@@ -2075,6 +2112,15 @@ final class PowerController: ObservableObject {
         keepAwakeRequested = false
         startAfterHelperPreparation = false
         let terminationReplyID = pendingTerminationReply?.id
+        // A stale button/shortcut must not repeat a known-unavailable RESTORE
+        // or silently cross into administrator authorization.
+        if primaryAction == .prepareHelper,
+           snapshot.restoreRequired || operationPhase == .recoveryRequired || restoreRequiresHelperRepair {
+            alert = .installedHelperRestoreFailure(message: HelperRestoreGuidance.repairDetail)
+            announce(HelperRestoreGuidance.repairDetail)
+            resolveTerminationReply(false, expectedID: terminationReplyID)
+            return
+        }
         let expectedOwner = cleanupOwnership
         operationPhase = .endingRestoring
         isBusy = true
@@ -2090,6 +2136,7 @@ final class PowerController: ObservableObject {
 
         Task.detached {
             var recoveryFailureMessage: String?
+            var recoveryRequiresRepair = false
             do {
                 let result = try self.sideEffects.restoreSleep()
                 try Self.requireInstalledHelperSafeIdle(
@@ -2097,11 +2144,8 @@ final class PowerController: ObservableObject {
                     fallback: "The installed helper did not prove a safe idle state."
                 )
             } catch {
-                let detail = (error as NSError).localizedDescription
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                recoveryFailureMessage = detail.isEmpty
-                    ? "The installed helper recovery did not complete."
-                    : detail
+                recoveryFailureMessage = HelperRestoreGuidance.failureDetail(error)
+                recoveryRequiresRepair = (error as? HelperControlError)?.requiresInlineRepair == true
             }
 
             let next = restoreVerificationWaiter()
@@ -2119,12 +2163,17 @@ final class PowerController: ObservableObject {
                 let restored = self.provesCompleteRollback(next, for: expectedOwner)
                 if restored {
                     self.releaseCleanupOwnership(expectedOwner, afterSafeSnapshot: next)
+                    self.restoreRequiresHelperRepair = false
                     self.alert = nil
                     self.announce("System sleep has been restored.")
                 } else {
+                    self.restoreRequiresHelperRepair = recoveryRequiresRepair
                     let detail = recoveryFailureMessage
                         ?? "macOS still reports an active sleep override."
-                    self.alert = .operationFailure(message: "LidSwitch could not verify that the macOS sleep override is off. \(detail) Keep LidSwitch open and try Restore Sleep again.")
+                    let action = self.restoreRequiresHelperRepair
+                        ? "Keep LidSwitch open and choose Repair Helper. macOS will ask for administrator approval."
+                        : "Keep LidSwitch open and try Restore Sleep again."
+                    self.alert = .installedHelperRestoreFailure(message: "Normal sleep has not been verified. \(detail) \(action)")
                     self.announce(self.errorMessage ?? "System sleep restoration could not be verified.")
                 }
                 self.operationPhase = restored ? .idle : .recoveryRequired
@@ -2751,10 +2800,14 @@ final class PowerController: ObservableObject {
         else { return }
 
         releaseCleanupOwnership(cleanupOwnership, afterSafeSnapshot: snapshot)
+        restoreRequiresHelperRepair = false
 
-        if case .rollbackVerificationFailure = alert {
+        switch alert {
+        case .rollbackVerificationFailure, .installedHelperRestoreFailure:
             alert = nil
             announce("System sleep restored. Protection off.")
+        default:
+            break
         }
         if operationPhase == .recoveryRequired {
             operationPhase = .idle

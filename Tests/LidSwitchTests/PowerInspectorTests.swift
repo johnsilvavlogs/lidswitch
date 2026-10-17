@@ -1506,6 +1506,11 @@ final class SessionSafetyTests: XCTestCase {
         XCTAssertEqual(cleanInstall.helperPreparationCTA, .prepare)
         XCTAssertEqual(cleanInstall.helperPreparationCTA.title, "Install Helper")
         XCTAssertEqual(
+            cleanInstall.statusDetail,
+            "Turn on Keep Mac awake to set up the helper. macOS requires administrator approval."
+        )
+        XCTAssertFalse(cleanInstall.statusDetail.contains("Repair Helper"))
+        XCTAssertEqual(
             cleanInstall.helperPreparationCTA.accessibilityHint,
             "Removes old startup behavior and installs the crash-safe on-demand helper. Protection stays off."
         )

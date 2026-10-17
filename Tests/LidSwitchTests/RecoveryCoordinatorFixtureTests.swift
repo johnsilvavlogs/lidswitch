@@ -344,6 +344,77 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         }))
     }
 
+    func testSynchronousDetachedRecoveryPersistsReapThenRequiresFreshExtinction() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+        var observations = 0
+        var reaps = 0
+        XCTAssertTrue(RecoveryCoordinator.reconcileExtinctExpiredContainment(
+            store: fixture.store,
+            clock: { 40 },
+            cleanupStep: { receipt, _, _ in
+                observations += 1
+                if observations == 1 { return .reapLeader }
+                XCTAssertTrue(receipt.leaderReaped)
+                return .extinguished
+            },
+            reapLeader: { attempted in
+                reaps += 1
+                XCTAssertEqual(attempted.reapAttemptCount, 1)
+                XCTAssertEqual(fixture.store.containmentReceiptRecord(), .valid(attempted))
+                return .reaped
+            }
+        ))
+        XCTAssertEqual(observations, 2)
+        XCTAssertEqual(reaps, 1)
+        XCTAssertEqual(fixture.store.containmentReceiptRecord(), .absent)
+        XCTAssertEqual(fixture.store.proof()?.reason, "containment-extinguished-explicit-recovery-required")
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testSynchronousDetachedRecoveryKeepsFenceWithoutFreshExtinction() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+        var observations = 0
+        XCTAssertFalse(RecoveryCoordinator.reconcileExtinctExpiredContainment(
+            store: fixture.store,
+            clock: { 40 },
+            cleanupStep: { _, _, _ in
+                observations += 1
+                return observations == 1 ? .reapLeader : .retainFence
+            },
+            reapLeader: { _ in .reaped }
+        ))
+        guard case let .valid(retained) = fixture.store.containmentReceiptRecord() else {
+            return XCTFail("A successful reap alone removed the containment fence")
+        }
+        XCTAssertTrue(retained.leaderReaped)
+        XCTAssertEqual(fixture.store.proof()?.reason, "containment-pending")
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testSynchronousDetachedRecoveryRetainsECHILDWithoutClaimingExtinction() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        try installDetachedRecoveryRequiredContainment(in: fixture)
+        var observations = 0
+        XCTAssertFalse(RecoveryCoordinator.reconcileExtinctExpiredContainment(
+            store: fixture.store,
+            clock: { 40 },
+            cleanupStep: { _, _, _ in observations += 1; return .reapLeader },
+            reapLeader: { _ in .echild }
+        ))
+        XCTAssertEqual(observations, 1)
+        guard case let .valid(retained) = fixture.store.containmentReceiptRecord() else {
+            return XCTFail("ECHILD removed the containment fence")
+        }
+        XCTAssertFalse(retained.leaderReaped)
+        XCTAssertEqual(retained.reapAttemptCount, 1)
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
     func testDetachedTransitionPendingProofParserRequiresExactSessionShape() throws {
         let terminal = UUID()
         let validTerminal = try XCTUnwrap(RecoveryProof.detachedTransitionPending(

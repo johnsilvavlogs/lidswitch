@@ -605,6 +605,9 @@ struct PowerSnapshot: Equatable, Sendable {
             }
             return "LidSwitch could not verify the power source. Keep Mac awake stays off."
         }
+        if helperPreparationCTA == .prepare {
+            return "Turn on Keep Mac awake to set up the helper. macOS requires administrator approval."
+        }
         return "The helper is unavailable. Choose Repair Helper to restore it. macOS requires administrator approval."
     }
 

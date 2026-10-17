@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.2.16` is a SwiftPM menu bar app with four targets:
+LidSwitch `0.3.0` is a SwiftPM menu bar app with four targets:
 
 - `LidSwitch`: UI, inspection, authenticated raw-XPC client, installation, and recovery controls.
 - `LidSwitchCore`: shared wire schemas, release identity, bounded file primitives, monotonic clock, boot identity, and compatibility policy.
@@ -9,8 +9,8 @@ LidSwitch `0.2.16` is a SwiftPM menu bar app with four targets:
 
 ## Session flow
 
-1. The user prepares helper version `9` in the root-owned `Current` directory; legacy login and shell-helper artifacts are removed while protection remains off.
-2. The user confirms **Start Plugged-In Session** on AC power.
+1. The user prepares helper version `12` in the root-owned `Current` directory; legacy login and shell-helper artifacts are removed while protection remains off.
+2. After setup, the user turns **Keep Mac awake** on with the master switch. Saved **Plugged in** and **On battery** choices select the power sources.
 3. The app begins an authenticated raw-XPC session. The legacy user-owned activation lease is inert diagnostic/migration state only; it cannot authorize the helper.
 4. launchd exposes one authenticated Mach service. It has no `WatchPaths` or `StartInterval` trigger.
 5. The helper verifies the enrolled caller identity, session UUID, current AC power, and settings before changing anything.
@@ -150,6 +150,6 @@ claim is made.
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.2.16`, `CFBundleVersion=11`, and helper version `11` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
+Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.3.0`, `CFBundleVersion=12`, and helper version `12` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

@@ -77,8 +77,11 @@ trap 'status=130; exit 130' INT
 trap 'status=143; exit 143' TERM
 capture_names=(test-build)
 xctest_started=false
+# Keep XCTest's debug configuration and assertions without producing a dSYM
+# larger than the supervisor's fixed per-file output limit.
 if swift_sandbox_run test-build build test-build \
   --build-tests \
+  -debug-info-format none \
   --enable-xctest \
   --disable-swift-testing \
   -Xswiftc -F \
