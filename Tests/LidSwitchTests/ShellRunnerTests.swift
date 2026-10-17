@@ -52,7 +52,7 @@ final class ContainedProcessRunnerFixtureTests: XCTestCase {
         let termIssued = try XCTUnwrap(claimed.markingTermSignalIssued(owner: owner, deadline: 50))
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: termIssued, owner: owner, now: 20, observation: .liveExact), .reapLeader)
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: termIssued, owner: owner, now: 60, observation: .liveExact), .retainFence)
-        let renewed = try XCTUnwrap(termIssued.reclaimed(by: owner, now: 40, until: 70))
+        let renewed = try XCTUnwrap(termIssued.reclaimed(by: owner, now: 60, until: 70))
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: renewed, owner: owner, now: 60, observation: .liveExact), .signalKILL)
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: claimed, owner: owner, now: 60, observation: .memberReusedOrUnknown), .retainFence)
         XCTAssertEqual(ContainedProcessCleanupMachine.next(receipt: claimed, owner: owner, now: 60, observation: .groupOrSessionMismatch), .retainFence)

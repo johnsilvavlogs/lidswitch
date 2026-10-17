@@ -2,7 +2,7 @@
 
 ## Release status
 
-LidSwitch `0.3.0` build `12` is the source candidate identity. Installation and publication require the held build receipt, immutable package manifest, and native acceptance evidence for these exact bytes.
+LidSwitch `0.3.0` build `12` is the source-bound candidate identity, not installed or release-qualified proof. Installation and publication require the held build receipt, immutable package manifest, and native acceptance evidence for these exact bytes.
 
 The release tier is a public manual DMG with ad-hoc signing, no Developer ID
 signature, and no notarization; recipients use Gatekeeper’s **Open Anyway**
