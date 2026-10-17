@@ -67,8 +67,8 @@ final class RecoveryCoordinator {
         // asynchronous queue surviving process exit: synchronously retire only
         // a terminal/kill/ambiguous receipt whose previous owner lease has
         // expired and whose exact members and PGID/SID are stably absent. No
-        // signal, reap retry, or
-        // second power mutation is reachable here.
+        // signal or second power mutation is reachable here. An exact exited
+        // direct child may be reaped once before a fresh extinction check.
         if intent != .startup && !allowReconnect {
             _ = Self.reconcileExtinctExpiredContainment(store: store)
         }
@@ -1190,10 +1190,19 @@ final class RecoveryCoordinator {
     /// after releasing it, then compare-and-swap the same token back under the
     /// lock. A queued task is therefore never allowed to wedge XPC or status.
     @discardableResult
-    static func reconcileExtinctExpiredContainment(store: RecoveryAuthorityStore) -> Bool {
-        let now = UInt64(max(0, MonotonicClock.seconds()) * 1_000_000_000)
+    static func reconcileExtinctExpiredContainment(
+        store: RecoveryAuthorityStore,
+        clock: () -> UInt64 = { UInt64(max(0, MonotonicClock.seconds()) * 1_000_000_000) },
+        cleanupStep: (ContainedProcessReceipt, UUID, UInt64) -> ContainedProcessCleanupMachine.Action = {
+            ContainedProcessRunner.cleanupStep(receipt: $0, owner: $1, now: $2)
+        },
+        reapLeader: (ContainedProcessReceipt) -> ContainedProcessRunner.LeaderReapOutcome = {
+            ContainedProcessRunner.reapLeaderOutcome($0)
+        }
+    ) -> Bool {
+        let now = clock()
         let owner = UUID()
-        guard let receipt = store.withTransaction({ transaction -> ContainedProcessReceipt? in
+        guard var receipt = store.withTransaction({ transaction -> ContainedProcessReceipt? in
             guard case let .valid(current) = store.containmentReceiptRecord(),
                   current.phase == .term || current.phase == .kill || current.phase == .ambiguous
             else { return nil }
@@ -1205,8 +1214,31 @@ final class RecoveryCoordinator {
                 transaction
             )
         }) ?? nil else { return false }
-        guard ContainedProcessRunner.cleanupStep(receipt: receipt, owner: owner, now: now) == .extinguished
-        else { return false }
+        var action = cleanupStep(receipt, owner, clock())
+        if action == .reapLeader {
+            // Persist the bounded attempt before the consuming syscall. Only
+            // fresh exact direct-child birth and nonconsuming exit proof can
+            // reach waitpid; a live or reused process remains fenced.
+            guard let attempted = store.withTransaction({ transaction -> ContainedProcessReceipt? in
+                guard let next = receipt.recordingReapAttempt(owner: owner, deadline: receipt.ownerDeadlineNanoseconds),
+                      store.advanceContainmentReceipt(expected: receipt, next: next, transaction)
+                else { return nil }
+                return next
+            }) ?? nil else { return false }
+            guard reapLeader(attempted) == .reaped else { return false }
+            guard let reaped = store.withTransaction({ transaction -> ContainedProcessReceipt? in
+                guard let next = attempted.markingLeaderReaped(
+                    owner: owner, deadline: attempted.ownerDeadlineNanoseconds
+                ), store.advanceContainmentReceipt(expected: attempted, next: next, transaction)
+                else { return nil }
+                return next
+            }) ?? nil else { return false }
+            receipt = reaped
+            action = cleanupStep(receipt, owner, clock())
+        }
+        // A successful waitpid alone never removes the fence. Every member and
+        // the complete recorded group/session must now be freshly absent.
+        guard action == .extinguished else { return false }
         return store.withTransaction { transaction in
             retireExtinctContainmentReceipt(
                 receipt,

@@ -678,6 +678,10 @@ enum SecureHelperInstaller {
                 intent: intent
             )
         )
+        let recoveryHandoffScript = installedHelperRestoreHandoffScript(
+            transactionID: transactionID,
+            operation: operation
+        )
 
         return """
         set -euo pipefail
@@ -701,6 +705,7 @@ enum SecureHelperInstaller {
         completed=0
         booted_out=0
         recovery_safe=0
+        recovery_handoff=0
         old_current_rotated=0
         new_current_published=0
         plist_published=0
@@ -1062,9 +1067,12 @@ enum SecureHelperInstaller {
         case "$recovery_code" in
           0) recovery_safe=1 ;;
           75)
-            publish_receipt update "$recovery_payload"
-            completed=1
-            exit 75
+            \(recoveryHandoffScript)
+            if [ "$recovery_handoff" != 1 ]; then
+              publish_receipt update "$recovery_payload"
+              completed=1
+              exit 75
+            fi
             ;;
           *) exit 78 ;;
         esac
@@ -1074,7 +1082,33 @@ enum SecureHelperInstaller {
 
         publish_receipt update "$recovery_payload"
         completed=1
+        # Bootstrap alone is not safe-idle proof. The authenticated installed
+        # helper must still finish its timer/status/proof transition.
+        if [ "$recovery_handoff" = 1 ]; then exit 75; fi
         exit 0
+        """
+    }
+
+    /// Match the complete canonical receipt, including this transaction's UUID.
+    /// Only Install may bootstrap a recovery-only listener from these fences;
+    /// all other nonzero recovery results retain the stopped-daemon behavior.
+    static func installedHelperRestoreHandoffScript(
+        transactionID: UUID,
+        operation: AdministratorOperation
+    ) -> String {
+        guard operation == .install else { return ":" }
+        let patterns = AdministratorTransactionReceipt.installedHelperRestoreReasons.map { reason in
+            let receipt = AdministratorTransactionReceipt.terminal(
+                transactionID: transactionID,
+                operation: .install,
+                helperResult: .recoveryRequired(reason: reason)
+            )
+            return q(receipt.payload.trimmingCharacters(in: .newlines))
+        }.joined(separator: " | ")
+        return """
+        case "$recovery_payload" in
+          \(patterns)) recovery_handoff=1 ;;
+        esac
         """
     }
 
