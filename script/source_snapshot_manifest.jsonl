@@ -9,7 +9,7 @@
 {"mode":420,"path":"script/live_state_envelope.sh","schema":"lidswitch-source-manifest-v1","sha256":"37391ffdc823473c65a6b7a717c336a842018aae7e5b6e5e2a8f45170981a58b","size":64298,"type":"file"}
 {"mode":420,"path":"script/release.env","schema":"lidswitch-source-manifest-v1","sha256":"7910b1de64afeccfe5e361e29cc6c85ef164005bc45ad789cacd9fc94ac07e21","size":904,"type":"file"}
 {"mode":493,"path":"script/run_swift_build_safely.sh","schema":"lidswitch-source-manifest-v1","sha256":"7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260","size":9563,"type":"file"}
-{"mode":493,"path":"script/run_swift_tests_safely.sh","schema":"lidswitch-source-manifest-v1","sha256":"fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14","size":7524,"type":"file"}
+{"mode":493,"path":"script/run_swift_tests_safely.sh","schema":"lidswitch-source-manifest-v1","sha256":"732ddf54e583510b758491183322e4446906579afb9697c8c559499715a485b9","size":7688,"type":"file"}
 {"mode":420,"path":"script/safe_file_capability.py","schema":"lidswitch-source-manifest-v1","sha256":"1efa793bfd62d718addaa4bf588e3ba11c1e7b2d601f60b877f60801afddb96c","size":118213,"type":"file"}
 {"mode":420,"path":"script/safe_process_supervisor.py","schema":"lidswitch-source-manifest-v1","sha256":"b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291","size":63684,"type":"file"}
 {"mode":420,"path":"script/swift_sandbox_common.sh","schema":"lidswitch-source-manifest-v1","sha256":"30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985","size":68188,"type":"file"}

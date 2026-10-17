@@ -62,7 +62,7 @@ try: sys.argv=[p]+sys.argv[3:]; exec(code,{"__name__":"__main__","__file__":p,"_
 except BaseException:
  if isinstance(sys.exc_info()[1],SystemExit) and sys.exc_info()[1].code==74: raise
  raise SystemExit(74)
-' script/test_safe_envelope.py 8f3f5824234dd89db365b154ba8e56edaa894d014e46c05df21a267fb72066cb
+' script/test_safe_envelope.py ca6f1cbdd4714bcd17e71915c8d86cd4feb271d46771aa67feb04ecefecfba6a
 ```
 
 Do not substitute bare `python3`, `/usr/bin/env python`, an Anaconda/interpreter
@@ -152,6 +152,8 @@ byte-identical static/private metadata. Transitional reasons such as
 `reconnect-pending` are rejected. Idle postflight
 requires exact safe-idle state. Session replacement, terminalization, helper or
 plist drift, private-ledger mutation, and indeterminate reads fail the wrapper.
+
+The test build keeps its debug configuration and assertions but disables debug-symbol output with `-debug-info-format none`, so dSYM generation cannot exceed the supervisor's unchanged 16 MiB per-file limit.
 
 SwiftPM and XCTest run under `sandbox-exec` with a clean environment, an isolated
 `0700` HOME/TMP/cache/execution tree directly under literal `/private/tmp`, and a

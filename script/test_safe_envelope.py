@@ -85,10 +85,10 @@ STATIC_DATA_FREEZE = {
     "script/live_state_envelope.sh": ("37391ffdc823473c65a6b7a717c336a842018aae7e5b6e5e2a8f45170981a58b", 64298),
     "script/swift_sandbox_common.sh": ("30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985", 68188),
     "script/swift_test_sandbox.sb.in": ("851794f1b655898dd2618ee880c8f9e393687b5362a3a9e81f79ef99f69e23c7", 10822),
-    "script/run_swift_tests_safely.sh": ("fd7fb61dcd22bfb6c1ad20dd863978f2b847bca5cfeb03f6abd672cd43811b14", 7524),
+    "script/run_swift_tests_safely.sh": ("732ddf54e583510b758491183322e4446906579afb9697c8c559499715a485b9", 7688),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("92a1dc84c2a9ce287c6910172c05a7a0cd682b509d9b4195dcd97f868afb2039", 3578),
+    "script/source_snapshot_manifest.jsonl": ("db5eb58613d920b9e5e9f31c5929707453b19ffb52be461dc4e167e0eac8438a", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1457,6 +1457,7 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
         self.assertNotIn('xcode-select', common)
         self.assertNotIn('xcodebuild', common)
         self.assertIn('--build-tests', test_wrapper)
+        self.assertIn('-debug-info-format none', test_wrapper)
         self.assertIn('swift_sandbox_run test-build build test-build', test_wrapper)
         self.assertIn('swift_sandbox_run_xctest test-main "$selector"', test_wrapper)
         self.assertIn('LIDSWITCH_SWIFT_EXEC_ID="$LIDSWITCH_SWIFT_EXEC_ID"', common)
