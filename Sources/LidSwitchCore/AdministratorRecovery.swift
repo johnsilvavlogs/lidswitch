@@ -115,12 +115,30 @@ public struct AdministratorTransactionReceipt: Equatable, Sendable {
     public static let schemaVersion = 1
     public static let maximumBytes = 1_024
 
+    /// These fences can be handed to an installed recovery-only listener.
+    /// They never prove safe idle or authorize a session or power mutation.
+    public static let installedHelperRestoreReasons = [
+        "containment-extinguished-explicit-recovery-required",
+        "detached-transition-pending-pristine",
+        "detached-transition-pending-migrated",
+        "detached-transition-pending-detached",
+        "detached-transition-pending-terminal",
+    ]
+
     public let transactionID: UUID
     public let operation: AdministratorOperation
     public let state: State
     public let outcome: Outcome
     public let sessionID: UUID?
     public let reason: String
+
+    public var requiresInstalledHelperRestore: Bool {
+        operation == .install
+            && state == .terminal
+            && outcome == .recoveryRequired
+            && sessionID == nil
+            && Self.installedHelperRestoreReasons.contains(reason)
+    }
 
     public init(
         transactionID: UUID,

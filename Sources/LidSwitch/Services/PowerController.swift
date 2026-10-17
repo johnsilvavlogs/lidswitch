@@ -73,7 +73,7 @@ enum PowerControllerPrimaryAction: Equatable, Sendable {
         // route to the explicit one-time preparation/repair boundary instead
         // of looping an impossible Restore action.
         if (snapshot.restoreRequired || operationPhase == .recoveryRequired || restoreRequiresRepair),
-           !snapshot.helperReady || snapshot.ordinaryRestoreRequiresRepair || restoreRequiresRepair {
+           !snapshot.helperReady || restoreRequiresRepair {
             return .prepareHelper
         }
         if snapshot.restoreRequired { return .restoreSleep }
@@ -109,7 +109,7 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
         if (operationPhase == .idle || operationPhase == .recoveryRequired),
            authenticatedOwnedSessionID == nil, snapshot.ownedSessionID == nil,
            (snapshot.restoreRequired || operationPhase == .recoveryRequired || restoreRequiresRepair),
-           snapshot.ordinaryRestoreRequiresRepair || restoreRequiresRepair {
+           restoreRequiresRepair {
             return Self(
                 title: "Helper repair required",
                 detail: HelperRestoreGuidance.repairDetail,
@@ -1683,10 +1683,23 @@ final class PowerController: ObservableObject {
         Task.detached {
             do {
                 let result = try self.sideEffects.prepareHelper()
-                try Self.requireAdministratorSafeIdle(
-                    result,
-                    fallback: "The helper transaction did not prove a safe idle state."
-                )
+                if case let .recoveryRequired(receipt) = result,
+                   receipt.requiresInstalledHelperRestore {
+                    // Installation only brought back a recovery-only listener.
+                    // The surviving helper must establish its timer, enqueue
+                    // status and publish the safe proof through authenticated
+                    // RESTORE; the administrator receipt is not success.
+                    let restored = try self.sideEffects.restoreSleep()
+                    try Self.requireInstalledHelperSafeIdle(
+                        restored,
+                        fallback: "The repaired helper did not verify normal sleep."
+                    )
+                } else {
+                    try Self.requireAdministratorSafeIdle(
+                        result,
+                        fallback: "The helper transaction did not prove a safe idle state."
+                    )
+                }
                 await MainActor.run {
                     guard self.sessionEpoch == operationEpoch, self.activeSessionID == nil else { return }
                     self.refresh(
@@ -2155,7 +2168,6 @@ final class PowerController: ObservableObject {
                     self.announce("System sleep has been restored.")
                 } else {
                     self.restoreRequiresHelperRepair = recoveryRequiresRepair
-                        || next.ordinaryRestoreRequiresRepair
                     let detail = recoveryFailureMessage
                         ?? "macOS still reports an active sleep override."
                     let action = self.restoreRequiresHelperRepair

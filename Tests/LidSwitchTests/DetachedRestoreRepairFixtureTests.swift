@@ -6,24 +6,25 @@ import XCTest
 
 final class DetachedRestoreRepairFixtureTests: XCTestCase {
     @MainActor
-    func testReportedDetachedContainmentOffersInlineRepairWithoutSendingAnotherRestore() async {
+    func testPublicContainmentWarningStillAttemptsPromptFreeRestore() async {
         let fixture = Fixture(reason: "containment-extinction-unproven")
+        fixture.update { $0.restoreError = nil; $0.restoreConverges = true }
         let controller = makeController(fixture)
         controller.refresh()
         await settle(controller)
         XCTAssertTrue(controller.snapshot.helperReady)
         XCTAssertTrue(controller.snapshot.sleepDisabled)
-        XCTAssertEqual(controller.primaryAction, .prepareHelper)
-        XCTAssertEqual(controller.displayedStatus.title, "Helper repair required")
-        XCTAssertTrue(controller.displayedStatus.detail.contains("administrator"))
-        XCTAssertTrue(controller.snapshot.canPrepareHelper)
+        XCTAssertEqual(controller.primaryAction, .restoreSleep)
         XCTAssertFalse(controller.isKeepAwakeOn)
 
-        controller.restoreNow() // stale UI/shortcut cannot spin RESTORE
+        controller.restoreNow()
         await settle(controller)
-        XCTAssertEqual(fixture.read { $0.restores }, 0)
-        XCTAssertEqual(fixture.read { $0.repairs }, 0) // never implicit authorization
-        XCTAssertTrue(controller.errorMessage?.contains("Repair Helper") == true)
+        XCTAssertEqual(fixture.read { $0.restores }, 1)
+        XCTAssertEqual(fixture.read { $0.repairs }, 0)
+        XCTAssertFalse(controller.snapshot.sleepDisabled)
+        XCTAssertNil(controller.errorMessage)
+        XCTAssertEqual(controller.primaryAction, .startSession)
+        XCTAssertFalse(controller.isKeepAwakeOn)
     }
 
     @MainActor
@@ -130,10 +131,55 @@ final class DetachedRestoreRepairFixtureTests: XCTestCase {
         await settle(controller)
         XCTAssertEqual(fixture.read { $0.repairs }, 1)
         XCTAssertTrue(controller.snapshot.sleepDisabled)
-        XCTAssertEqual(controller.primaryAction, .prepareHelper)
+        XCTAssertEqual(controller.primaryAction, .restoreSleep)
         XCTAssertEqual(controller.displayedStatus.tone, .warning)
         XCTAssertFalse(controller.isKeepAwakeOn)
         XCTAssertNotNil(controller.errorMessage)
+    }
+
+    @MainActor
+    func testInstallHandoffFinishesThroughAuthenticatedRestoreWithoutRearming() async {
+        let fixture = Fixture(reason: "containment-extinction-unproven")
+        fixture.update {
+            $0.repairConverges = false
+            $0.repairReason = "containment-extinguished-explicit-recovery-required"
+            $0.restoreError = nil
+            $0.restoreConverges = true
+        }
+        let controller = makeController(fixture)
+        controller.refresh()
+        await settle(controller)
+        controller.prepareHelper()
+        await settle(controller)
+        XCTAssertEqual(fixture.read { $0.repairs }, 1)
+        XCTAssertEqual(fixture.read { $0.restores }, 1)
+        XCTAssertFalse(controller.snapshot.sleepDisabled)
+        XCTAssertNil(controller.errorMessage)
+        XCTAssertFalse(controller.isKeepAwakeOn)
+        XCTAssertEqual(controller.primaryAction, .startSession)
+        XCTAssertTrue(controller.powerPreferences.allowPluggedInKeepAwake)
+        XCTAssertTrue(controller.powerPreferences.allowBatteryKeepAwake)
+    }
+
+    @MainActor
+    func testInstallHandoffCannotCompleteWithoutAuthenticatedRestore() async {
+        let fixture = Fixture(reason: "containment-extinction-unproven")
+        fixture.update {
+            $0.repairConverges = false
+            $0.repairReason = "containment-extinguished-explicit-recovery-required"
+            $0.restoreError = .unavailable
+        }
+        let controller = makeController(fixture)
+        controller.refresh()
+        await settle(controller)
+        controller.prepareHelper()
+        await settle(controller)
+        XCTAssertEqual(fixture.read { $0.restores }, 1)
+        XCTAssertTrue(controller.snapshot.sleepDisabled)
+        XCTAssertNotNil(controller.errorMessage)
+        XCTAssertTrue(controller.snapshot.restoreRequired)
+        XCTAssertEqual(controller.primaryAction, .restoreSleep)
+        XCTAssertFalse(controller.isKeepAwakeOn)
     }
 
     @MainActor
@@ -182,6 +228,12 @@ final class DetachedRestoreRepairFixtureTests: XCTestCase {
             beginActivity: base.beginActivity, endActivity: base.endActivity,
             prepareHelper: {
                 fixture.update { $0.repairs += 1; if $0.repairConverges { $0.safe = true } }
+                if let reason = fixture.read({ $0.repairReason }) {
+                    return .recoveryRequired(.init(
+                        transactionID: UUID(), operation: .install, state: .terminal,
+                        outcome: .recoveryRequired, sessionID: nil, reason: reason
+                    ))
+                }
                 return .safeIdle(.init(transactionID: UUID(), operation: .install,
                                        state: .terminal, outcome: .safeIdle, sessionID: nil, reason: "fixture"))
             },
@@ -222,6 +274,7 @@ final class DetachedRestoreRepairFixtureTests: XCTestCase {
         var restoreError: HelperControlError? = .rejected("containment-pending")
         var restoreConverges = false
         var repairConverges = true
+        var repairReason: String?
     }
 
     private final class Fixture: @unchecked Sendable {

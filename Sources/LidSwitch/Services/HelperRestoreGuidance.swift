@@ -44,17 +44,6 @@ extension HelperControlError: LocalizedError {
     }
 }
 
-extension PowerSnapshot {
-    /// The public projection is only a reason to offer the existing explicit
-    /// repair transaction. It never authorizes removing a containment fence.
-    /// A pending cleanup alone is not evidence of a permanently blocked route.
-    var ordinaryRestoreRequiresRepair: Bool {
-        ownedSessionID == nil
-            && helperRecoveryRequired
-            && helperStatus?.reason == "containment-extinction-unproven"
-    }
-}
-
 enum HelperRestoreGuidance {
     static let repairDetail = "Normal sleep has not been verified. Choose Repair Helper to run the administrator recovery check. Keep LidSwitch open until restoration is verified."
 

@@ -84,7 +84,12 @@ public struct ContainedProcessMember: Equatable, Sendable {
 /// in Core so the runner cannot silently choose an authority directory.
 public struct ContainedProcessReceipt: Equatable, Sendable {
     public enum CleanupPhase: String, Equatable, Sendable { case pending, term, kill, extinguished, ambiguous }
+    public enum DeadlineClock: String, Equatable, Sendable { case continuous, legacyMixed = "legacy_mixed" }
     public let schema: Int
+    public let deadlineClock: DeadlineClock
+    /// One additional consuming attempt is reserved for a freshly proved
+    /// exited direct child after live polling has consumed its eight attempts.
+    public let exitedLeaderReapAttempted: Bool
     public let token: UUID
     public let executable: String
     public let commandFingerprint: String
@@ -104,14 +109,25 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
     public let reapAttemptCount: UInt8
     public let cleanupOwnerToken: UUID?
     public let ownerDeadlineNanoseconds: UInt64
+    /// The first cleanup claim fixes TERM's grace boundary. Renewing the
+    /// owner's lease cannot defer escalation or restore old signal authority.
+    public let termEscalationDeadlineNanoseconds: UInt64
 
     public init(token: UUID, executable: String, commandFingerprint: String,
                 leader: ContainedProcessIdentity, members: [ContainedProcessMember],
                 processGroupID: Int32, sessionID: Int32, rootDeadlineNanoseconds: UInt64,
                 cleanupDeadlineNanoseconds: UInt64, noSecondMutation: Bool = true,
                 phase: CleanupPhase = .pending, termSignalIssued: Bool = false, killSignalIssued: Bool = false, leaderReaped: Bool = false, reapAttemptCount: UInt8 = 0, cleanupOwnerToken: UUID? = nil,
-                ownerDeadlineNanoseconds: UInt64 = 0) {
-        self.schema = 4; self.token = token; self.executable = executable
+                ownerDeadlineNanoseconds: UInt64 = 0, schema: Int = 5,
+                termEscalationDeadlineNanoseconds: UInt64? = nil,
+                deadlineClock: DeadlineClock? = nil, exitedLeaderReapAttempted: Bool = false) {
+        // Schema 4 mixed uptime command deadlines with continuous owner
+        // deadlines. Preserve its identity/fence, but never reinterpret those
+        // old numbers as fresh signal authority.
+        self.schema = schema; self.token = token; self.executable = executable
+        let resolvedClock = deadlineClock ?? (schema == 4 ? DeadlineClock.legacyMixed : .continuous)
+        self.deadlineClock = resolvedClock
+        self.exitedLeaderReapAttempted = exitedLeaderReapAttempted
         self.commandFingerprint = commandFingerprint; self.leader = leader
         self.members = members; self.processGroupID = processGroupID; self.sessionID = sessionID
         self.rootDeadlineNanoseconds = rootDeadlineNanoseconds
@@ -119,6 +135,8 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
         self.noSecondMutation = noSecondMutation
         self.phase = phase; self.termSignalIssued = termSignalIssued; self.killSignalIssued = killSignalIssued; self.leaderReaped = leaderReaped; self.reapAttemptCount = reapAttemptCount; self.cleanupOwnerToken = cleanupOwnerToken
         self.ownerDeadlineNanoseconds = ownerDeadlineNanoseconds
+        self.termEscalationDeadlineNanoseconds = termEscalationDeadlineNanoseconds
+            ?? (resolvedClock == .continuous && phase != .pending ? min(ownerDeadlineNanoseconds, cleanupDeadlineNanoseconds) : 0)
     }
 
     public func claimed(by owner: UUID, until deadline: UInt64) -> ContainedProcessReceipt? {
@@ -127,7 +145,9 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: .term, termSignalIssued: false, killSignalIssued: false, leaderReaped: false, reapAttemptCount: 0, cleanupOwnerToken: owner,
-                     ownerDeadlineNanoseconds: deadline)
+                     ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: deadlineClock == .continuous ? min(deadline, cleanupDeadlineNanoseconds) : 0,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     public func reclaimed(by owner: UUID, now: UInt64, until deadline: UInt64) -> ContainedProcessReceipt? {
@@ -138,12 +158,14 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      // Restart only changes ownership.  Rewinding KILL to TERM
                      // would create a second mutation path after a crash.
                      noSecondMutation: noSecondMutation, phase: phase, termSignalIssued: termSignalIssued, killSignalIssued: killSignalIssued, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: owner,
-                     ownerDeadlineNanoseconds: deadline)
+                     ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
-    /// An ambiguity fence may be reclaimed only for a new read-only kernel
-    /// extinction proof. It deliberately remains in `.ambiguous`, so a live,
-    /// reused, mismatched, or incomplete inventory can never regain signal
+    /// An ambiguity fence may be reclaimed only for exact-child reaping or a
+    /// new kernel extinction proof. It remains `.ambiguous`, so a live,
+    /// reused, mismatched, or incomplete inventory never regains signal
     /// authority after the original cleanup owner is gone.
     public func reclaimedAmbiguousForExtinctionProof(
         by owner: UUID,
@@ -157,7 +179,9 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      noSecondMutation: noSecondMutation, phase: .ambiguous,
                      termSignalIssued: termSignalIssued, killSignalIssued: killSignalIssued,
                      leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount,
-                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline)
+                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     public func advancing(to next: CleanupPhase, owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
@@ -170,7 +194,9 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: next, termSignalIssued: termSignalIssued, killSignalIssued: next == .kill ? false : killSignalIssued, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: owner,
-                     ownerDeadlineNanoseconds: deadline)
+                     ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     /// The legacy `leader_reaped` storage bit is the durable leader-lifecycle
@@ -186,53 +212,68 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: phase, termSignalIssued: termSignalIssued,
                      killSignalIssued: killSignalIssued, leaderReaped: true, reapAttemptCount: reapAttemptCount,
-                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline)
+                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     /// The TERM intent is committed before the signal.  On restart a committed
     /// intent is observed/reaped rather than emitted again.
     public func markingTermSignalIssued(owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
-        guard phase == .term, !termSignalIssued, cleanupOwnerToken == owner, deadline >= ownerDeadlineNanoseconds else { return nil }
+        guard schema == 5, deadlineClock == .continuous, phase == .term, !termSignalIssued, cleanupOwnerToken == owner, deadline >= ownerDeadlineNanoseconds else { return nil }
         return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: .term, termSignalIssued: true, killSignalIssued: false, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: owner,
-                     ownerDeadlineNanoseconds: deadline)
+                     ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     public func markingKillSignalIssued(owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
-        guard phase == .kill, !killSignalIssued, termSignalIssued, cleanupOwnerToken == owner,
+        guard schema == 5, deadlineClock == .continuous, phase == .kill, !killSignalIssued, termSignalIssued, cleanupOwnerToken == owner,
               deadline >= ownerDeadlineNanoseconds else { return nil }
         return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: .kill, termSignalIssued: true, killSignalIssued: true, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount,
-                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline)
+                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     public func markingLeaderReaped(owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
         guard !leaderReaped, cleanupOwnerToken == owner, deadline >= ownerDeadlineNanoseconds,
-              phase == .term || phase == .kill else { return nil }
+              phase == .term || phase == .kill || phase == .ambiguous else { return nil }
         return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: phase, termSignalIssued: termSignalIssued,
                      killSignalIssued: killSignalIssued, leaderReaped: true, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: owner,
-                     ownerDeadlineNanoseconds: deadline)
+                     ownerDeadlineNanoseconds: deadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
-    /// Commit that this owner consumed one bounded waitpid observation before
-    /// making it.  This lets a restart distinguish a genuinely unproven reap
-    /// from a fresh receipt and gives deadline handling a durable cap.
+    /// Commit the consuming attempt before waitpid. Eight polling attempts
+    /// are separate from one final exact-exited-child attempt, so an old poll
+    /// budget cannot permanently reserve a zombie PID. The final attempt may
+    /// upgrade storage, but explicitly preserves legacy mixed-clock fencing.
     public func recordingReapAttempt(owner: UUID, deadline: UInt64) -> ContainedProcessReceipt? {
         guard cleanupOwnerToken == owner, deadline >= ownerDeadlineNanoseconds,
-              !leaderReaped, (phase == .term || phase == .kill), reapAttemptCount < 8 else { return nil }
+              !leaderReaped, (phase == .term || phase == .kill || phase == .ambiguous),
+              reapAttemptCount <= 8, reapAttemptCount < 8 || !exitedLeaderReapAttempted else { return nil }
+        let exactExitedAllowance = reapAttemptCount == 8
         return .init(token: token, executable: executable, commandFingerprint: commandFingerprint,
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: cleanupDeadlineNanoseconds,
                      noSecondMutation: noSecondMutation, phase: phase, termSignalIssued: termSignalIssued,
-                     killSignalIssued: killSignalIssued, leaderReaped: false, reapAttemptCount: reapAttemptCount + 1,
-                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline)
+                     killSignalIssued: killSignalIssued, leaderReaped: false,
+                     reapAttemptCount: exactExitedAllowance ? reapAttemptCount : reapAttemptCount + 1,
+                     cleanupOwnerToken: owner, ownerDeadlineNanoseconds: deadline, schema: exactExitedAllowance ? 5 : schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock,
+                     exitedLeaderReapAttempted: exactExitedAllowance || exitedLeaderReapAttempted)
     }
 
     /// The synchronous caller can only extend a pending receipt within its
@@ -245,7 +286,9 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
                      leader: leader, members: members, processGroupID: processGroupID, sessionID: sessionID,
                      rootDeadlineNanoseconds: rootDeadlineNanoseconds, cleanupDeadlineNanoseconds: deadline,
                      noSecondMutation: noSecondMutation, phase: phase, termSignalIssued: termSignalIssued,
-                     killSignalIssued: killSignalIssued, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: nil, ownerDeadlineNanoseconds: 0)
+                     killSignalIssued: killSignalIssued, leaderReaped: leaderReaped, reapAttemptCount: reapAttemptCount, cleanupOwnerToken: nil, ownerDeadlineNanoseconds: 0, schema: schema,
+                     termEscalationDeadlineNanoseconds: termEscalationDeadlineNanoseconds,
+                     deadlineClock: deadlineClock, exitedLeaderReapAttempted: exitedLeaderReapAttempted)
     }
 
     public var storagePayload: String {
@@ -253,28 +296,37 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
             let executable = Data(member.executable.utf8).base64EncodedString()
             return "\(member.identity.pid):\(member.identity.startSeconds):\(member.identity.startMicroseconds):\(executable):\(member.commandFingerprint)"
         }.joined(separator: ",")
-        return [
-            "schema=4", "token=\(token.uuidString.lowercased())", "executable=\(executable)",
+        var fields = [
+            "schema=\(schema)", "token=\(token.uuidString.lowercased())", "executable=\(executable)",
             "fingerprint=\(commandFingerprint)",
             "leader=\(leader.pid):\(leader.startSeconds):\(leader.startMicroseconds)",
             "members=\(members)", "pgid=\(processGroupID)", "sid=\(sessionID)",
             "root_deadline=\(rootDeadlineNanoseconds)", "cleanup_deadline=\(cleanupDeadlineNanoseconds)",
             "no_second_mutation=\(noSecondMutation ? "1" : "0")", "phase=\(phase.rawValue)", "term_signal_issued=\(termSignalIssued ? "1" : "0")", "kill_signal_issued=\(killSignalIssued ? "1" : "0")", "leader_reaped=\(leaderReaped ? "1" : "0")", "reap_attempts=\(reapAttemptCount)",
             "owner=\(cleanupOwnerToken?.uuidString.lowercased() ?? "none")",
-            "owner_deadline=\(ownerDeadlineNanoseconds)", ""
-        ].joined(separator: "\n")
+            "owner_deadline=\(ownerDeadlineNanoseconds)"
+        ]
+        if schema == 5 {
+            fields.append("term_escalation_deadline=\(termEscalationDeadlineNanoseconds)")
+            fields.append("deadline_clock=\(deadlineClock.rawValue)")
+            fields.append("exited_reap_attempted=\(exitedLeaderReapAttempted ? "1" : "0")")
+        }
+        fields.append("")
+        return fields.joined(separator: "\n")
     }
 
     public static func parse(_ raw: String) -> ContainedProcessReceipt? {
         let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
-        guard lines.last == "", lines.count == 19 else { return nil }
+        guard lines.last == "", [19, 22].contains(lines.count) else { return nil }
         var fields: [String: String] = [:]
         for line in lines.dropLast() {
             let pieces = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
             guard pieces.count == 2, !pieces[0].isEmpty, fields[String(pieces[0])] == nil else { return nil }
             fields[String(pieces[0])] = String(pieces[1])
         }
-        guard fields["schema"] == "4", fields["no_second_mutation"] == "1",
+        guard let schema = Int(fields["schema"] ?? ""), [4, 5].contains(schema),
+              fields["schema"] == String(schema), lines.count == (schema == 5 ? 22 : 19),
+              fields["no_second_mutation"] == "1",
               let tokenRaw = fields["token"], tokenRaw == tokenRaw.lowercased(), let token = UUID(uuidString: tokenRaw),
               let executable = fields["executable"], ["/usr/bin/pmset", "/bin/launchctl"].contains(executable),
               let fingerprint = fields["fingerprint"], fingerprint.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil,
@@ -290,6 +342,22 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
               let attemptsRaw = fields["reap_attempts"], let attempts = UInt8(attemptsRaw), attempts <= 8,
               let ownerRaw = fields["owner"], let ownerDeadline = UInt64(fields["owner_deadline"] ?? "")
         else { return nil }
+        let escalation: UInt64
+        let clock: DeadlineClock
+        let exitedAttempted: Bool
+        if schema == 5 {
+            guard let clockRaw = fields["deadline_clock"], let parsedClock = DeadlineClock(rawValue: clockRaw),
+                  let attemptedRaw = fields["exited_reap_attempted"], let attempted = parseFlag(attemptedRaw),
+                  !attempted || (attempts == 8 && phase != .pending),
+                  let value = UInt64(fields["term_escalation_deadline"] ?? ""), value <= cleanup,
+                  (parsedClock == .continuous && phase != .pending) ? value > 0 : value == 0
+            else { return nil }
+            escalation = value; clock = parsedClock; exitedAttempted = attempted
+        } else {
+            guard fields["term_escalation_deadline"] == nil, fields["deadline_clock"] == nil,
+                  fields["exited_reap_attempted"] == nil else { return nil }
+            escalation = 0; clock = .legacyMixed; exitedAttempted = false
+        }
         let memberEntries = membersRaw.split(separator: ",", omittingEmptySubsequences: false)
         let members = memberEntries.compactMap { parseMember(String($0)) }
         guard !members.isEmpty, members.count == memberEntries.count, members.count <= 64,
@@ -297,16 +365,19 @@ public struct ContainedProcessReceipt: Equatable, Sendable {
               Set(members.map { "\($0.identity.pid):\($0.identity.startSeconds):\($0.identity.startMicroseconds)" }).count == members.count
         else { return nil }
         let owner = ownerRaw == "none" ? nil : (ownerRaw == ownerRaw.lowercased() ? UUID(uuidString: ownerRaw) : nil)
+        let validOwnerDeadline = schema == 5 ? ownerDeadline > 0 : ownerDeadline >= root
         guard (phase == .pending && !termIssued && !killIssued && !leaderReaped && attempts == 0 && owner == nil && ownerDeadline == 0)
-                || (phase == .term && !killIssued && owner != nil && ownerDeadline >= root)
-                || (phase == .kill && termIssued && owner != nil && ownerDeadline >= root)
-                || (phase == .extinguished && leaderReaped && owner != nil && ownerDeadline >= root)
-                || (phase == .ambiguous && owner != nil && ownerDeadline >= root)
+                || (phase == .term && !killIssued && owner != nil && validOwnerDeadline)
+                || (phase == .kill && termIssued && owner != nil && validOwnerDeadline)
+                || (phase == .extinguished && leaderReaped && owner != nil && validOwnerDeadline)
+                || (phase == .ambiguous && owner != nil && validOwnerDeadline)
         else { return nil }
         return .init(token: token, executable: executable, commandFingerprint: fingerprint,
                      leader: leader, members: members, processGroupID: pgid, sessionID: sid,
                      rootDeadlineNanoseconds: root, cleanupDeadlineNanoseconds: cleanup,
-                     phase: phase, termSignalIssued: termIssued, killSignalIssued: killIssued, leaderReaped: leaderReaped, reapAttemptCount: attempts, cleanupOwnerToken: owner, ownerDeadlineNanoseconds: ownerDeadline)
+                     phase: phase, termSignalIssued: termIssued, killSignalIssued: killIssued, leaderReaped: leaderReaped, reapAttemptCount: attempts, cleanupOwnerToken: owner, ownerDeadlineNanoseconds: ownerDeadline, schema: schema,
+                     termEscalationDeadlineNanoseconds: escalation,
+                     deadlineClock: clock, exitedLeaderReapAttempted: exitedAttempted)
     }
 
     private static func parseIdentity(_ raw: String) -> ContainedProcessIdentity? {
@@ -355,6 +426,9 @@ public struct ContainedProcessResult: Equatable, Sendable {
 public enum ContainedProcessCleanupMachine {
     public enum Observation: Equatable, Sendable {
         case liveExact
+        /// The recorded birth tuple is still a direct child and waitid has
+        /// observed its exit without consuming it. No argv or signal is needed.
+        case exitedDirectChildExact
         case leaderReapedAndExtinct
         case memberReusedOrUnknown
         case groupOrSessionMismatch
@@ -377,13 +451,28 @@ public enum ContainedProcessCleanupMachine {
             // prove the bound PGID/SID empty. This closes restart recovery even
             // when waitpid correctly reports ECHILD to a later non-parent.
             return .extinguished
+        case .exitedDirectChildExact:
+            // Reaping an already exited exact child has no signal authority.
+            // It remains valid after the command deadline or ambiguity, but
+            // still requires the current owner and the persisted attempt cap.
+            guard now < receipt.ownerDeadlineNanoseconds, !receipt.leaderReaped,
+                  (receipt.reapAttemptCount < 8 || !receipt.exitedLeaderReapAttempted),
+                  receipt.phase == .term || receipt.phase == .kill || receipt.phase == .ambiguous
+            else { return .retainFence }
+            return .reapLeader
         case .liveExact:
-            guard now < receipt.cleanupDeadlineNanoseconds else { return .retainFence }
+            guard receipt.schema == 5, receipt.deadlineClock == .continuous,
+                  now < receipt.cleanupDeadlineNanoseconds,
+                  now < receipt.ownerDeadlineNanoseconds else { return .retainFence }
             switch receipt.phase {
             case .term:
                 if !receipt.termSignalIssued { return .signalTERM }
-                return now < receipt.ownerDeadlineNanoseconds ? .reapLeader : .signalKILL
-            case .kill: return receipt.killSignalIssued ? .reapLeader : .signalKILL
+                // Ownership renewal must never move the first claim's fixed
+                // cleanup timeline, even when transfer preceded command timeout.
+                guard receipt.termEscalationDeadlineNanoseconds > 0 else { return .retainFence }
+                if now >= receipt.termEscalationDeadlineNanoseconds { return .signalKILL }
+                return receipt.reapAttemptCount < 8 && !receipt.leaderReaped ? .reapLeader : .retainFence
+            case .kill: return receipt.killSignalIssued ? (receipt.reapAttemptCount < 8 && !receipt.leaderReaped ? .reapLeader : .retainFence) : .signalKILL
             case .pending, .extinguished, .ambiguous: return .retainFence
             }
         }
@@ -413,7 +502,7 @@ public extension ContainedProcessRunner {
         }
     }
 
-    enum LeaderReapOutcome: Equatable, Sendable { case reaped, live, echild, interruptedLimit, failed(Int32) }
+    enum LeaderReapOutcome: Equatable, Sendable { case reaped, live, echild, identityUnproven, interruptedLimit, failed(Int32) }
 
     /// Parent-only, nonblocking reap proof. EINTR is bounded and ECHILD is
     /// typed explicitly; neither is extinction proof.
@@ -422,10 +511,33 @@ public extension ContainedProcessRunner {
     }
 
     static func reapLeaderOutcome(_ receipt: ContainedProcessReceipt) -> LeaderReapOutcome {
-        reapLeaderOutcome(receipt) { pid in
+        reapLeaderOutcome(receipt, now: containmentNowNanoseconds(), observeExitedChild: { leaderExitObservation($0) }) { pid in
             var status: Int32 = 0
+            errno = 0
             let result = waitpid(pid, &status, WNOHANG)
             return (result, errno)
+        }
+    }
+
+    /// Revalidate exact direct-child exit immediately before the consuming
+    /// waitpid. Neither a stale reducer action nor ECHILD can close the fence.
+    internal static func reapLeaderOutcome(
+        _ receipt: ContainedProcessReceipt,
+        now: UInt64,
+        observeExitedChild: (ContainedProcessReceipt) -> LeaderExitObservation,
+        waitNoHang: (pid_t) -> (result: pid_t, error: Int32)
+    ) -> LeaderReapOutcome {
+        guard receipt.noSecondMutation, receipt.cleanupOwnerToken != nil, now < receipt.ownerDeadlineNanoseconds,
+              !receipt.leaderReaped, (1...8).contains(receipt.reapAttemptCount),
+              receipt.phase == .term || receipt.phase == .kill || receipt.phase == .ambiguous
+        else { return .identityUnproven }
+        switch observeExitedChild(receipt) {
+        case .exitedExact: return reapLeaderOutcome(receipt, waitNoHang: waitNoHang)
+        case .notExited: return .live
+        case .notChild: return .echild
+        case .identityUnproven: return .identityUnproven
+        case .interruptedLimit: return .interruptedLimit
+        case let .failed(error): return .failed(error)
         }
     }
 
@@ -459,38 +571,219 @@ public extension ContainedProcessRunner {
         }
     }
 
+    internal enum CleanupProcessEvidence: Equatable {
+        case absent
+        case present(ContainedProcessIdentity, processGroup: Int32, session: Int32)
+        // Exited processes can lose getpgid/getsid/argv access. The birth
+        // tuple and kernel parent remain available in zombie-inclusive BSD info.
+        case exited(ContainedProcessIdentity, parent: Int32, processGroup: Int32)
+        case unknown
+    }
+
+    internal enum CleanupInventoryEvidence: Equatable {
+        case exact([ContainedProcessIdentity])
+        case indeterminate
+    }
+
+    internal enum LeaderExitObservation: Equatable {
+        case exitedExact, notExited, notChild, identityUnproven, interruptedLimit
+        case failed(Int32)
+    }
+
     private static func cleanupObservation(_ receipt: ContainedProcessReceipt) -> ContainedProcessCleanupMachine.Observation {
-        var live = 0
+        cleanupObservation(
+            receipt,
+            inspectProcess: cleanupProcessEvidence,
+            fingerprint: { exactCommandFingerprint($0, executable: $1) },
+            exitedChild: { leaderExitObservation($0) },
+            inventory: { cleanupInventory(receipt) }
+        )
+    }
+
+    /// Production collector seam. A zombie can lose executable/argv while its
+    /// birth tuple and parent-owned wait status remain authoritative for reap.
+    /// The exception applies only to the exact exited leader; every other
+    /// member and both full inventories still have to be proved.
+    internal static func cleanupObservation(
+        _ receipt: ContainedProcessReceipt,
+        inspectProcess: (pid_t) -> CleanupProcessEvidence,
+        fingerprint: (pid_t, String) -> String?,
+        exitedChild: (ContainedProcessReceipt) -> LeaderExitObservation,
+        inventory: () -> CleanupInventoryEvidence
+    ) -> ContainedProcessCleanupMachine.Observation {
+        var present: [ContainedProcessIdentity] = []
+        var exactExitedLeader = false
         for member in receipt.members {
-            guard let current = processIdentity(member.identity.pid) else { continue }
-            guard current == member.identity else { return .memberReusedOrUnknown }
-            guard getpgid(member.identity.pid) == receipt.processGroupID, getsid(member.identity.pid) == receipt.sessionID else {
-                return .groupOrSessionMismatch
+            switch inspectProcess(member.identity.pid) {
+            case .absent: continue
+            case .unknown: return .memberReusedOrUnknown
+            case let .exited(current, parent, processGroup):
+                guard current == member.identity else { return .memberReusedOrUnknown }
+                guard processGroup == 0 || processGroup == receipt.processGroupID else { return .groupOrSessionMismatch }
+                guard current == receipt.leader, !receipt.leaderReaped, parent == getpid(),
+                      exitedChild(receipt) == .exitedExact else { return .memberReusedOrUnknown }
+                exactExitedLeader = true
+            case let .present(current, processGroup, session):
+                guard current == member.identity else { return .memberReusedOrUnknown }
+                guard processGroup == receipt.processGroupID, session == receipt.sessionID else {
+                    return .groupOrSessionMismatch
+                }
+                if member.identity == receipt.leader, !receipt.leaderReaped,
+                   exitedChild(receipt) == .exitedExact {
+                    exactExitedLeader = true
+                } else {
+                    guard fingerprint(member.identity.pid, member.executable) == member.commandFingerprint else {
+                        return .memberReusedOrUnknown
+                    }
+                }
+                present.append(current)
             }
-            guard exactCommandFingerprint(member.identity.pid, executable: member.executable) == member.commandFingerprint else {
-                return .memberReusedOrUnknown
-            }
-            live += 1
         }
-        let firstGroup = exactInventory(processGroup: receipt.processGroupID, session: receipt.sessionID)
-        let secondGroup = exactInventory(processGroup: receipt.processGroupID, session: receipt.sessionID)
+        let firstGroup = inventory()
+        let secondGroup = inventory()
         guard case let .exact(first) = firstGroup, case let .exact(second) = secondGroup, first == second else {
             return .incompleteInventory
         }
-        // A member arriving after the receipt or an unexpected process in the
-        // saved PGID/SID is not ours to signal and prevents extinction proof.
-        guard first.allSatisfy({ identity in receipt.members.contains(where: { $0.identity == identity }) }) else { return .incompleteInventory }
-        guard live == 0, first.isEmpty else { return .liveExact }
+        // Reap is allowed only after the same full membership check as a
+        // signal. An unexpected arrival or incomplete list keeps the fence.
+        guard first.allSatisfy({ identity in receipt.members.contains(where: { $0.identity == identity }) }) else {
+            return .incompleteInventory
+        }
+        if exactExitedLeader {
+            // Darwin's zombie may remain in the PGID list or be detached from
+            // it. Either permits only reap; neither is an extinction proof.
+            let liveOnly = present.filter { $0 != receipt.leader }
+            let inventoryWithoutLeader = first.filter { $0 != receipt.leader }
+            guard inventoryWithoutLeader.count == liveOnly.count,
+                  inventoryWithoutLeader.allSatisfy({ liveOnly.contains($0) }) else { return .incompleteInventory }
+            return .exitedDirectChildExact
+        }
+        guard first.count == present.count, first.allSatisfy({ present.contains($0) }) else { return .incompleteInventory }
+        guard present.isEmpty, first.isEmpty else { return .liveExact }
         return .leaderReapedAndExtinct
     }
 
+    private static func cleanupProcessEvidence(_ pid: pid_t) -> CleanupProcessEvidence {
+        guard pid > 0 else { return .unknown }
+        var info = proc_bsdinfo()
+        errno = 0
+        // XNU's nonzero arg explicitly includes zombies; arg=0 would make an
+        // unreaped child look absent and cannot support extinction proof.
+        let count = proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &info, Int32(MemoryLayout<proc_bsdinfo>.size))
+        guard count == Int32(MemoryLayout<proc_bsdinfo>.size) else {
+            return count <= 0 && errno == ESRCH ? .absent : .unknown
+        }
+        return cleanupBSDInfoEvidence(pid, info: info, group: { getpgid(pid) }, session: { getsid(pid) })
+    }
+
+    internal static func cleanupBSDInfoEvidence(
+        _ pid: pid_t,
+        info: proc_bsdinfo,
+        group: () -> pid_t,
+        session: () -> pid_t
+    ) -> CleanupProcessEvidence {
+        guard pid > 0, info.pbi_pid == UInt32(pid), info.pbi_start_tvsec > 0,
+              info.pbi_start_tvsec <= UInt64(Int64.max), info.pbi_start_tvusec < 1_000_000,
+              info.pbi_ppid <= UInt32(Int32.max), info.pbi_pgid <= UInt32(Int32.max)
+        else { return .unknown }
+        let identity = ContainedProcessIdentity(pid: pid, startSeconds: Int64(info.pbi_start_tvsec),
+                                                startMicroseconds: Int32(info.pbi_start_tvusec))
+        if info.pbi_status == UInt32(SZOMB) {
+            return .exited(identity, parent: Int32(info.pbi_ppid), processGroup: Int32(info.pbi_pgid))
+        }
+        let observedGroup = group()
+        let observedSession = session()
+        guard observedGroup > 0, observedSession > 0,
+              observedGroup == Int32(info.pbi_pgid) else { return .unknown }
+        return .present(identity, processGroup: observedGroup, session: observedSession)
+    }
+
+    private static func cleanupInventory(_ receipt: ContainedProcessReceipt) -> CleanupInventoryEvidence {
+        guard let pids = ProcessGroupSnapshot.stableMembers(receipt.processGroupID) else { return .indeterminate }
+        var identities: [ContainedProcessIdentity] = []
+        for pid in pids {
+            switch cleanupProcessEvidence(pid) {
+            case let .present(identity, group, session):
+                guard group == receipt.processGroupID, session == receipt.sessionID else { return .indeterminate }
+                identities.append(identity)
+            case let .exited(identity, parent, group):
+                // This exception cannot reach a signal or extinction result:
+                // the outer collector separately requires a fresh direct-child
+                // exit proof and then returns only `.exitedDirectChildExact`.
+                guard identity == receipt.leader, !receipt.leaderReaped, parent == getpid(),
+                      group == 0 || group == receipt.processGroupID else { return .indeterminate }
+                identities.append(identity)
+            case .absent, .unknown: return .indeterminate
+            }
+        }
+        return .exact(identities.sorted { $0.pid < $1.pid })
+    }
+
+    private static func leaderExitObservation(_ receipt: ContainedProcessReceipt) -> LeaderExitObservation {
+        leaderExitObservation(receipt, inspectProcess: cleanupProcessEvidence) { pid in
+            var info = siginfo_t()
+            errno = 0
+            let result = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+            return (result, errno, info.si_pid, info.si_code)
+        }
+    }
+
+    /// waitid does not consume the child's status. Matching birth and group
+    /// identity before and after it prevents argv loss from weakening identity.
+    internal static func leaderExitObservation(
+        _ receipt: ContainedProcessReceipt,
+        maximumInterrupts: UInt8 = 4,
+        inspectProcess: (pid_t) -> CleanupProcessEvidence,
+        waitExitedNoHang: (pid_t) -> (result: Int32, error: Int32, pid: pid_t, code: Int32)
+    ) -> LeaderExitObservation {
+        func exactCandidate(_ evidence: CleanupProcessEvidence) -> Bool {
+            switch evidence {
+            case let .present(identity, group, session):
+                return identity == receipt.leader && group == receipt.processGroupID && session == receipt.sessionID
+            case let .exited(identity, parent, group):
+                return identity == receipt.leader && parent == getpid() && (group == 0 || group == receipt.processGroupID)
+            case .absent, .unknown: return false
+            }
+        }
+        guard exactCandidate(inspectProcess(receipt.leader.pid)) else { return .identityUnproven }
+        var interrupts: UInt8 = 0
+        while true {
+            let observed = waitExitedNoHang(receipt.leader.pid)
+            if observed.result == 0 {
+                guard observed.pid != 0 else { return .notExited }
+                guard observed.pid == receipt.leader.pid,
+                      [CLD_EXITED, CLD_KILLED, CLD_DUMPED].contains(observed.code),
+                      exactCandidate(inspectProcess(receipt.leader.pid)) else { return .identityUnproven }
+                return .exitedExact
+            }
+            if observed.error == ECHILD { return .notChild }
+            if observed.error == EINTR {
+                guard interrupts < maximumInterrupts else { return .interruptedLimit }
+                interrupts += 1
+                continue
+            }
+            return .failed(observed.error)
+        }
+    }
+
     private static func signalExactMembers(_ receipt: ContainedProcessReceipt, signal: Int32) {
+        let now = containmentNowNanoseconds()
+        guard receipt.schema == 5, receipt.deadlineClock == .continuous, receipt.noSecondMutation,
+              receipt.cleanupOwnerToken != nil,
+              now < receipt.cleanupDeadlineNanoseconds, now < receipt.ownerDeadlineNanoseconds,
+              (signal == SIGTERM && receipt.phase == .term && receipt.termSignalIssued)
+                || (signal == SIGKILL && receipt.phase == .kill && receipt.killSignalIssued)
+        else { return }
         for member in receipt.members where processIdentity(member.identity.pid) == member.identity
             && getpgid(member.identity.pid) == receipt.processGroupID
             && getsid(member.identity.pid) == receipt.sessionID
             && exactCommandFingerprint(member.identity.pid, executable: member.executable) == member.commandFingerprint {
             var interrupts = 0
-            while kill(member.identity.pid, signal) != 0, errno == EINTR, interrupts < 4 { interrupts += 1 }
+            while containmentNowNanoseconds() < min(receipt.cleanupDeadlineNanoseconds, receipt.ownerDeadlineNanoseconds),
+                  processIdentity(member.identity.pid) == member.identity {
+                if kill(member.identity.pid, signal) == 0 || errno != EINTR || interrupts >= 4 { break }
+                interrupts += 1
+            }
         }
     }
 }
@@ -657,6 +950,15 @@ public enum ContainedProcessRunner {
         return .signalKill
     }
 
+    static func containmentNowNanoseconds(continuousSeconds: TimeInterval = MonotonicClock.seconds()) -> UInt64 {
+        UInt64(max(0, continuousSeconds) * 1_000_000_000)
+    }
+
+    static func containmentDeadlines(timeout: TimeInterval, continuousSeconds: TimeInterval = MonotonicClock.seconds()) -> (root: UInt64, cleanup: UInt64) {
+        let root = containmentNowNanoseconds(continuousSeconds: continuousSeconds) &+ UInt64(timeout * 1_000_000_000)
+        return (root, root &+ 5_000_000_000)
+    }
+
     private static func runSpawned(
         _ command: ContainedProcessCommand,
         timeout: TimeInterval,
@@ -673,8 +975,9 @@ public enum ContainedProcessRunner {
         // `spawn` leaves the child stopped.  The exact leader receipt must be
         // durable before SIGCONT; a missing or failing authority sink is
         // resolved by killing and reaping that still-suspended one PID.
-        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(timeout * 1_000_000_000)
-        let initialCleanupDeadline = deadline &+ 5_000_000_000
+        let deadlines = containmentDeadlines(timeout: timeout)
+        let deadline = deadlines.root
+        let initialCleanupDeadline = deadlines.cleanup
         guard let receipt = makeReceipt(command: command, spawned: spawned,
                                         rootDeadline: deadline, cleanupDeadline: initialCleanupDeadline),
               let sink = Thread.current.threadDictionary[receiptSinkKey] as? ReceiptSinkBox,
@@ -745,7 +1048,7 @@ public enum ContainedProcessRunner {
                 }
                 return .init(stdout: output.text, stderr: errors.text, exitCode: normalizedExit(status), outcome: .completed)
             }
-            let now = DispatchTime.now().uptimeNanoseconds
+            let now = containmentNowNanoseconds()
             if now >= deadline {
                 return transferContainment(receipt: receipt, sink: sink, stdout: output.text,
                                            stderr: errors.text + "\ncontained-sync-window-expired")
@@ -917,7 +1220,7 @@ public enum ContainedProcessRunner {
         stdout: String,
         stderr: String
     ) -> ContainedProcessResult {
-        let now = DispatchTime.now().uptimeNanoseconds
+        let now = containmentNowNanoseconds()
         let maximumLifetime = receipt.rootDeadlineNanoseconds &+ 30_000_000_000
         guard now < maximumLifetime else {
             return .init(stdout: stdout, stderr: stderr + "\ncontained-cleanup-lifetime-exhausted",
