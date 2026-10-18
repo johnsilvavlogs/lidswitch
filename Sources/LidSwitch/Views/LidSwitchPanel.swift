@@ -7,7 +7,10 @@ struct LidSwitchPanel: View {
     @Environment(\.colorSchemeContrast) private var accessibilityContrast
     @State private var powerSourcesExpanded = false
     @State private var disclosureInitialized = false
-    @FocusState private var masterHasFocus: Bool
+
+    private var presentation: LidSwitchPanelPresentation {
+        LidSwitchPanelPresentation(controller: controller)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -22,7 +25,7 @@ struct LidSwitchPanel: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             if !disclosureInitialized {
-                powerSourcesExpanded = controller.isKeepAwakeOn || noPowerSourceSelected
+                powerSourcesExpanded = noPowerSourceSelected
                 disclosureInitialized = true
             }
             // Opening the panel refreshes live power and safety truth.
@@ -53,17 +56,18 @@ struct LidSwitchPanel: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("Error. \(errorMessage)")
-            } else if let guidance = inlineGuidance {
+            } else if let guidance = presentation.guidance {
                 Text(guidance)
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            recoveryAction
+            inlineAction
         }
-        .padding(.horizontal, 12)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardSurface)
     }
 
     private var keepAwakeSwitch: some View {
@@ -80,29 +84,16 @@ struct LidSwitchPanel: View {
             Spacer(minLength: 8)
             Toggle("Keep Mac awake", isOn: Binding(
                 get: { controller.isKeepAwakeOn },
-                set: { enabled in
-                    if enabled {
-                        powerSourcesExpanded = true
-                    } else if !noPowerSourceSelected {
-                        // Explicit OFF may hide a focused source control.
-                        masterHasFocus = true
-                        powerSourcesExpanded = false
-                    }
-                    controller.setKeepAwakeEnabled(enabled)
-                }
+                set: { controller.setKeepAwakeEnabled($0) }
             ))
             .labelsHidden()
             .accessibilityLabel("Keep Mac awake")
             .toggleStyle(.switch)
             .controlSize(.regular)
-            .focused($masterHasFocus)
-            .disabled(!canChangeKeepAwake)
-            .keyboardShortcut("k", modifiers: [.command])
-            .accessibilityHint(
-                controller.operationPhase == .starting
-                    ? "Turn off to cancel the pending start and restore system sleep."
-                    : "Keeps this Mac awake on the selected power sources. Turn off to restore system sleep."
-            )
+            .disabled(!presentation.masterEnabled)
+            .keyboardShortcut(presentation.masterEnabled
+                ? KeyboardShortcut("k", modifiers: [.command]) : nil)
+            .accessibilityHint(presentation.masterHint)
         }
         .frame(minHeight: 28)
     }
@@ -162,8 +153,14 @@ struct LidSwitchPanel: View {
 
     private var powerSourceDisclosure: some View {
         DisclosureGroup(isExpanded: $powerSourcesExpanded) {
-            powerSourceControls
-                .padding(.top, 6)
+            VStack(alignment: .leading, spacing: 6) {
+                powerSourceControls
+                Text("Choices are saved. Keep Mac awake starts off after launch.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 6)
         } label: {
             HStack(spacing: 8) {
                 Text("Power sources")
@@ -205,13 +202,7 @@ struct LidSwitchPanel: View {
             )
         }
         .background(cardSurface)
-        .disabled(
-            controller.isBusy
-                || controller.isChecking
-                || controller.operationPhase == .starting
-                || controller.operationPhase == .cancelRestoring
-                || controller.operationPhase == .endingRestoring
-        )
+        .disabled(!presentation.sourceChoicesEnabled)
     }
 
     private func sourceToggle(
@@ -257,89 +248,31 @@ struct LidSwitchPanel: View {
             }
     }
 
-    private var canChangeKeepAwake: Bool {
-        // OFF remains a cancellation path during start verification.
-        if controller.operationPhase == .starting { return true }
-        guard !controller.isBusy, !controller.isChecking else { return false }
-        if controller.isKeepAwakeOn { return true }
-        let snapshot = controller.snapshot
-        guard controller.operationPhase == .idle,
-              snapshot.source.isKnown,
-              snapshot.sleepDisabledVerified,
-              !snapshot.sleepDisabled,
-              !snapshot.restoreRequired,
-              controller.powerPreferences.allowPluggedInKeepAwake
-                || controller.powerPreferences.allowBatteryKeepAwake
-        else { return false }
-        if !snapshot.helperReady || snapshot.legacyResiduePresent {
-            return snapshot.canPrepareHelper
-        }
-        // Intent can wait on an excluded source after the safety checks pass.
-        return !snapshot.hasCriticalSafetyIssue
-    }
-
-    private var inlineGuidance: String? {
-        if !controller.powerPreferences.allowPluggedInKeepAwake,
-           !controller.powerPreferences.allowBatteryKeepAwake {
-            return "Choose a power source."
-        }
-        switch controller.operationPhase {
-        case .starting:
-            return "Turn off to cancel."
-        case .cancelRestoring, .endingRestoring:
-            return nil
-        case .preparingHelper:
-            return "Approve the macOS request to continue."
-        case .removingHelper:
-            return nil
-        case .idle, .recoveryRequired:
-            break
-        }
-        if controller.primaryAction == .prepareHelper,
-           controller.snapshot.helperPreparationCTA == .prepare,
-           canChangeKeepAwake {
-            return "Turn on to set up. macOS requires administrator approval."
-        }
-        if controller.displayedStatus.tone == .warning
-            || !controller.snapshot.source.isKnown
-            || (controller.isKeepAwakeOn && !controller.snapshot.sessionActive)
-            || controller.primaryAction == .prepareHelper
-            || controller.primaryAction == .restoreSleep {
-            return controller.displayedStatus.detail
-        }
-        return nil
-    }
-
     @ViewBuilder
-    private var recoveryAction: some View {
-        if controller.primaryAction == .prepareHelper,
-           controller.snapshot.helperPreparationCTA == .repair
-                || controller.snapshot.restoreRequired
-                || controller.operationPhase == .recoveryRequired {
+    private var inlineAction: some View {
+        if let action = presentation.inlineAction {
             Button {
-                controller.prepareHelper()
+                switch action.kind {
+                case .prepareHelper: controller.prepareHelper()
+                case .restoreSleep: controller.restoreNow()
+                case .refresh: controller.refreshManually()
+                }
             } label: {
-                Label(controller.snapshot.helperNeedsUpdate ? "Update Helper" : "Repair Helper",
-                      systemImage: "shield.lefthalf.filled")
+                Label(action.title, systemImage: action.symbol)
             }
             .buttonStyle(.bordered)
-            .keyboardShortcut("p", modifiers: [.command])
-            .disabled(
-                controller.isBusy
-                    || controller.isChecking
-                    || !controller.snapshot.canPrepareHelper
-                    || !controller.snapshot.sleepDisabledVerified
-            )
-            .accessibilityHint(controller.snapshot.helperPreparationCTA.accessibilityHint)
-        } else if controller.primaryAction == .restoreSleep {
-            Button {
-                controller.restoreNow()
-            } label: {
-                Label("Restore Sleep", systemImage: "moon.zzz.fill")
-            }
-            .buttonStyle(.bordered)
-            .disabled(controller.isBusy)
-            .accessibilityHint("Clears the remaining system sleep override and verifies that normal sleep is restored.")
+            .disabled(!action.isEnabled)
+            .keyboardShortcut(shortcut(for: action))
+            .accessibilityHint(action.hint)
+        }
+    }
+
+    private func shortcut(for action: LidSwitchPanelPresentation.Action) -> KeyboardShortcut? {
+        switch action.kind {
+        case .prepareHelper: KeyboardShortcut("p", modifiers: [.command])
+        case .refresh: KeyboardShortcut("r", modifiers: [.command])
+        case .restoreSleep: presentation.commandKRestoresSleep
+            ? KeyboardShortcut("k", modifiers: [.command]) : nil
         }
     }
 
@@ -350,14 +283,17 @@ struct LidSwitchPanel: View {
                 Text(controller.displayedStatus.detail)
                 Divider()
 
-                Button {
-                    controller.refreshManually()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                // The visible inline Refresh owns Command-R when present.
+                if presentation.inlineAction?.kind != .refresh {
+                    Button {
+                        controller.refreshManually()
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .keyboardShortcut("r", modifiers: [.command])
+                    .disabled(controller.isBusy || controller.isChecking)
+                    .accessibilityHint("Reads the current power source, helper status, and system sleep override.")
                 }
-                .keyboardShortcut("r", modifiers: [.command])
-                .disabled(controller.isBusy || controller.isChecking)
-                .accessibilityHint("Reads the current power source, helper status, and system sleep override.")
 
                 if controller.snapshot.helperArtifactsPresent || controller.snapshot.helperLoaded {
                     Divider()
@@ -375,7 +311,9 @@ struct LidSwitchPanel: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .accessibilityHint("Shows technical status, Refresh, and helper removal.")
+            .accessibilityHint(presentation.inlineAction?.kind == .refresh
+                ? "Shows technical status and helper removal."
+                : "Shows technical status, Refresh, and helper removal.")
 
             Spacer(minLength: 0)
             Button {
