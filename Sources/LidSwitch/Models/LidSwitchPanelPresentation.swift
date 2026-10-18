@@ -54,7 +54,8 @@ struct LidSwitchPanelPresentation: Equatable {
                     && snapshot.ownedSessionID == nil
                     && (primary == .startSession || primary == .prepareHelper)
                     && (snapshot.helperReady && !snapshot.legacyResiduePresent
-                        ? !snapshot.hasCriticalSafetyIssue : snapshot.canPrepareHelper)
+                        ? !snapshot.hasCriticalSafetyIssue
+                        : snapshot.canPrepareHelper && !controller.requiresExplicitHelperPreparation)
             }
         case .cancelRestoring, .endingRestoring, .removingHelper, .recoveryRequired:
             masterEnabled = false
@@ -79,7 +80,8 @@ struct LidSwitchPanelPresentation: Equatable {
                   snapshot.canPrepareHelper, snapshot.sleepDisabledVerified,
                   snapshot.helperPreparationCTA == .repair || snapshot.legacyResiduePresent
                     || snapshot.restoreRequired || phase == .recoveryRequired
-                    || controller.restoreRequiresHelperRepair {
+                    || controller.restoreRequiresHelperRepair
+                    || controller.requiresExplicitHelperPreparation {
             let title = snapshot.helperNeedsUpdate ? "Update Helper" : snapshot.helperPreparationCTA.title
             inlineAction = Action(kind: .prepareHelper, title: title, symbol: "shield.lefthalf.filled",
                                   hint: "Requires administrator approval. Setup and sleep restoration are verified before continuing.",
