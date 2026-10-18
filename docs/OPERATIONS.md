@@ -6,12 +6,34 @@
 2. Open LidSwitch.
 3. Approve helper installation if requested. This authorization persists for the installed helper.
 4. Choose **Plugged in**, **On battery**, or both. Battery operation is initially off.
-5. Turn on **Keep Mac awake** and wait for **Awake while plugged in** or **Awake on battery** before closing the lid.
+5. Turn on **Keep Mac awake** and wait for **Awake** with the current power source shown below it before closing the lid.
 6. Turn the switch off to restore normal sleep, or choose **Quit** to restore and exit.
 
 Switching between selected power sources keeps protection active. An unselected source restores normal sleep while the switch waits; a selected source resumes protection only while this app remains open with the switch on. Changing source choices safely ends the existing generation before applying a new policy. Both choices off turns the master off.
 
 Quitting, restarting, or losing the heartbeat ends the session. Launching the app again keeps the saved source choices and leaves protection off. Ordinary switching and quitting do not ask for confirmation; setup, repair, updates, or removal may require macOS authorization.
+
+## Panel controls
+
+**Keep Mac awake** is the main switch. **Command-K** operates it, including
+turning it off while a status refresh is still running. During first setup,
+turning the switch off cancels the requested activation, not the administrator
+transaction: setup finishes with Keep Mac awake off. While sleep restoration
+is running, wait for its verified result before trying another operation.
+
+**Power sources** stays collapsed until you open it, unless neither source is
+selected. Turning the master on or off does not expand or collapse those
+choices, so it does not hide a focused source control. Expand the section to
+edit the two independent preferences. They persist; activation never does.
+
+An unreadable power, sleep, or installation state offers **Refresh** inline
+(**Command-R**) without requesting administrator access or starting a session.
+When detached recovery requires **Restore Sleep**, that visible action owns
+**Command-K** instead of the disabled master. **Install Helper**, **Update
+Helper**, or **Repair Helper** uses **Command-P** when that inline action is
+shown. These actions still use the existing controller's safety checks and
+authenticated restore or administrator-repair boundary; a public containment
+warning alone does not bypass ordinary RESTORE.
 
 ## Inspect live state
 

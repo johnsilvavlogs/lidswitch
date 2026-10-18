@@ -104,7 +104,8 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
         isChecking: Bool,
         keepAwakeRequested: Bool = false,
         authenticatedOwnedSessionID: UUID? = nil,
-        restoreRequiresRepair: Bool = false
+        restoreRequiresRepair: Bool = false,
+        requiresExplicitHelperPreparation: Bool = false
     ) -> Self {
         if (operationPhase == .idle || operationPhase == .recoveryRequired),
            authenticatedOwnedSessionID == nil, snapshot.ownedSessionID == nil,
@@ -273,14 +274,26 @@ struct PowerControllerDisplayContract: Equatable, Sendable {
             panelSymbol = "circle"
         }
 
+        let detail = setupDetail(for: snapshot, requiresExplicitPreparation: requiresExplicitHelperPreparation)
         return Self(
             title: snapshot.statusTitle,
-            detail: snapshot.statusDetail,
-            accessibilityState: snapshot.accessibilityState,
+            detail: detail,
+            accessibilityState: "LidSwitch, \(snapshot.statusTitle). \(detail)",
             menuBarSymbol: menuBarSymbol,
             panelSymbol: panelSymbol,
             tone: tone
         )
+    }
+
+    /// A clean missing helper is not necessarily a first installation in this
+    /// process. Keep status, VoiceOver and rejected stale ON requests aligned
+    /// with the explicit retry action without overriding safety warnings.
+    static func setupDetail(for snapshot: PowerSnapshot, requiresExplicitPreparation: Bool) -> String {
+        guard requiresExplicitPreparation, !snapshot.helperReady,
+              snapshot.helperPreparationCTA == .prepare, snapshot.canPrepareHelper,
+              snapshot.source.isKnown, !snapshot.hasCriticalSafetyIssue,
+              snapshot.ownedSessionID == nil else { return snapshot.statusDetail }
+        return "Choose Install Helper to set up again. macOS requires administrator approval. Keep Mac awake will stay off."
     }
 
     static func isAwaitingOwnedSessionProjection(_ snapshot: PowerSnapshot, sessionID: UUID) -> Bool {
@@ -1123,6 +1136,13 @@ final class PowerController: ObservableObject {
     /// Saved source choices never carry activation authority across launches.
     var isKeepAwakeOn: Bool { keepAwakeRequested || isStarting || activeSessionID != nil }
 
+    /// Process-lifetime prompt history, not installation or restoration proof.
+    /// Refresh and removal must not reset it. An explicit Install/Repair action
+    /// can retry through prepareHelper's existing administrator boundary.
+    var requiresExplicitHelperPreparation: Bool {
+        hasObservedReadyHelper || automaticHelperPreparationAttempted
+    }
+
     var errorMessage: String? { alert?.message }
     var isStarting: Bool { operationPhase == .starting }
     var isCancelRestoring: Bool { operationPhase == .cancelRestoring }
@@ -1163,7 +1183,8 @@ final class PowerController: ObservableObject {
             isChecking: isChecking,
             keepAwakeRequested: keepAwakeRequested,
             authenticatedOwnedSessionID: authenticatedOwnedSessionID,
-            restoreRequiresRepair: restoreRequiresHelperRepair
+            restoreRequiresRepair: restoreRequiresHelperRepair,
+            requiresExplicitHelperPreparation: requiresExplicitHelperPreparation
         )
     }
 
@@ -1793,10 +1814,12 @@ final class PowerController: ObservableObject {
         }
 
         if !freshSnapshot.helperReady || freshSnapshot.legacyResiduePresent {
-            guard !hasObservedReadyHelper, !automaticHelperPreparationAttempted,
+            guard !requiresExplicitHelperPreparation,
                   freshSnapshot.canPrepareHelper, freshSnapshot.sleepDisabledVerified,
                   Self.hasNoOwnedSession(freshSnapshot) else {
-                finishRejectedStart(freshSnapshot.statusDetail)
+                finishRejectedStart(PowerControllerDisplayContract.setupDetail(
+                    for: freshSnapshot, requiresExplicitPreparation: requiresExplicitHelperPreparation
+                ))
                 return
             }
             startRequestID = nil
