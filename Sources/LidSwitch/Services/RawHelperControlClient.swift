@@ -320,8 +320,24 @@ final class RawHelperControlClient: @unchecked Sendable {
     /// route.  Installation and removal remain administrator transactions.
     func restoreThroughInstalledHelper() throws -> HelperControlReply {
         lock.lock(); defer { lock.unlock() }
+        return try Self.restoreThroughInstalledHelper(
+            resetTransport: { self.invalidateClientLocked() },
+            exchange: { operation, sessionID in
+                try self.exchangeLocked(operation, sessionID: sessionID)
+            }
+        )
+    }
+
+    private static func restoreThroughInstalledHelper(
+        resetTransport: () -> Void,
+        exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
+    ) throws -> HelperControlReply {
+        // A helper restart poisons the cached XPC connection asynchronously.
+        // Like generation termination, each explicit recovery starts fresh;
+        // an uncertain reply still ends this invocation without a retry.
+        resetTransport()
         let reply = try Self.acceptedReply(
-            from: exchangeLocked(UInt32(LS_OPERATION_RESTORE.rawValue), sessionID: Self.zeroUUID)
+            from: exchange(UInt32(LS_OPERATION_RESTORE.rawValue), Self.zeroUUID)
         )
         guard (reply.state == .idle || reply.state == .terminal),
               reply.power != .unknown,
@@ -472,17 +488,13 @@ final class RawHelperControlClient: @unchecked Sendable {
 
 #if DEBUG
     static func restoreThroughInstalledHelperForTesting(
+        resetTransport: () -> Void = {},
         exchange: (UInt32, UUID) throws -> HelperControlExchangeOutcome
     ) throws -> HelperControlReply {
-        let reply = try acceptedReply(
-            from: exchange(UInt32(LS_OPERATION_RESTORE.rawValue), zeroUUID)
+        try restoreThroughInstalledHelper(
+            resetTransport: resetTransport,
+            exchange: exchange
         )
-        guard (reply.state == .idle || reply.state == .terminal),
-              reply.power != .unknown,
-              !reply.sleepDisabled,
-              reply.acSleepMinutes != nil
-        else { throw HelperControlError.malformedReply }
-        return reply
     }
 
     static func resolveBeginForTesting(

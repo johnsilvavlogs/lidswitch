@@ -82,13 +82,13 @@ DEPENDENCY_FREEZE = {
     "safe_process_supervisor": ("b098e1c6b49f65ab28b33e629381c4e6bf3443358d032d3f2c13a444ceb1a291", 63684),
 }
 STATIC_DATA_FREEZE = {
-    "script/live_state_envelope.sh": ("37391ffdc823473c65a6b7a717c336a842018aae7e5b6e5e2a8f45170981a58b", 64298),
+    "script/live_state_envelope.sh": ("d8c547f17cc0f638e5ba8e2c8630b8c9a5634d1b217e036aa347b8824aa24b1c", 64320),
     "script/swift_sandbox_common.sh": ("30b96d1e3b7ff73173d792fd9dfff801d6974ad21a8df982ccf78c20bdb33985", 68188),
     "script/swift_test_sandbox.sb.in": ("851794f1b655898dd2618ee880c8f9e393687b5362a3a9e81f79ef99f69e23c7", 10822),
     "script/run_swift_tests_safely.sh": ("732ddf54e583510b758491183322e4446906579afb9697c8c559499715a485b9", 7688),
     "script/run_swift_build_safely.sh": ("7b14608282edca96003effaf1c5c70426368aa7e4a32d5a3c9b6550032e3e260", 9563),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("44de8a636d9da0b3466dd793f09ea81ea1d7d27e9cc5e08af21f748b3596cf95", 3578),
+    "script/source_snapshot_manifest.jsonl": ("cdfbad6241ab6944578faf469a6cc13e54fbae608a42703df1cfdfad271d0536", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest
@@ -1633,6 +1633,7 @@ class SafeEnvelopeProductionFixtures(unittest.TestCase):
             envelope.index('LIDSWITCH_CANDIDATE_RECOVERY_SESSION_REASONS=')
         ]
         self.assertIn(' peer-restore ', terminal_reasons)
+        self.assertIn(' detached-user-restore ', terminal_reasons)
         self.assertNotIn(' peer-process-invalid-peer-restore ', terminal_reasons)
         durable_terminal = envelope[
             envelope.index('live_envelope_durable_terminal_status_is_not_future()') :

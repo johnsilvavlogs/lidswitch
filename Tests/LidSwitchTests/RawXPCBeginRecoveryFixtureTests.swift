@@ -437,6 +437,53 @@ final class RawXPCBeginRecoveryFixtureTests: XCTestCase {
         }
     }
 
+    func testDetachedRestoreReplacesRestartInvalidatedTransportBeforeOneRequest() throws {
+        let terminal = HelperControlReply(
+            reason: "detached-user-restore", sessionID: UUID(), expiryMonotonic: 0,
+            state: .terminal, power: .ac, sleepDisabled: false, acSleepMinutes: 5
+        )
+        var cachedTransportInvalid = true
+        var resets = 0
+        var requests = 0
+        let restored = try RawHelperControlClient.restoreThroughInstalledHelperForTesting(
+            resetTransport: {
+                resets += 1
+                cachedTransportInvalid = false
+            },
+            exchange: { operation, sessionID in
+                requests += 1
+                guard !cachedTransportInvalid else {
+                    throw HelperControlError.indeterminateTransport(
+                        Int32(LS_XPC_STATUS_INDETERMINATE_INTERRUPTED.rawValue)
+                    )
+                }
+                XCTAssertEqual(operation, UInt32(LS_OPERATION_RESTORE.rawValue))
+                XCTAssertEqual(sessionID, Self.zeroUUID)
+                return .accepted(terminal)
+            }
+        )
+        XCTAssertEqual(restored, terminal)
+        XCTAssertEqual(resets, 1)
+        XCTAssertEqual(requests, 1)
+    }
+
+    func testDetachedRestoreDoesNotRetryAnUncertainFreshRequest() {
+        var resets = 0
+        var requests = 0
+        let interruption = HelperControlError.indeterminateTransport(
+            Int32(LS_XPC_STATUS_INDETERMINATE_INTERRUPTED.rawValue)
+        )
+        XCTAssertThrowsError(try RawHelperControlClient.restoreThroughInstalledHelperForTesting(
+            resetTransport: { resets += 1 },
+            exchange: { _, _ in
+                requests += 1
+                throw interruption
+            }
+        )) { XCTAssertEqual($0 as? HelperControlError, interruption) }
+        XCTAssertEqual(resets, 1)
+        XCTAssertEqual(requests, 1)
+    }
+
     func testDetachedRestoreUsesOnlyTheInstalledHelperZeroSessionRoute() throws {
         let terminal = HelperControlReply(
             reason: "detached-user-restore",
