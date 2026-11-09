@@ -88,7 +88,7 @@ STATIC_DATA_FREEZE = {
     "script/run_swift_tests_safely.sh": ("3ed759e0bec484870885cf69f8cdee54a0cbe5e042cacc66e83ede0a0bd047a4", 7714),
     "script/run_swift_build_safely.sh": ("e3ea1a4b22d18c9fe427c33a704f429f63a8565d712890188d48aef7a69d01bd", 9673),
     "script/benchmark_baseline.sh": ("700a32f104aa0e7e849b644f0574e7dab5784173860e64f0660a0619bd6437aa", 3894),
-    "script/source_snapshot_manifest.jsonl": ("9e9ebef52560189b1d2c342373e1da6f7658824e6352bfa1e87a41e7a9c34031", 3578),
+    "script/source_snapshot_manifest.jsonl": ("e7cb1ffc28d4d9d6270ab5831dbec70e29f64d8e40e91a0813657e8aeee20834", 3578),
     # This document embeds the external self-test digest, so embedding its own
     # digest here would create a circular freeze. It is descriptor-read as data;
     # the canonical bootstrap-provided self digest and the manager's manifest

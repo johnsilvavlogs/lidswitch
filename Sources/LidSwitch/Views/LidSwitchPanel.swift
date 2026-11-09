@@ -1,12 +1,17 @@
 import AppKit
+import Combine
 import SwiftUI
+
+private final class LidSwitchPanelState: ObservableObject {
+    @Published var powerSourcesExpanded = false
+    @Published var disclosureInitialized = false
+}
 
 struct LidSwitchPanel: View {
     @ObservedObject var controller: PowerController
     let confirmationPresenter: NativeConfirmationPresenter
     @Environment(\.colorSchemeContrast) private var accessibilityContrast
-    @State private var powerSourcesExpanded = false
-    @State private var disclosureInitialized = false
+    @StateObject private var panelState = LidSwitchPanelState()
 
     private var presentation: LidSwitchPanelPresentation {
         LidSwitchPanelPresentation(controller: controller)
@@ -24,15 +29,15 @@ struct LidSwitchPanel: View {
         .padding(16)
         .fixedSize(horizontal: false, vertical: true)
         .onAppear {
-            if !disclosureInitialized {
-                powerSourcesExpanded = noPowerSourceSelected
-                disclosureInitialized = true
+            if !panelState.disclosureInitialized {
+                panelState.powerSourcesExpanded = noPowerSourceSelected
+                panelState.disclosureInitialized = true
             }
             // Opening the panel refreshes live power and safety truth.
             controller.refresh()
         }
         .onChange(of: noPowerSourceSelected) { empty in
-            if empty { powerSourcesExpanded = true }
+            if empty { panelState.powerSourcesExpanded = true }
         }
     }
 
@@ -152,7 +157,7 @@ struct LidSwitchPanel: View {
     }
 
     private var powerSourceDisclosure: some View {
-        DisclosureGroup(isExpanded: $powerSourcesExpanded) {
+        DisclosureGroup(isExpanded: $panelState.powerSourcesExpanded) {
             VStack(alignment: .leading, spacing: 6) {
                 powerSourceControls
                 Text("Choices are saved. Keep Mac awake starts off after launch.")
