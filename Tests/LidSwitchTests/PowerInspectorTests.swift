@@ -844,7 +844,7 @@ private final class InspectionFixture: @unchecked Sendable {
                 state.withValue { $0.desiredStateCalls += 1 }
                 return .value(.disabled)
             },
-            systemBuild: { "25F84" },
+            systemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             activationLease: { _ in
                 state.withValue { $0.leaseCalls += 1 }
                 return .missing("fixture")
@@ -1440,7 +1440,7 @@ final class SessionSafetyTests: XCTestCase {
             helperStatus: HelperStatusRecord(
                 state: "recovery-required", reason: "fixture", sessionID: nil, updatedAt: Date()
             ),
-            systemBuild: "25F84",
+            systemBuild: ReleaseIdentity.qualifiedSystemBuild,
             systemBuildQualified: true,
             bundleIntegrityValid: true,
             bundleVersionValid: true,
@@ -1472,7 +1472,7 @@ final class SessionSafetyTests: XCTestCase {
             activationLease: nil,
             ownedSessionID: nil,
             helperStatus: nil,
-            systemBuild: "25F84",
+            systemBuild: ReleaseIdentity.qualifiedSystemBuild,
             systemBuildQualified: true,
             bundleIntegrityValid: true,
             bundleVersionValid: true,
@@ -2331,9 +2331,15 @@ final class SessionSafetyTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            effects.value,
-            ["desired-state-disabled", "lease-issue", "activity-begin", "heartbeat", "lease-revoke", "activity-end"]
+            Array(effects.value.prefix(4)),
+            ["desired-state-disabled", "lease-issue", "activity-begin", "heartbeat"]
         )
+        // Local activity release follows synchronous authority invalidation.
+        // The remote terminal effect runs in the background, so these two
+        // cleanup effects may arrive in either order but must each occur once.
+        XCTAssertEqual(effects.value.count, 6)
+        XCTAssertEqual(effects.value.filter { $0 == "lease-revoke" }.count, 1)
+        XCTAssertEqual(effects.value.filter { $0 == "activity-end" }.count, 1)
         XCTAssertFalse(controller.isBusy)
         XCTAssertFalse(controller.isStarting)
     }
@@ -4278,7 +4284,7 @@ final class SessionSafetyTests: XCTestCase {
             configuration: harness.configuration,
             power: power,
             currentBootID: { harness.lease.bootID },
-            currentSystemBuild: { "25F84" },
+            currentSystemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             reconciliationInterval: 0.02,
             terminalGenerationAllows: { _, _ in true },
             terminalGenerationRecord: { _, _ in false },
@@ -4297,7 +4303,7 @@ final class SessionSafetyTests: XCTestCase {
             configuration: harness.configuration,
             power: power,
             currentBootID: { replay.bootID },
-            currentSystemBuild: { "25F84" },
+            currentSystemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             reconciliationInterval: 0.02,
             terminalGenerationAllows: { _, _ in true },
             terminalGenerationRecord: { _, _ in false },
@@ -4377,7 +4383,7 @@ final class SessionSafetyTests: XCTestCase {
             configuration: harness.configuration,
             power: power,
             currentBootID: { harness.lease.bootID },
-            currentSystemBuild: { "25F84" },
+            currentSystemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             terminalGenerationAllows: { _, _ in false },
             terminalGenerationRecord: { _, _ in
                 recordCalls.withValue { $0 += 1 }
@@ -4522,7 +4528,7 @@ final class SessionSafetyTests: XCTestCase {
             configuration: harness.configuration,
             power: power,
             currentBootID: { replay.bootID },
-            currentSystemBuild: { "25F84" },
+            currentSystemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             reconciliationInterval: 0.02,
             terminalGenerationAllows: { _, _ in true },
             terminalGenerationRecord: { _, _ in false },
@@ -4558,7 +4564,7 @@ final class SessionSafetyTests: XCTestCase {
             configuration: harness.configuration,
             power: power,
             currentBootID: { replay.bootID },
-            currentSystemBuild: { "25F84" },
+            currentSystemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             reconciliationInterval: 0.02,
             terminalGenerationAllows: { _, _ in true },
             terminalGenerationRecord: { _, _ in false },
@@ -4729,7 +4735,7 @@ final class SessionSafetyTests: XCTestCase {
     func testHelperConfigurationRejectsMissingAndDuplicateArguments() {
         let valid = [
             "LidSwitchHelper", "--lease-path", "/tmp/lease", "--owner-uid", "501",
-            "--qualified-build", "25F84", "--support-directory", "/tmp/support",
+            "--qualified-build", ReleaseIdentity.qualifiedSystemBuild, "--support-directory", "/tmp/support",
             "--applied-state", "/tmp/support/state", "--status-path", "/tmp/support/status",
         ]
         XCTAssertNotNil(HelperConfiguration.parse(arguments: valid))
@@ -4769,7 +4775,7 @@ final class SessionSafetyTests: XCTestCase {
             staleCanonicalLegacyLeasePresent: staleCanonicalLegacyLeasePresent,
             ownedSessionID: ownsLease ? lease?.sessionID : nil,
             helperStatus: status,
-            systemBuild: "25F84",
+            systemBuild: ReleaseIdentity.qualifiedSystemBuild,
             systemBuildQualified: true,
             bundleIntegrityValid: true,
             bundleVersionValid: true,
@@ -4791,7 +4797,7 @@ final class SessionSafetyTests: XCTestCase {
             issuedMonotonic: monotonic,
             expiresMonotonic: monotonic + lifetime,
             ownerUID: getuid(),
-            systemBuild: "25F84"
+            systemBuild: ReleaseIdentity.qualifiedSystemBuild
         )
     }
 
@@ -4916,7 +4922,7 @@ final class SessionSafetyTests: XCTestCase {
         let configuration = HelperConfiguration(
             leasePath: leasePath,
             expectedOwnerUID: getuid(),
-            qualifiedBuild: "25F84",
+            qualifiedBuild: ReleaseIdentity.qualifiedSystemBuild,
             supportDirectory: rootSupport.path,
             appliedStatePath: statePath,
             statusPath: statusPath
@@ -4933,7 +4939,7 @@ final class SessionSafetyTests: XCTestCase {
                 configuration: configuration,
                 power: power,
                 currentBootID: { lease.bootID },
-                currentSystemBuild: { "25F84" },
+                currentSystemBuild: { ReleaseIdentity.qualifiedSystemBuild },
                 reconciliationInterval: reconciliationInterval,
                 terminalGenerationAllows: terminalGenerationAllows,
                 terminalGenerationRecord: terminalGenerationRecord,

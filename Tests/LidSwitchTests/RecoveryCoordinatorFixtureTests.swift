@@ -2600,6 +2600,165 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
         }
     }
 
+    func testRawRestoreCompletesWhileProjectionPayloadWriterIsPaused() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let session = UUID()
+        try fixture.installPrivateApplied(Mutation.both.state(session: session, boot: Self.boot))
+        fixture.power.prepareForOwnedMutation(.both)
+        let task = try XCTUnwrap(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.enqueueStatusProjection(state: "inactive", reason: "fixture-paused", sessionID: nil, $0)
+        }))
+        let enteredWrite = DispatchSemaphore(value: 0)
+        let releaseWrite = DispatchSemaphore(value: 0)
+        let writerDone = DispatchSemaphore(value: 0)
+        var writerJoined = false
+        DispatchQueue.global().async {
+            defer { writerDone.signal() }
+            _ = fixture.statusWriteOutcome(task: task, stageGate: { stage in
+                guard stage == .write else { return true }
+                enteredWrite.signal()
+                return releaseWrite.wait(timeout: .now() + 3) == .success
+            })
+        }
+        defer {
+            releaseWrite.signal()
+            if !writerJoined { _ = writerDone.wait(timeout: .now() + 3) }
+        }
+        XCTAssertEqual(enteredWrite.wait(timeout: .now() + 2), .success)
+
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration, power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true }, bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() }, recoveryCoordinatorFactory: { fixture.coordinator },
+            activationAllowed: false
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        let restored = authority.handle(
+            connection: 1, peer: peer, operation: UInt32(LS_OPERATION_RESTORE.rawValue), sessionID: zero
+        )
+        XCTAssertEqual(restored.result, 0)
+        XCTAssertEqual(restored.sessionID, session)
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0", "ac=10"])
+        XCTAssertEqual(fixture.store.appliedRecord(), .missing)
+        XCTAssertEqual(writerDone.wait(timeout: .now()), .timedOut,
+                       "RESTORE must finish before the diagnostic writer is released")
+        releaseWrite.signal()
+        let joined = writerDone.wait(timeout: .now() + 2)
+        writerJoined = joined == .success
+        XCTAssertEqual(joined, .success)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+    }
+
+    func testProjectionRenameCannotInvalidateRawRestoreInventory() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let session = UUID()
+        try fixture.installPrivateApplied(Mutation.both.state(session: session, boot: Self.boot))
+        fixture.power.prepareForOwnedMutation(.both)
+        let task = try XCTUnwrap(try XCTUnwrap(fixture.store.withTransaction {
+            fixture.store.enqueueStatusProjection(state: "inactive", reason: "fixture-before-restore", sessionID: nil, $0)
+        }))
+        let enteredRename = DispatchSemaphore(value: 0)
+        let releaseRename = DispatchSemaphore(value: 0)
+        let renameCommitted = DispatchSemaphore(value: 0)
+        let writerDone = DispatchSemaphore(value: 0)
+        let inventoryHookCalls = IntegerBox()
+        var writerJoined = false
+        DispatchQueue.global().async {
+            defer { writerDone.signal() }
+            _ = fixture.statusWriteOutcome(task: task, stageGate: { stage in
+                if stage == .rename {
+                    enteredRename.signal()
+                    return releaseRename.wait(timeout: .now() + 3) == .success
+                }
+                if stage == .reopen { renameCommitted.signal() }
+                return true
+            })
+        }
+        defer {
+            releaseRename.signal()
+            if !writerJoined { _ = writerDone.wait(timeout: .now() + 3) }
+        }
+        XCTAssertEqual(enteredRename.wait(timeout: .now() + 2), .success)
+        try fixture.activateFileOperations(.init(
+            openLeaf: RecoveryAuthorityFileOperations.system.openLeaf,
+            afterOpen: { _, basename in
+                guard basename == "helper-status", inventoryHookCalls.value == 0 else { return }
+                inventoryHookCalls.increment()
+                releaseRename.signal()
+                // The raw RESTORE owns RootStateLock here. A diagnostic rename
+                // must wait for this metadata read, never invalidate its inode.
+                XCTAssertEqual(renameCommitted.wait(timeout: .now() + 0.25), .timedOut)
+            }
+        ))
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration, power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true }, bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() }, recoveryCoordinatorFactory: { fixture.coordinator },
+            activationAllowed: false
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let restored = authority.handle(
+            connection: 1, peer: peer, operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+            sessionID: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        )
+        XCTAssertEqual(inventoryHookCalls.value, 1)
+        XCTAssertEqual(restored.result, 0)
+        XCTAssertEqual(restored.sessionID, session)
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0", "ac=10"])
+        let joined = writerDone.wait(timeout: .now() + 2)
+        writerJoined = joined == .success
+        XCTAssertEqual(joined, .success)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+    }
+
+    func testRawRestoreRejectsUnsafeProjectionTempAndUnknownInventory() throws {
+        for invalid in ["wrong-mode", "oversized", "symlink", "unknown-name"] {
+            let fixture = try Fixture()
+            defer { fixture.dispose() }
+            let state = Mutation.both.state(session: UUID(), boot: Self.boot)
+            try fixture.installPrivateApplied(state)
+            fixture.power.prepareForOwnedMutation(.both)
+            let temp = fixture.sandbox.url.appendingPathComponent("helper-status.projection-temp").path
+            switch invalid {
+            case "wrong-mode":
+                try fixture.createLegacyFile("helper-status.projection-temp", bytes: "partial", mode: 0o600)
+            case "oversized":
+                try fixture.createLegacyFile("helper-status.projection-temp", bytes: String(repeating: "x", count: 4_097))
+            case "symlink":
+                XCTAssertEqual(symlink("helper-status", temp), 0)
+            default:
+                try fixture.createLegacyFile("helper-status.projection-temp.unrecognized", bytes: "partial")
+            }
+            let authority = HelperSessionAuthority(
+                configuration: fixture.configuration, power: fixture.power,
+                recoveryStoreFactory: { _ in fixture.store }, peerIsLive: { _ in true },
+                bootIdentity: { Self.boot }, timerStarter: { _ in NSObject() },
+                recoveryCoordinatorFactory: { fixture.coordinator }, activationAllowed: false
+            )
+            XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+            var peer = ls_peer_identity_t()
+            XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+            let reply = authority.handle(
+                connection: 1, peer: peer, operation: UInt32(LS_OPERATION_RESTORE.rawValue),
+                sessionID: UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+            )
+            XCTAssertNotEqual(reply.result, 0, invalid)
+            XCTAssertEqual(fixture.power.setCalls, [], invalid)
+            XCTAssertEqual(fixture.store.appliedRecord(), .privateAuthority(state), invalid)
+        }
+    }
+
     func testRepeatedCompletedRecoveryIsIdempotentThroughTerminalProof() throws {
         let fixture = try Fixture()
         defer { fixture.dispose() }
@@ -2615,6 +2774,7 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             .terminalIdle(session, "user-restore-recovery")
         )
         XCTAssertEqual(fixture.power.setCalls, calls)
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
     }
 
     func testExplicitOperatorRetryCanFinishExactPersistedRecoveryRequiredStateButStartupCannotReconnectIt() throws {
@@ -2666,6 +2826,203 @@ final class RecoveryCoordinatorFixtureTests: XCTestCase {
             }),
             .recoveryRequired("invalid-recovery-retry-mode")
         )
+    }
+
+    func testActivationRequiresKnownExactQualifiedSystemBuild() {
+        let qualified = ReleaseIdentity.qualifiedSystemBuild
+        XCTAssertTrue(HelperControlService.activationAllowed(
+            currentSystemBuild: qualified, qualifiedBuild: qualified
+        ))
+        XCTAssertFalse(HelperControlService.activationAllowed(
+            currentSystemBuild: nil, qualifiedBuild: qualified
+        ))
+        XCTAssertFalse(HelperControlService.activationAllowed(
+            currentSystemBuild: "unqualified-test-build", qualifiedBuild: qualified
+        ))
+        XCTAssertFalse(HelperControlService.activationAllowed(
+            currentSystemBuild: "unqualified-test-build", qualifiedBuild: "unqualified-test-build"
+        ))
+    }
+
+    func testUnqualifiedBuildStartsOnlyRecoveryListenerWithoutTouchingAuthority() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let state = Mutation.both.state(session: UUID(), boot: Self.boot)
+        try fixture.installPrivateApplied(state)
+        fixture.power.prepareForOwnedMutation(.both)
+        let proof = fixture.store.proofRecord()
+        let storeCalls = IntegerBox()
+        let recoveryCalls = IntegerBox()
+        let timerCalls = IntegerBox()
+        let listenerCalls = IntegerBox()
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in storeCalls.increment(); return fixture.store },
+            peerIsLive: { _ in true },
+            timerStarter: { _ in timerCalls.increment(); return NSObject() },
+            recoveryCoordinatorFactory: { recoveryCalls.increment(); return fixture.coordinator },
+            activationAllowed: false
+        )
+
+        XCTAssertEqual(HelperControlService.runPreparedDaemon(authority: authority) {
+            listenerCalls.increment()
+            return 0
+        }, 0)
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        for operation in [LS_OPERATION_BEGIN, LS_OPERATION_RECONNECT, LS_OPERATION_RENEW] {
+            let reply = authority.handle(
+                connection: 1, peer: peer, operation: UInt32(operation.rawValue), sessionID: UUID()
+            )
+            XCTAssertEqual(reply.result, 75)
+            XCTAssertEqual(reply.reason, "system-build-unqualified")
+            XCTAssertEqual(reply.expiryMonotonic, 0)
+        }
+
+        XCTAssertEqual(listenerCalls.value, 1)
+        XCTAssertEqual(storeCalls.value, 0)
+        XCTAssertEqual(recoveryCalls.value, 0)
+        XCTAssertEqual(timerCalls.value, 0)
+        XCTAssertEqual(fixture.power.setCalls, [])
+        XCTAssertEqual(fixture.store.appliedRecord(), .privateAuthority(state))
+        XCTAssertEqual(fixture.store.proofRecord(), proof)
+    }
+
+    func testUnqualifiedBuildRestoresExactBaselinesButNeverReenablesActivation() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let session = UUID()
+        try fixture.installPrivateApplied(Mutation.both.state(session: session, boot: Self.boot))
+        fixture.power.prepareForOwnedMutation(.both)
+        let authority = HelperSessionAuthority(
+            configuration: fixture.configuration,
+            power: fixture.power,
+            recoveryStoreFactory: { _ in fixture.store },
+            statusProjectionWriter: { task, _ in fixture.statusWriteOutcome(task: task) },
+            peerIsLive: { _ in true },
+            bootIdentity: { Self.boot },
+            timerStarter: { _ in NSObject() },
+            recoveryCoordinatorFactory: { fixture.coordinator },
+            activationAllowed: false
+        )
+        XCTAssertEqual(authority.prepareBeforeListening(), .recoveryListenerOnly)
+        XCTAssertEqual(fixture.power.setCalls, [])
+        var peer = ls_peer_identity_t()
+        XCTAssertTrue(ls_peer_identity_for_current_process(&peer))
+        let zero = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        let restored = authority.handle(
+            connection: 1, peer: peer, operation: UInt32(LS_OPERATION_RESTORE.rawValue), sessionID: zero
+        )
+        XCTAssertEqual(restored.result, 0)
+        XCTAssertEqual(restored.sessionID, session)
+        XCTAssertFalse(restored.sleepDisabled)
+        XCTAssertEqual(restored.acSleepMinutes, 10)
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0", "ac=10"])
+        XCTAssertEqual(fixture.store.appliedRecord(), .missing)
+        for operation in [LS_OPERATION_BEGIN, LS_OPERATION_RECONNECT, LS_OPERATION_RENEW] {
+            let reply = authority.handle(
+                connection: 2, peer: peer, operation: UInt32(operation.rawValue), sessionID: UUID()
+            )
+            XCTAssertEqual(reply.result, 75)
+            XCTAssertEqual(reply.reason, "system-build-unqualified")
+            XCTAssertEqual(reply.expiryMonotonic, 0)
+        }
+        XCTAssertEqual(fixture.power.setCalls, ["sleep=0", "ac=10"])
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+    }
+
+    func testOneShotPublishesPendingStatusBeforeReturningSuccess() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let session = UUID()
+        let writes = IntegerBox()
+        let configuration = Fixture.makeConfiguration(directory: fixture.sandbox.url, mode: .recoverOnce(.userRestore))
+        let operations = HelperControlServiceOperations(
+            provision: { _ in XCTFail("recovery must not provision"); return .ready },
+            recover: { _, _ in
+                XCTAssertNotNil(fixture.store.withTransaction {
+                    fixture.store.enqueueStatusProjection(
+                        state: "terminal", reason: "user-restore-recovery", sessionID: session, $0
+                    )
+                } ?? nil)
+                return .terminalIdle(session, "user-restore-recovery")
+            },
+            daemon: { _ in XCTFail("one-shot must not start daemon"); return 78 },
+            finishOneShotProjection: { configuration in
+                StatusProjectionDispatcher.finishOneShot(
+                    configuration: configuration,
+                    storeFactory: { _ in fixture.store },
+                    writer: { task, _ in writes.increment(); return fixture.statusWriteOutcome(task: task) }
+                )
+            }
+        )
+
+        let result = HelperControlService.execute(configuration: configuration, operations: operations)
+
+        guard case .oneShot(.terminalIdle(session, "user-restore-recovery")) = result else {
+            return XCTFail("one-shot did not publish its terminal status before returning")
+        }
+        XCTAssertEqual(writes.value, 1)
+        XCTAssertEqual(fixture.store.statusProjectionTaskRecord(), .absent)
+        let status = try fixture.readBytes("helper-status")
+        XCTAssertTrue(status.contains("state=terminal\n"))
+        XCTAssertTrue(status.contains("session=\(session.uuidString.lowercased())\n"))
+        XCTAssertTrue(status.contains("reason=user-restore-recovery\n"))
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testOneShotDoesNotClaimSuccessWhenStatusPublicationIsUnverified() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        let configuration = Fixture.makeConfiguration(directory: fixture.sandbox.url, mode: .recoverOnce(.userRestore))
+        let operations = HelperControlServiceOperations(
+            provision: { _ in .ready },
+            recover: { _, _ in
+                XCTAssertNotNil(fixture.store.withTransaction {
+                    fixture.store.enqueueStatusProjection(state: "inactive", reason: "idle", sessionID: nil, $0)
+                } ?? nil)
+                return .pristineIdle
+            },
+            daemon: { _ in XCTFail("one-shot must not start daemon"); return 78 },
+            finishOneShotProjection: { configuration in
+                StatusProjectionDispatcher.finishOneShot(
+                    configuration: configuration, timeout: 0.01,
+                    storeFactory: { _ in fixture.store }, writer: { _, _ in .ioFailure }
+                )
+            }
+        )
+
+        let result = HelperControlService.execute(configuration: configuration, operations: operations)
+
+        guard case .oneShot(.internalFailure("status-projection-unverified")) = result else {
+            return XCTFail("unpublished diagnostic must not produce a successful one-shot receipt")
+        }
+        XCTAssertNotEqual(result.exitCode, 0)
+        guard case .valid = fixture.store.statusProjectionTaskRecord() else {
+            return XCTFail("failed publication must retain its durable retry task")
+        }
+        XCTAssertEqual(fixture.power.setCalls, [])
+    }
+
+    func testOneShotProjectionWaitIsBoundedWhenWriterDoesNotReturn() throws {
+        let fixture = try Fixture()
+        defer { fixture.dispose() }
+        XCTAssertNotNil(fixture.store.withTransaction {
+            fixture.store.enqueueStatusProjection(state: "inactive", reason: "idle", sessionID: nil, $0)
+        } ?? nil)
+        let releaseWriter = DispatchSemaphore(value: 0)
+        defer { releaseWriter.signal() }
+        XCTAssertFalse(StatusProjectionDispatcher.finishOneShot(
+            configuration: fixture.configuration, timeout: 0.01,
+            storeFactory: { _ in fixture.store }, writer: { task, _ in
+                _ = releaseWriter.wait(timeout: .now() + 1)
+                return fixture.statusWriteOutcome(task: task)
+            }
+        ))
+        releaseWriter.signal()
+        XCTAssertTrue(fixture.waitForStatusProjectionDrain())
+        XCTAssertEqual(fixture.power.setCalls, [])
     }
 
     func testOneShotDispatchNeverConstructsDaemonPathAndDaemonDispatchesExactlyOnce() throws {
@@ -2970,7 +3327,7 @@ private final class Fixture {
     ) -> HelperServiceConfiguration {
         .init(
             expectedOwnerUID: getuid(),
-            qualifiedBuild: "25F84",
+            qualifiedBuild: ReleaseIdentity.qualifiedSystemBuild,
             supportDirectory: directory.path,
             appliedStatePath: directory.appendingPathComponent(RecoveryAuthorityStore.appliedBasename).path,
             statusPath: directory.appendingPathComponent("helper-status").path,

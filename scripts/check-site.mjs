@@ -6,6 +6,7 @@ const html = readFileSync(join(root, 'site/index.html'), 'utf8');
 const normalizedHtml = html.replace(/\s+/g, ' ');
 const css = readFileSync(join(root, 'site/styles.css'), 'utf8');
 const releaseEnv = readFileSync(join(root, 'script/release.env'), 'utf8');
+const releaseIdentity = JSON.parse(readFileSync(join(root, 'release/identity.json'), 'utf8'));
 const vercelConfig = JSON.parse(readFileSync(join(root, 'vercel.json'), 'utf8'));
 const publicTextFiles = [
   'README.md',
@@ -38,7 +39,7 @@ const required = [
   'Start Plugged-In Session',
   'Stop and Restore',
   'never rearms automatically',
-  'macOS 26.5.2 build 25F84',
+  `macOS build ${releaseIdentity.qualifiedSystemBuild}`,
   'Source is public on GitHub',
   'https://github.com/johnsilvavlogs/lidswitch',
   'https://github.com/johnsilvavlogs/lidswitch/releases/latest',

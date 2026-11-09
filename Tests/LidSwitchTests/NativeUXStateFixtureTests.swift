@@ -1731,11 +1731,178 @@ final class NativeUXStateFixtureTests: XCTestCase {
         controller.revokeForImmediateTermination()
         controller.revokeForImmediateTermination()
 
-        XCTAssertEqual(events.read { $0.filter { $0 == "remote-terminal" }.count }, 1)
         XCTAssertEqual(events.read { $0.filter { $0 == "activity-end" }.count }, 1)
         XCTAssertNil(controller.activeSessionIDForTesting)
         XCTAssertFalse(controller.isBusy)
         XCTAssertFalse(controller.isStarting)
+        await assertEventually { events.read { $0.filter { $0 == "remote-terminal" }.count } == 1 }
+    }
+
+    @MainActor
+    func testQuitRemainsResponsiveDuringDelayedTerminalReplyAndUsesExactProofWithoutPolling() async throws {
+        let terminalEntered = DispatchSemaphore(value: 0)
+        let releaseTerminal = DispatchSemaphore(value: 0)
+        defer { releaseTerminal.signal() }
+        let events = UXLockedBox([String]())
+        let waiterCalls = UXLockedBox(0)
+        let safe = makeSnapshot()
+        let controller = PowerController(
+            bootstrap: false,
+            snapshotProvider: { _ in safe },
+            sideEffects: .recordingFixture(
+                { event in events.mutate { $0.append(event) } },
+                terminalResolution: { sessionID, _ in
+                    terminalEntered.signal()
+                    _ = releaseTerminal.wait(timeout: .now() + 2)
+                    return .terminated(Self.protocolTerminalReply(sessionID: sessionID))
+                }
+            ),
+            safeRollbackWaiter: {
+                waiterCalls.mutate { $0 += 1 }
+                return safe
+            },
+            announcementHandler: { _ in }
+        )
+        controller.startSession()
+        await assertEventually { controller.cleanupOwnerSessionIDForTesting != nil }
+        let sessionID = try XCTUnwrap(controller.cleanupOwnerSessionIDForTesting)
+        controller.simulateHeartbeatAcknowledgeForTesting(
+            sessionID: sessionID, epoch: controller.sessionEpochForTesting
+        )
+        XCTAssertFalse(controller.isBusy, "the nil-heartbeat fixture must acknowledge its issued authority")
+
+        let quitStarted = MonotonicClock.seconds()
+        controller.quitSafely()
+        XCTAssertLessThan(MonotonicClock.seconds() - quitStarted, 0.25,
+                          "the main actor must return while terminal IPC is held")
+        XCTAssertNil(controller.activeSessionIDForTesting, "local authority is invalidated synchronously")
+        XCTAssertEqual(terminalEntered.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(controller.isBusy)
+        XCTAssertFalse(events.read { $0.contains("terminate") })
+        XCTAssertEqual(waiterCalls.read { $0 }, 0, "rollback polling must wait for the terminal reply")
+
+        controller.quitSafely()
+        releaseTerminal.signal()
+        await assertEventually { events.read { $0.contains("terminate") } }
+        XCTAssertEqual(events.read { $0.filter { $0 == "lease-revoke" }.count }, 1)
+        XCTAssertEqual(events.read { $0.filter { $0 == "terminate" }.count }, 1)
+        XCTAssertEqual(waiterCalls.read { $0 }, 0, "an exact authenticated terminal proof needs no projection timeout")
+        XCTAssertNil(controller.cleanupOwnerSessionIDForTesting)
+        XCTAssertTrue(controller.consumeAuthorizedTermination())
+        XCTAssertFalse(controller.consumeAuthorizedTermination())
+    }
+
+    @MainActor
+    func testQuitDuringExistingStopOrCancelRestorationWaitsForItsSafeOutcome() async throws {
+        for cancelStart in [false, true] {
+            for restored in [false, true] {
+                let waiterEntered = DispatchSemaphore(value: 0)
+                let releaseWaiter = DispatchSemaphore(value: 0)
+                let events = UXLockedBox([String]())
+                let session = UXLockedBox<UUID?>(nil)
+                let safe = makeSnapshot()
+                let unsafe = makeSnapshot(sleepDisabled: true)
+                let controller = PowerController(
+                    bootstrap: false,
+                    snapshotProvider: { _ in safe },
+                    sideEffects: .lifecycleFixture(
+                        { event in events.mutate { $0.append(event) } },
+                        issueLease: { sessionID in
+                            session.mutate { $0 = sessionID }
+                            return .issued(Self.fixtureLease(sessionID: sessionID))
+                        },
+                        terminateLease: { _, _ in events.mutate { $0.append("remote-terminal") } },
+                        makeHeartbeat: { _, _, _, _ in nil }
+                    ),
+                    safeRollbackWaiter: {
+                        waiterEntered.signal()
+                        _ = releaseWaiter.wait(timeout: .now() + 2)
+                        guard restored, let sessionID = session.read({ $0 }) else { return unsafe }
+                        return Self.firstGenerationTerminalSnapshot(sessionID: sessionID)
+                    },
+                    announcementHandler: { _ in }
+                )
+                controller.startSession()
+                await assertEventually { controller.cleanupOwnerSessionIDForTesting != nil }
+                let sessionID = try XCTUnwrap(controller.cleanupOwnerSessionIDForTesting)
+                controller.simulateHeartbeatAcknowledgeForTesting(
+                    sessionID: sessionID, epoch: controller.sessionEpochForTesting
+                )
+                XCTAssertFalse(controller.isBusy, "the nil-heartbeat fixture must acknowledge its issued authority")
+                XCTAssertTrue(controller.isStarting, "the unprojected fixture must keep cancellation available")
+                if cancelStart { controller.cancelPendingStart() } else { controller.stopSession() }
+                XCTAssertEqual(waiterEntered.wait(timeout: .now() + 1), .success)
+
+                controller.quitSafely()
+                controller.quitSafely()
+                XCTAssertTrue(controller.isBusy)
+                XCTAssertFalse(events.read { $0.contains("terminate") })
+                releaseWaiter.signal()
+                // A failed stop can read the same failed snapshot once more
+                // after installed-helper recovery; do not hold that retry.
+                releaseWaiter.signal()
+                await assertEventually { !controller.isBusy }
+
+                XCTAssertEqual(events.read { $0.filter { $0 == "remote-terminal" }.count }, 1)
+                XCTAssertEqual(events.read { $0.filter { $0 == "terminate" }.count }, restored ? 1 : 0)
+                XCTAssertEqual(controller.operationPhase, restored ? .idle : .recoveryRequired)
+                XCTAssertEqual(controller.cleanupOwnerSessionIDForTesting == nil, restored)
+                XCTAssertFalse(controller.isKeepAwakeOn)
+            }
+        }
+    }
+
+    func testBackgroundHeartbeatStopInvalidatesHeldRenewalBeforeReturningAndIgnoresDelayedAdvance() async throws {
+        let root = try TestSandbox.makeDirectory(label: "heartbeat-background-stop")
+        let diagnostics = SessionDiagnosticStore(file: root.url.appendingPathComponent("diagnostics"))
+        let clock = UXLockedBox<TimeInterval>(0)
+        let renewEntered = DispatchSemaphore(value: 0)
+        let releaseRenew = DispatchSemaphore(value: 0)
+        defer { releaseRenew.signal() }
+        let commitGuard = UXLockedBox<(@Sendable () -> Bool)?>(nil)
+        let events = UXLockedBox([String]())
+        let coordinator = SessionHeartbeatCoordinator(
+            observationInterval: 3_600,
+            renewalInterval: 8,
+            monotonicNow: { clock.read { $0 } },
+            observe: { _ in SessionHeartbeatObservation(power: .ac, authority: .verified, helperStatus: nil) },
+            renew: { _, guardCommit in
+                XCTAssertTrue(guardCommit())
+                commitGuard.mutate { $0 = guardCommit }
+                renewEntered.signal()
+                _ = releaseRenew.wait(timeout: .now() + 2)
+                XCTAssertFalse(guardCommit(), "Stop invalidates the held write permit immediately")
+                return .renewed(expiryMonotonic: 80)
+            },
+            revoke: { events.mutate { $0.append("unexpected-restore") } },
+            endRemote: { _, _ in events.mutate { $0.append("remote-end") } },
+            diagnostics: diagnostics,
+            onAcknowledged: { _ in },
+            onEnded: { _, _ in events.mutate { $0.append("unexpected-callback") } }
+        )
+        coordinator.start(sessionID: UUID(), initialLeaseExpiresMonotonic: 30, initiallyAcknowledged: true)
+        clock.mutate { $0 = 8 }
+        let evaluation = Task.detached { coordinator.evaluateForTesting() }
+        XCTAssertEqual(renewEntered.wait(timeout: .now() + 1), .success)
+
+        let stopStarted = MonotonicClock.seconds()
+        let stopping = coordinator.stopInBackground(reason: "user-end")
+        XCTAssertLessThan(MonotonicClock.seconds() - stopStarted, 0.25)
+        XCTAssertFalse(commitGuard.read { $0?() ?? true })
+        let duplicateStop = coordinator.stopInBackground(reason: "duplicate-stop")
+        XCTAssertTrue(events.read { $0.isEmpty })
+        releaseRenew.signal()
+        await evaluation.value
+        let flushed = await stopping.value
+        let duplicateFlushed = await duplicateStop.value
+        XCTAssertTrue(flushed)
+        XCTAssertTrue(duplicateFlushed)
+        XCTAssertEqual(events.read { $0 }, ["remote-end"])
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entries = try decoder.decode([SessionDiagnosticEntry].self,
+                                         from: Data(contentsOf: root.url.appendingPathComponent("diagnostics")))
+        XCTAssertFalse(entries.contains { $0.event.hasPrefix("renew") }, "a delayed renewal reply cannot publish advancement")
     }
 
     func testHeartbeatInFlightRenewalOrdersTerminalLatchBeforeSingleRemoteEffect() throws {
@@ -1897,7 +2064,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
             activationLease: nil,
             ownedSessionID: ownedSessionID,
             helperStatus: status ?? safeTerminal,
-            systemBuild: "25F84",
+            systemBuild: ReleaseIdentity.qualifiedSystemBuild,
             systemBuildQualified: true,
             bundleIntegrityValid: true,
             bundleVersionValid: true,
@@ -1944,7 +2111,7 @@ final class NativeUXStateFixtureTests: XCTestCase {
                 sessionID: sessionID,
                 updatedAt: now
             ),
-            systemBuild: "25F84",
+            systemBuild: ReleaseIdentity.qualifiedSystemBuild,
             systemBuildQualified: true,
             bundleIntegrityValid: true,
             bundleVersionValid: true,

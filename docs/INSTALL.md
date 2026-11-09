@@ -3,23 +3,21 @@
 ## Requirements
 
 - Apple Silicon Mac
-- macOS `26.5.2` build `25F84` for activation in this recovery release
+- macOS `27.2` build `26B123` for activation in this recovery release
 - Administrator access to install or remove the helper and to run explicit recovery
 
 ## Install the manual build
 
 1. Download `LidSwitch.dmg` from GitHub Releases.
-2. Run `shasum -a 256 LidSwitch.dmg` and verify that it equals the published
-   `0c2d03cafc88ee8d947b4f3551e72e046ce50955fb2946eb56bc8b344669dc00`
-   digest recorded in `docs/DISTRIBUTION.md`.
+2. Run `shasum -a 256 LidSwitch.dmg` and compare it with the checksum published beside that release.
 3. Open the DMG and copy `LidSwitch.app` to `/Applications`.
 4. This build is ad-hoc signed and not notarized. If Gatekeeper blocks it, use **Open Anyway** in System Settings > Privacy & Security.
 5. Open LidSwitch. Protection is off.
-6. Choose **Prepare Safe Helper** and approve the administrator prompt. This installs the compiled helper and removes old startup behavior; it does not start a session.
-7. While connected to AC, choose **Start Plugged-In Session** and confirm.
-8. When the job finishes, choose **Stop and Restore**.
+6. Choose **Install Helper**, **Update Helper**, or **Repair Helper** when offered, then approve the administrator prompt.
+7. Choose **Plugged in**, **On battery**, or both. Turn on **Keep Mac awake** and wait for **Awake** before closing the lid.
+8. Turn the switch off, or choose **Quit**, to restore sleep. Ordinary switching and quitting require no administrator prompt.
 
-There is no login launch or battery mode. Reconnecting power never starts a session.
+There is no login launch. Opening the app leaves protection off and preserves the source choices. Reconnecting power resumes protection only while the app remains open with Keep Mac awake on and that source selected.
 
 ## Remove
 

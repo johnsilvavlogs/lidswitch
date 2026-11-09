@@ -1383,7 +1383,7 @@ private final class LegacyFixture {
         power = LegacyPower(disabled: disabled, ac: ac, battery: battery)
         configuration = .init(
             expectedOwnerUID: getuid(),
-            qualifiedBuild: "25F84",
+            qualifiedBuild: ReleaseIdentity.qualifiedSystemBuild,
             supportDirectory: sandbox.url.path,
             appliedStatePath: sandbox.url.appendingPathComponent(RecoveryAuthorityStore.appliedBasename).path,
             statusPath: sandbox.url.appendingPathComponent("helper-status").path,

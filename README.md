@@ -2,12 +2,12 @@
 
 LidSwitch is a native macOS menu bar app that keeps your Mac awake while its lid is closed. Turn on **Keep Mac awake** and choose whether it works **Plugged in**, **On battery**, or both.
 
-Version `0.3.0` build `12` uses one master switch and saves both power-source choices. Battery operation starts disabled until you select it. Approve helper installation once; ordinary switching and quitting use the installed authenticated helper without confirmation dialogs. Updating, repairing, or removing that privileged installation can still require macOS authorization.
+Version `0.3.1` build `13` runs one app instance per user and keeps Quit responsive while sleep restoration finishes. It saves both power-source choices. Battery operation starts disabled until you select it. Approve helper installation once; ordinary switching and quitting use the installed authenticated helper without confirmation dialogs. Updating, repairing, or removing that privileged installation can still require macOS authorization.
 
 ## Safety model
 
 - Protection is off after install, app launch, login, or reboot. Source choices persist; the master switch does not automatically turn on at launch.
-- First setup installs helper version `12` into the root-owned `Current` release directory and removes old startup artifacts. An unavailable installation offers **Repair Helper**.
+- First setup installs helper version `13` into the root-owned `Current` release directory and removes old startup artifacts. An unavailable installation offers **Repair Helper**.
 - **Keep Mac awake** starts protection on a selected, known power source after live state and bundle checks pass.
 - The app begins one authenticated process-bound raw-XPC session. The helper chooses its same-boot monotonic deadline, capped at 30 seconds, and the app renews every 8 seconds.
 - The compiled helper validates the enrolled caller identity, exact live process tuple, session UUID, private recovery authority, power source, build, and native power-preference state.
@@ -18,7 +18,7 @@ Version `0.3.0` build `12` uses one master switch and saves both power-source ch
 - The helper records the selected source policy and original sleep timers before changing power settings, including timers already set to zero. Turning the switch off restores those original values.
 - A root-owned applied-state record is removed only after restoration is verified. Failed restoration keeps that evidence and reports **Restore required**.
 
-The app currently qualifies macOS `26.5.2` build `25F84`. Other OS builds remain off until separately validated. The Swift package minimum remains macOS 14 for compilation.
+This release targets macOS `27.2` build `26B123`. Other OS builds keep activation off while authenticated sleep restoration remains available. The Swift package minimum remains macOS 14 for compilation.
 
 ## Repository
 

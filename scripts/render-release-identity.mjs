@@ -312,7 +312,7 @@ if (mode === '--write') {
   }
   for (const path of ['site/index.html', 'site/download/index.html']) {
     const content = readFileSync(join(root, path), 'utf8');
-    if (!content.includes(`macOS 26.5.2 build ${identity.qualifiedSystemBuild}`)) throw new Error(`${path} drifts from qualified build identity`);
+    if (!content.includes(`macOS build ${identity.qualifiedSystemBuild}`)) throw new Error(`${path} drifts from qualified build identity`);
     if (content.includes(identity.appVersion)) throw new Error(`${path} must not carry a drift-prone release version`);
   }
   const retiredAssets = ['site/assets/lidswitch-panel.png', 'screenshots/lidswitch-working.png'];

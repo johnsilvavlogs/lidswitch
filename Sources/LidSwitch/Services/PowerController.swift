@@ -414,6 +414,14 @@ private final class SnapshotProviderBox: @unchecked Sendable {
     ) {
         loader(ownedSessionID, forceFresh, fastCompletion, inventoryCompletion)
     }
+
+    func detachedSnapshot() async -> PowerSnapshot {
+        await withCheckedContinuation { continuation in
+            load(ownedSessionID: nil, forceFresh: false,
+                 fastCompletion: { continuation.resume(returning: $0) },
+                 inventoryCompletion: { _, _ in })
+        }
+    }
 }
 
 private enum RefreshPurpose: Sendable {
@@ -1211,6 +1219,7 @@ final class PowerController: ObservableObject {
     private var heartbeat: SessionHeartbeatCoordinator?
     private var activeSessionID: UUID?
     private var cleanupOwnership: RemoteAuthorityCleanupOwnership?
+    private var terminalCleanup: Task<Void, Never>?
     private var sessionWasAcknowledged = false
     private var sessionWasPresentedActive = false
     private var activityToken: NSObjectProtocol?
@@ -1700,8 +1709,10 @@ final class PowerController: ObservableObject {
             phase: .preparingHelper
         )
         let failureVerificationWaiter = restoreVerificationWaiter
+        let terminalCleanup = terminalCleanup
 
         Task.detached {
+            await terminalCleanup?.value
             do {
                 let result = try self.sideEffects.prepareHelper()
                 if case let .recoveryRequired(receipt) = result,
@@ -2022,8 +2033,10 @@ final class PowerController: ObservableObject {
         let terminationReplyID = pendingTerminationReply?.id
         snapshotProviders.invalidateInventory()
         let safeRollbackWaiter = safeRollbackWaiter
+        let terminalCleanup = terminalCleanup
 
         Task.detached {
+            await terminalCleanup?.value
             let next = safeRollbackWaiter()
             await MainActor.run {
                 guard self.sessionEpoch == operationEpoch,
@@ -2037,7 +2050,7 @@ final class PowerController: ObservableObject {
                     self.announce(self.errorMessage ?? "Session failed. Restore required before continuing.")
                     self.operationPhase = .recoveryRequired
                     self.isBusy = false
-                    self.resolveTerminationReply(false, expectedID: terminationReplyID)
+                    self.resolveRestorationTerminationReply(false, expectedID: terminationReplyID)
                     return
                 }
                 self.releaseCleanupOwnership(expectedOwner, afterSafeSnapshot: next)
@@ -2045,7 +2058,7 @@ final class PowerController: ObservableObject {
                 self.announce(self.errorMessage ?? "Session did not start. Protection remains off.")
                 self.operationPhase = .idle
                 self.isBusy = false
-                self.resolveTerminationReply(true, expectedID: terminationReplyID)
+                self.resolveRestorationTerminationReply(true, expectedID: terminationReplyID)
             }
         }
     }
@@ -2086,7 +2099,9 @@ final class PowerController: ObservableObject {
         )
         let operationEpoch = sessionEpoch
         let safeRollbackWaiter = safeRollbackWaiter
+        let terminalCleanup = terminalCleanup
         Task.detached {
+            await terminalCleanup?.value
             let next = safeRollbackWaiter()
             await MainActor.run {
                 guard self.sessionEpoch == operationEpoch,
@@ -2099,7 +2114,7 @@ final class PowerController: ObservableObject {
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
                     self.operationPhase = .recoveryRequired
                     self.isBusy = false
-                    self.resolveTerminationReply(false, expectedID: terminationReplyID)
+                    self.resolveRestorationTerminationReply(false, expectedID: terminationReplyID)
                     return
                 }
                 let restored = self.provesCompleteRollback(next, for: expectedOwner)
@@ -2113,7 +2128,7 @@ final class PowerController: ObservableObject {
                 }
                 self.operationPhase = restored ? .idle : .recoveryRequired
                 self.isBusy = false
-                self.resolveTerminationReply(restored, expectedID: terminationReplyID)
+                self.resolveRestorationTerminationReply(restored, expectedID: terminationReplyID)
                 if terminationReplyID == nil, next.installationInventoryPending {
                     self.refresh()
                 }
@@ -2156,8 +2171,10 @@ final class PowerController: ObservableObject {
         let operationEpoch = sessionEpoch
         snapshotProviders.invalidateInventory()
         let restoreVerificationWaiter = restoreVerificationWaiter
+        let terminalCleanup = terminalCleanup
 
         Task.detached {
+            await terminalCleanup?.value
             var recoveryFailureMessage: String?
             var recoveryRequiresRepair = false
             do {
@@ -2180,7 +2197,7 @@ final class PowerController: ObservableObject {
                     self.announce(self.errorMessage ?? "A detached session state could not be verified.")
                     self.operationPhase = .recoveryRequired
                     self.isBusy = false
-                    self.resolveTerminationReply(false, expectedID: terminationReplyID)
+                    self.resolveRestorationTerminationReply(false, expectedID: terminationReplyID)
                     return
                 }
                 let restored = self.provesCompleteRollback(next, for: expectedOwner)
@@ -2201,7 +2218,7 @@ final class PowerController: ObservableObject {
                 }
                 self.operationPhase = restored ? .idle : .recoveryRequired
                 self.isBusy = false
-                self.resolveTerminationReply(restored, expectedID: terminationReplyID)
+                self.resolveRestorationTerminationReply(restored, expectedID: terminationReplyID)
                 if terminationReplyID == nil { self.refresh(forceFresh: true) }
             }
         }
@@ -2216,8 +2233,10 @@ final class PowerController: ObservableObject {
             phase: .removingHelper
         )
         let failureVerificationWaiter = restoreVerificationWaiter
+        let terminalCleanup = terminalCleanup
 
         Task.detached {
+            await terminalCleanup?.value
             do {
                 let result = try self.sideEffects.uninstallHelper()
                 try Self.requireAdministratorSafeIdle(
@@ -2278,25 +2297,12 @@ final class PowerController: ObservableObject {
     }
 
     func quitSafely() {
-        keepAwakeRequested = false
-        startAfterHelperPreparation = false
-        if isStarting, authenticatedOwnedSessionID == nil {
-            prepareForSystemTermination { [weak self] restored in
-                guard restored, let self else { return }
-                self.nextTerminationIsAuthorized = true
-                self.sideEffects.terminateApplication()
-            }
-            return
+        guard pendingTerminationReply == nil else { return }
+        prepareForSystemTermination { [weak self] restored in
+            guard restored, let self else { return }
+            self.nextTerminationIsAuthorized = true
+            self.sideEffects.terminateApplication()
         }
-        guard !isBusy else { return }
-        // An idle app needs no privileged transaction to quit. An owned
-        // generation is restored through the installed authenticated helper.
-        guard requiresTerminationCleanup else {
-            nextTerminationIsAuthorized = true
-            sideEffects.terminateApplication()
-            return
-        }
-        stopSession(quitWhenRestored: true, terminationReplyID: nil)
     }
 
     func prepareForSystemTermination(completion: @escaping (Bool) -> Void) {
@@ -2309,6 +2315,12 @@ final class PowerController: ObservableObject {
         if isStarting, authenticatedOwnedSessionID == nil {
             guard let replyID = registerTerminationReply(completion) else { return }
             cancelPendingStart(terminationReplyID: replyID)
+            return
+        }
+        if isBusy, operationPhase == .endingRestoring || operationPhase == .cancelRestoring {
+            // The existing operation already owns rollback. Retain this Quit
+            // request and let its current-generation completion answer it.
+            _ = registerTerminationReply(completion)
             return
         }
         guard !isBusy else {
@@ -2346,6 +2358,13 @@ final class PowerController: ObservableObject {
         // callback or stale waiter can never consume the same reply twice.
         self.pendingTerminationReply = nil
         pendingTerminationReply.completion(restored)
+    }
+
+    /// Call only after the restoration waiter's epoch guard. A Quit received
+    /// after that waiter started belongs to the same restoration, while an
+    /// explicitly captured reply still cannot consume a replacement request.
+    private func resolveRestorationTerminationReply(_ restored: Bool, expectedID: UUID?) {
+        resolveTerminationReply(restored, expectedID: expectedID ?? pendingTerminationReply?.id)
     }
 
     func consumeAuthorizedTermination() -> Bool {
@@ -2409,24 +2428,39 @@ final class PowerController: ObservableObject {
             reason: "user-end",
             operationPhaseAfterEnd: .endingRestoring
         )
-        var preferenceFailureMessage: String?
-        if let preferencesAfterEnd {
-            do {
-                try persistSourcePreferences(preferencesAfterEnd)
-            } catch {
-                keepAwakeRequested = false
-                preferenceFailureMessage = "Your power-source choice could not be saved. Keep Mac awake is off; refresh and try again."
-            }
-        }
-        let savedPreferenceFailure = preferenceFailureMessage
         let operationEpoch = sessionEpoch
         // If the normal authenticated END cannot prove idle, the fallback
         // administrator mutation must never race a cached installation view.
         snapshotProviders.invalidateInventory()
 
         let safeRollbackWaiter = safeRollbackWaiter
+        let terminalCleanup = terminalCleanup
+        let snapshotProviders = snapshotProviders
         Task.detached {
-            var next = safeRollbackWaiter()
+            await terminalCleanup?.value
+            // A source change belongs after the old generation's terminal
+            // exchange. Neither saving nor a later BEGIN may overtake END.
+            let savedPreferenceFailure: String?
+            if let preferencesAfterEnd {
+                let preferenceResult = await MainActor.run { () -> (current: Bool, failure: String?) in
+                    guard self.sessionEpoch == operationEpoch, self.activeSessionID == nil,
+                          self.operationPhase == .endingRestoring else { return (false, nil) }
+                    do {
+                        try self.persistSourcePreferences(preferencesAfterEnd)
+                    } catch {
+                        self.keepAwakeRequested = false
+                        return (true, "Your power-source choice could not be saved. Keep Mac awake is off; refresh and try again.")
+                    }
+                    return (true, nil)
+                }
+                guard preferenceResult.current else { return }
+                savedPreferenceFailure = preferenceResult.failure
+            } else {
+                savedPreferenceFailure = nil
+            }
+            var next = await Self.rollbackSnapshot(
+                for: expectedOwner, snapshotProviders: snapshotProviders, waiter: safeRollbackWaiter
+            )
             var recoveryFailureMessage: String?
             if !(expectedOwner?.provesFullRollback(next) == true
                     || expectedOwner?.hasAuthenticatedTerminalProof == true
@@ -2460,7 +2494,7 @@ final class PowerController: ObservableObject {
                     self.announce(self.errorMessage ?? "A detached session state could not be verified.")
                     self.operationPhase = .recoveryRequired
                     self.isBusy = false
-                    self.resolveTerminationReply(false, expectedID: terminationReplyID)
+                    self.resolveRestorationTerminationReply(false, expectedID: terminationReplyID)
                     return
                 }
                 if restored {
@@ -2489,7 +2523,7 @@ final class PowerController: ObservableObject {
                 }
                 self.operationPhase = restored ? .idle : .recoveryRequired
                 self.isBusy = false
-                self.resolveTerminationReply(restored, expectedID: terminationReplyID)
+                self.resolveRestorationTerminationReply(restored, expectedID: terminationReplyID)
             }
         }
     }
@@ -2593,7 +2627,14 @@ final class PowerController: ObservableObject {
         guard cleanupOwnership === cleanupOwner,
               cleanupOwner.sessionID == sessionID
         else { return }
-        heartbeat?.stop(reason: "superseded-session")
+        if let heartbeat {
+            let previousCleanup = terminalCleanup
+            let stopping = heartbeat.stopInBackground(reason: "superseded-session")
+            terminalCleanup = Task.detached {
+                await previousCleanup?.value
+                _ = await stopping.value
+            }
+        }
         let heartbeatEpoch = sessionEpoch
         let legacyFactory = sideEffects.makeHeartbeat
         let factory: PowerControllerSideEffects.PolicyHeartbeatFactory = sideEffects.makeHeartbeatWithPolicy
@@ -2708,8 +2749,11 @@ final class PowerController: ObservableObject {
                 : "Keep Mac awake ended. Restoring normal sleep."
         )
         let safeRollbackWaiter = safeRollbackWaiter
+        let snapshotProviders = snapshotProviders
         Task.detached {
-            let next = safeRollbackWaiter()
+            let next = await Self.rollbackSnapshot(
+                for: expectedOwner, snapshotProviders: snapshotProviders, waiter: safeRollbackWaiter
+            )
             await MainActor.run {
                 guard self.sessionEpoch == terminationEpoch, self.activeSessionID == nil else { return }
                 self.snapshot = self.applySavedPreferences(from: next)
@@ -2722,6 +2766,7 @@ final class PowerController: ObservableObject {
                     self.announce(self.errorMessage ?? "Restore required before continuing.")
                     self.operationPhase = .recoveryRequired
                     self.isBusy = false
+                    self.resolveRestorationTerminationReply(false, expectedID: nil)
                     return
                 }
                 let restored = self.provesCompleteRollback(next, for: expectedOwner)
@@ -2740,6 +2785,7 @@ final class PowerController: ObservableObject {
                     self.operationPhase = .recoveryRequired
                 }
                 self.isBusy = false
+                self.resolveRestorationTerminationReply(restored, expectedID: nil)
                 if preserveIntent && self.keepAwakeRequested {
                     // The rollback waiter supplies dynamic proof only. A fresh
                     // installation check must authorize the next generation.
@@ -2766,18 +2812,26 @@ final class PowerController: ObservableObject {
         // The coordinator uses the same owner claim inside its serial terminal
         // latch. Direct and heartbeat paths therefore compete for one exact
         // generation token rather than separately deciding to END/RESTORE.
-        heartbeat?.stop(reason: reason)
+        let heartbeatCleanup = heartbeat?.stopInBackground(reason: reason)
         heartbeat = nil
         activeSessionID = nil
         sessionWasAcknowledged = false
         sessionWasPresentedActive = false
         operationPhase = operationPhaseAfterEnd
         startRequestID = nil
-        if directCleanupOwned, let cleanupOwner {
-            let intent: HelperGenerationTerminationIntent = reason == "user-end" ? .end : .restore
-            cleanupOwner.recordAuthenticatedTerminalProof(
-                sideEffects.terminateLease(cleanupOwner.sessionID, intent)
-            )
+        if heartbeatCleanup != nil || directCleanupOwned {
+            let previousCleanup = terminalCleanup
+            let sideEffects = sideEffects
+            terminalCleanup = Task.detached {
+                await previousCleanup?.value
+                _ = await heartbeatCleanup?.value
+                if directCleanupOwned, let cleanupOwner {
+                    let intent: HelperGenerationTerminationIntent = reason == "user-end" ? .end : .restore
+                    cleanupOwner.recordAuthenticatedTerminalProof(
+                        sideEffects.terminateLease(cleanupOwner.sessionID, intent)
+                    )
+                }
+            }
         }
         endActivity()
         if let announcement {
@@ -2811,6 +2865,21 @@ final class PowerController: ObservableObject {
                 || expectedOwner.hasAuthenticatedTerminalProof
         }
         return Self.isVerifiedSafeIdle(snapshot)
+    }
+
+    nonisolated private static func rollbackSnapshot(
+        for expectedOwner: RemoteAuthorityCleanupOwnership?,
+        snapshotProviders: SnapshotProviderBox,
+        waiter: @Sendable () -> PowerSnapshot
+    ) async -> PowerSnapshot {
+        // The authenticated exact-generation reply already proves every
+        // selected power baseline. A missing status-file projection cannot
+        // improve that proof by consuming the full rollback polling timeout.
+        if expectedOwner?.hasAuthenticatedTerminalProof == true {
+            let next = await snapshotProviders.detachedSnapshot()
+            if hasNoOwnedSession(next) { return next }
+        }
+        return waiter()
     }
 
     // All authoritative refresh callers (bootstrap, the 30-second timer,

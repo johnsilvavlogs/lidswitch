@@ -4,8 +4,8 @@ import Foundation
 
 /// Test-only bridge for legacy tests that used to write the public status
 /// bytes directly. It always constructs a strict projection task and invokes
-/// the production task writer; it creates no helper authority, lease, or
-/// session state.
+/// the production task writer. It provisions only its isolated directory's
+/// shared lock, never helper authority, a lease, or session state.
 enum HelperStatusFixture {
     static func write(state: String, reason: String, sessionID: UUID?, path: String) -> Bool {
         let now = UInt64(max(1, MonotonicClock.seconds() * 1_000_000_000))
@@ -22,10 +22,20 @@ enum HelperStatusFixture {
             else { return false }
             let mode = mode_t(metadata.st_mode & 0o7777)
             guard mode == 0o700 || mode == 0o755 else { return false }
+            let expectations = VerifiedRootStateDirectory.Expectations(
+                ownerUID: metadata.st_uid, groupID: metadata.st_gid, mode: mode
+            )
+            guard let directory = VerifiedRootStateDirectory(
+                heldDirectoryDescriptor: descriptor, expectations: expectations
+            ) else { return false }
+            switch directory.provisionLockLeaf(RootStateLock.authorizationBasename) {
+            case .provisioned, .alreadyPresent: break
+            case .provisionedButUnverified, .failure: return false
+            }
             return HelperStatusStore.write(
                 task: task,
                 heldDirectoryDescriptor: descriptor,
-                expectations: .init(ownerUID: metadata.st_uid, groupID: metadata.st_gid, mode: mode)
+                expectations: expectations
             )
         }
         return HelperStatusStore.write(task: task, path: path)

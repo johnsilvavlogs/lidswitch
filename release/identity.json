@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "appVersion": "0.3.0",
-  "appBuild": 12,
-  "helperVersion": 12,
+  "appVersion": "0.3.1",
+  "appBuild": 13,
+  "helperVersion": 13,
   "xpcProtocolVersion": 11,
   "enrollmentPolicyProtocolVersion": 1,
-  "releaseTag": "v0.3.0",
+  "releaseTag": "v0.3.1",
   "appBundleIdentifier": "com.johnsilva.LidSwitch",
   "helperLabel": "com.johnsilva.lidswitch.helper",
   "machService": "com.johnsilva.lidswitch.helper.control",
-  "qualifiedSystemBuild": "25F84",
+  "qualifiedSystemBuild": "26B123",
   "channel": "manual-ad-hoc"
 }

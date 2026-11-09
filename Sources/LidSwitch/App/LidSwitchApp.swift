@@ -1,8 +1,10 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @main
 struct LidSwitchApp: App {
+    private let instanceLock: AppInstanceLock
     @NSApplicationDelegateAdaptor(LidSwitchApplicationDelegate.self) private var appDelegate
     @StateObject private var controller: PowerController
     @StateObject private var confirmationPresenter: NativeConfirmationPresenter
@@ -11,6 +13,17 @@ struct LidSwitchApp: App {
         // Diagnostic/packaging commands must exit before a controller is created.
         // Production explicitly selects the authenticated raw-XPC client.
         DebugCommands.handleIfNeeded()
+        do {
+            guard let lock = try AppInstanceLock.acquireForCurrentUser() else {
+                // No controller exists, so a losing launch cannot restore or
+                // revoke the active owner's session during termination.
+                exit(0)
+            }
+            instanceLock = lock
+        } catch {
+            FileHandle.standardError.write(Data("LidSwitch could not safely acquire its instance lock: \(error)\n".utf8))
+            exit(EX_CANTCREAT)
+        }
         let client = try? RawHelperControlClient.production()
         let controller = PowerController(sideEffects: .production(client: client))
         _controller = StateObject(wrappedValue: controller)

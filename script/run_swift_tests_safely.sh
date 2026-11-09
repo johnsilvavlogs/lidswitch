@@ -80,6 +80,7 @@ xctest_started=false
 # Keep XCTest's debug configuration and assertions without producing a dSYM
 # larger than the supervisor's fixed per-file output limit.
 if swift_sandbox_run test-build build test-build \
+  --build-system native \
   --build-tests \
   -debug-info-format none \
   --enable-xctest \

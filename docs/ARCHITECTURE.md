@@ -1,6 +1,6 @@
 # Architecture
 
-LidSwitch `0.3.0` is a SwiftPM menu bar app with four targets:
+LidSwitch `0.3.1` is a SwiftPM menu bar app with four targets:
 
 - `LidSwitch`: UI, inspection, authenticated raw-XPC client, installation, and recovery controls.
 - `LidSwitchCore`: shared wire schemas, release identity, bounded file primitives, monotonic clock, boot identity, and compatibility policy.
@@ -9,7 +9,7 @@ LidSwitch `0.3.0` is a SwiftPM menu bar app with four targets:
 
 ## Session flow
 
-1. The user prepares helper version `12` in the root-owned `Current` directory; legacy login and shell-helper artifacts are removed while protection remains off.
+1. The user prepares helper version `13` in the root-owned `Current` directory; legacy login and shell-helper artifacts are removed while protection remains off.
 2. After setup, the user turns **Keep Mac awake** on with the master switch. Saved **Plugged in** and **On battery** choices select the power sources.
 3. The app begins an authenticated raw-XPC session. The legacy user-owned activation lease is inert diagnostic/migration state only; it cannot authorize the helper.
 4. launchd exposes one authenticated Mach service. It has no `WatchPaths` or `StartInterval` trigger.
@@ -121,6 +121,11 @@ descriptor-relative exclusive temps, `fsync`/`F_FULLFSYNC` data barriers,
 directory-entry synchronization, exclusive install or verified swap, and final
 reopen/byte/identity proof. It never renames over or unlinks an unverified
 same-UID leaf, so an older retry cannot overwrite a later authority snapshot.
+Projection directory-entry commits briefly share the authority lock. Payload
+writes, flushes and diagnostic waits stay outside it. Inventory accepts changing
+payload metadata only for the canonical diagnostic temp, preserving its inode,
+ownership, mode, single-link and size checks. Restoration can therefore finish
+while a diagnostic writer is paused.
 Unsafe, I/O, indeterminate, stale, and equal-generation-conflict
 writer outcomes remain typed dirty-task evidence rather than collapsing to
 absence or success. The task clears only after an exact public-file write, directory
@@ -150,6 +155,6 @@ claim is made.
 
 ## Compatibility and packaging
 
-Activation is currently qualified only for macOS build `25F84`. The packaged app includes `CFBundleShortVersionString=0.3.0`, `CFBundleVersion=12`, and helper version `12` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
+Activation is currently qualified only for macOS build `26B123`. Other builds retain an authenticated recovery listener with activation disabled. The packaged app includes `CFBundleShortVersionString=0.3.1`, `CFBundleVersion=13`, and helper version `13` under `Contents/Library/LaunchServices`; the installed helper is exposed through the authenticated raw-XPC Mach service, never a lease `WatchPaths` trigger.
 
 Automatic gates build, test, sign, mount, and inspect artifacts without launching the app or changing power state. The live canary is separate.

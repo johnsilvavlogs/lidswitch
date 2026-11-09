@@ -64,6 +64,7 @@ trap 'status=129; exit 129' HUP
 trap 'status=130; exit 130' INT
 trap 'status=143; exit 143' TERM
 if swift_sandbox_run helper-build build release-helper \
+  --build-system native \
   -c release \
   --scratch-path "$LIDSWITCH_SWIFT_HELPER_SCRATCH_PATH" \
   --cache-path "$LIDSWITCH_SWIFTPM_CACHE_PATH" \
@@ -79,6 +80,7 @@ else
 fi
 if [[ "$status" -eq 0 && "$command_status" -eq 0 ]]; then
   if swift_sandbox_run helper-bin-path build release-helper \
+    --build-system native \
     -c release \
     --scratch-path "$LIDSWITCH_SWIFT_HELPER_SCRATCH_PATH" \
     --cache-path "$LIDSWITCH_SWIFTPM_CACHE_PATH" \
@@ -131,6 +133,7 @@ fi
 if [[ "$status" -eq 0 ]]; then
   cd "$LIDSWITCH_SWIFT_APP_SOURCE_ROOT"
   if swift_sandbox_run app-build build release-app \
+    --build-system native \
     -c release \
     --scratch-path "$LIDSWITCH_SWIFT_APP_SCRATCH_PATH" \
     --cache-path "$LIDSWITCH_SWIFTPM_CACHE_PATH" \
@@ -144,6 +147,7 @@ if [[ "$status" -eq 0 ]]; then
 fi
 if [[ "$status" -eq 0 ]]; then
   if swift_sandbox_run app-bin-path build release-app \
+    --build-system native \
     -c release \
     --scratch-path "$LIDSWITCH_SWIFT_APP_SCRATCH_PATH" \
     --cache-path "$LIDSWITCH_SWIFTPM_CACHE_PATH" \

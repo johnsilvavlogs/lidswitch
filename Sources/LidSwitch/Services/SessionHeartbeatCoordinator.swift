@@ -70,6 +70,10 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     private let diagnostics: SessionDiagnosticStore
     private let onAcknowledged: @Sendable (UUID) -> Void
     private let onEnded: @Sendable (UUID, String) -> Void
+    // The serial queue can be inside a bounded helper exchange. Cancellation
+    // must invalidate its write permits without waiting for that exchange.
+    private let authorityLock = NSLock()
+    private var renewalAuthorityInvalidated = true
 
     private var timer: DispatchSourceTimer?
     private var sessionID: UUID?
@@ -182,6 +186,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             cancelTimer()
             let startedMonotonic = monotonicNow()
             generationVersion &+= 1
+            setRenewalAuthorityInvalidated(false)
             self.sessionID = sessionID
             lastRecoveryAcknowledgement = nil
             projectionUnavailableIsRecorded = false
@@ -205,10 +210,44 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
 
     @discardableResult
     func stop(reason: String) -> Bool {
-        queue.sync {
+        setRenewalAuthorityInvalidated(true)
+        return queue.sync {
             guard let sessionID, !isTerminal else { return true }
             return finish(sessionID: sessionID, reason: reason, notify: false)
         }
+    }
+
+    /// Invalidates renewal authority before returning, then finishes the one
+    /// terminal exchange and diagnostic barrier away from the caller's queue.
+    func stopInBackground(reason: String) -> Task<Bool, Never> {
+        setRenewalAuthorityInvalidated(true)
+        let result = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        // Enqueue before returning so two caller-ordered Stops cannot race
+        // their reasons merely because detached tasks start in another order.
+        queue.async {
+            let flushed: Bool
+            if let sessionID = self.sessionID, !self.isTerminal {
+                flushed = self.finish(sessionID: sessionID, reason: reason, notify: false)
+            } else {
+                flushed = true
+            }
+            result.continuation.yield(flushed)
+            result.continuation.finish()
+        }
+        return Task.detached {
+            for await flushed in result.stream { return flushed }
+            return false
+        }
+    }
+
+    private var renewalAuthorityIsValid: Bool {
+        authorityLock.lock(); defer { authorityLock.unlock() }
+        return !renewalAuthorityInvalidated
+    }
+
+    private func setRenewalAuthorityInvalidated(_ invalidated: Bool) {
+        authorityLock.lock(); defer { authorityLock.unlock() }
+        renewalAuthorityInvalidated = invalidated
     }
 
     func evaluateForTesting() {
@@ -221,9 +260,10 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     }
 
     private func evaluate() {
-        guard let sessionID, !isTerminal else { return }
+        guard let sessionID, !isTerminal, renewalAuthorityIsValid else { return }
         let checkedMonotonic = monotonicNow()
         let observation = observe(sessionID)
+        guard renewalAuthorityIsValid else { return }
         if finishIfTerminalObservation(observation, sessionID: sessionID) {
             return
         }
@@ -315,6 +355,9 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     }
 
     private func applyLeaseAdvance(_ advance: SessionHeartbeatAdvance, sessionID: UUID) throws {
+        // A reply already in flight when Stop was requested cannot extend the
+        // local deadline or publish a renewed session after cancellation.
+        guard renewalAuthorityIsValid, !isTerminal else { return }
         switch advance {
         case let .renewed(expiryMonotonic):
             // A valid authenticated reply still cannot move this generation's
@@ -371,6 +414,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
             let immediate = try renew(sessionID, .directOnly) { [weak self] in
                 self?.commitAllowed(permit) == true
             }
+            guard renewalAuthorityIsValid, !isTerminal else { return }
             switch immediate {
             case let .renewed(expiryMonotonic):
                 // A delayed direct reply cannot commit below the reconnect
@@ -402,7 +446,8 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     }
 
     private func renewalWritePermit(for sessionID: UUID) -> RenewalWritePermit? {
-        guard self.sessionID == sessionID,
+        guard renewalAuthorityIsValid,
+              self.sessionID == sessionID,
               !isTerminal
         else { return nil }
         return RenewalWritePermit(
@@ -413,7 +458,8 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
     }
 
     private func commitAllowed(_ permit: RenewalWritePermit) -> Bool {
-        guard self.sessionID == permit.sessionID,
+        guard renewalAuthorityIsValid,
+              self.sessionID == permit.sessionID,
               !isTerminal,
               generationVersion == permit.generationVersion,
               leaseExpiresMonotonic == permit.leaseExpiresMonotonic
@@ -429,7 +475,8 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         guard allows(observation.power),
               case .verified = observation.authority
         else { return false }
-        guard self.sessionID == permit.sessionID,
+        guard renewalAuthorityIsValid,
+              self.sessionID == permit.sessionID,
               !isTerminal,
               generationVersion == permit.generationVersion,
               leaseExpiresMonotonic == permit.leaseExpiresMonotonic
@@ -441,7 +488,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         if finishIfHardExpiry(sessionID: permit.sessionID, at: finalBoundaryMonotonic) {
             return false
         }
-        return true
+        return renewalAuthorityIsValid
     }
 
     private func matchingStatus(
@@ -517,6 +564,7 @@ final class SessionHeartbeatCoordinator: @unchecked Sendable {
         guard !isTerminal else { return true }
         // The terminal latch is deliberately first: it invalidates every
         // renewal commit before the authoritative END/RESTORE exchange.
+        setRenewalAuthorityInvalidated(true)
         phase = .terminal
         generationVersion &+= 1
         cancelTimer()

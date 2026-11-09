@@ -322,7 +322,6 @@ struct LidSwitchPanel: View {
                 Text("Quit")
             }
             .buttonStyle(.plain)
-            .disabled(controller.isBusy && controller.operationPhase != .starting)
             .keyboardShortcut("q", modifiers: [.command])
             .accessibilityLabel("Restore and quit LidSwitch")
             .accessibilityHint("Verifies that system sleep is restored before quitting.")

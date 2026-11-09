@@ -152,9 +152,7 @@ enum StatusProjectionDispatcher {
     typealias StoreFactory = (String) -> RecoveryAuthorityStore?
     typealias Writer = (StatusProjectionTask, HelperServiceConfiguration) -> HelperStatusStore.WriteOutcome
 
-    /// Fixture-only serial-queue barrier. Production never waits for public
-    /// status projection; tests use this to separate diagnostic scheduling
-    /// from authority timing assertions without sleeping or widening locks.
+    /// Fixture-only serial-queue barrier for diagnostic scheduling assertions.
     static func waitForIdleForTesting(timeout: TimeInterval = 2) -> Bool {
         let completed = DispatchSemaphore(value: 0)
         queue.async { completed.signal() }
@@ -179,6 +177,32 @@ enum StatusProjectionDispatcher {
                         }) {
         guard storeFactory(configuration.supportDirectory) != nil else { return }
         queue.async { drain(configuration: configuration, storeFactory: storeFactory, writer: writer) }
+    }
+
+    /// An administrator one-shot exits immediately after its receipt. Give the
+    /// existing serial writer one bounded opportunity to publish and acknowledge
+    /// its durable task before exit; daemon safety paths never wait here.
+    /// Call only after releasing the recovery transaction's root-state lock.
+    static func finishOneShot(
+        configuration: HelperServiceConfiguration,
+        timeout: TimeInterval = 2,
+        storeFactory: @escaping StoreFactory = { RecoveryAuthorityStore(supportDirectory: $0) },
+        writer: @escaping Writer = { task, configuration in
+            HelperStatusStore.writeOutcome(task: task, path: configuration.statusPath)
+        }
+    ) -> Bool {
+        guard timeout.isFinite, timeout > 0 else { return false }
+        let completed = DispatchSemaphore(value: 0)
+        queue.async {
+            drain(configuration: configuration, storeFactory: storeFactory, writer: writer)
+            guard let store = storeFactory(configuration.supportDirectory),
+                  store.withTransaction({ _ in store.statusProjectionTaskRecord() == .absent }) == true
+            else { return }
+            completed.signal()
+        }
+        // Timeout or an unacknowledged task is not publication success. The
+        // durable task remains available to the next authenticated recovery.
+        return completed.wait(timeout: .now() + min(timeout, 2)) == .success
     }
 
     private static func drain(configuration: HelperServiceConfiguration, storeFactory: @escaping StoreFactory,
