@@ -1352,7 +1352,7 @@ final class RecoveryAuthorityStore {
                 if name == "helper-status.projection.lock",
                    !strictProjectionArtifactIsValid(name, expectedMode: 0o600, maximumBytes: 0) { return nil }
                 if name == "helper-status.projection-temp",
-                   !strictProjectionArtifactIsValid(name, expectedMode: 0o644, maximumBytes: 4_096) { return nil }
+                   !projectionTemporaryMetadataIsSafe() { return nil }
                 continue
             }
             if name == VerifiedRootStateDirectory.quarantineBasename(for: Self.statusProjectionBasename) {
@@ -1563,6 +1563,31 @@ final class RecoveryAuthorityStore {
         return fstat(fd, &after) == 0 && sameMetadata(before, after)
             && fstatat(parent, basename, &bound, AT_SYMLINK_NOFOLLOW) == 0
             && sameMetadata(before, bound)
+    }
+
+    /// The diagnostic writer commits this one name's creation/rename/removal
+    /// under RootStateLock, but writes and flushes its payload outside the lock.
+    /// Inventory must validate its fixed safety metadata without requiring a
+    /// stable payload or timestamps. These bytes never authorize recovery.
+    private func projectionTemporaryMetadataIsSafe() -> Bool {
+        guard let parent = directory.directoryDescriptor else { return false }
+        let name = "helper-status.projection-temp"
+        let fd = Darwin.openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        func isSafe(_ value: stat) -> Bool {
+            (value.st_mode & S_IFMT) == S_IFREG
+                && value.st_uid == expectedOwnerUID && value.st_gid == expectedGroupID
+                && value.st_nlink == 1 && value.st_mode & 0o7777 == 0o644
+                && value.st_size >= 0 && value.st_size <= 4_096
+        }
+        var before = stat(); var after = stat(); var bound = stat()
+        guard fstat(fd, &before) == 0, isSafe(before),
+              fstat(fd, &after) == 0, isSafe(after),
+              fstatat(parent, name, &bound, AT_SYMLINK_NOFOLLOW) == 0, isSafe(bound)
+        else { return false }
+        return before.st_dev == after.st_dev && before.st_ino == after.st_ino
+            && after.st_dev == bound.st_dev && after.st_ino == bound.st_ino
     }
 
     private func historicalDirectoryIsValid(_ basename: String) -> Bool {

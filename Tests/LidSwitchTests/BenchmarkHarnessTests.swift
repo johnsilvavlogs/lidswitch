@@ -228,7 +228,7 @@ private struct BenchmarkFixture: Sendable {
             sleepDisabled: { false },
             acIdleSleep: { 5 },
             preferences: { .value(.disabled) },
-            systemBuild: { "25F84" },
+            systemBuild: { ReleaseIdentity.qualifiedSystemBuild },
             activationLease: { _ in .missing("benchmark-fixture") },
             helperStatus: {
                 PowerInspector.helperStatus(path: dynamicPaths.1, expectedOwnerUID: getuid())

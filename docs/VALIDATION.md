@@ -62,7 +62,7 @@ try: sys.argv=[p]+sys.argv[3:]; exec(code,{"__name__":"__main__","__file__":p,"_
 except BaseException:
  if isinstance(sys.exc_info()[1],SystemExit) and sys.exc_info()[1].code==74: raise
  raise SystemExit(74)
-' script/test_safe_envelope.py e9b65fd677e63170d13c3d88764159afdca6ba26479f0765420b55dc80684e12
+' script/test_safe_envelope.py 1f7717b0acefb095ce3498f5015a8132ff8e7690aa1b70a90cbf1c597267f381
 ```
 
 Do not substitute bare `python3`, `/usr/bin/env python`, an Anaconda/interpreter
@@ -179,8 +179,9 @@ root, or either wrapper root. The executable wrappers must be invoked only by
 the descriptor-held release-manager launch path with its exact local contract.
 Those device/inode-bound proof artifacts are intentionally not portable source.
 Direct pathname execution, sourcing, or invoking the wrappers as
-`bash script/...` is unsupported and rejected. Their privileged-mode shebang
-also ignores `BASH_ENV` and imported functions. If
+`bash script/...` is unsupported and rejected. The wrappers explicitly select
+SwiftPM's native engine to retain the verified toolchain paths. Their
+privileged-mode shebang ignores `BASH_ENV` and imported functions. If
 `sandbox-exec` is missing, the wrapper fails closed. Every attempt retains its
 execution root and separate control root containing `live-preflight*.kv`,
 `live-postflight.kv`, the rendered profile, raw observations, and a create-once,

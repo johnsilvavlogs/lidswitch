@@ -254,24 +254,32 @@ fileprivate final class StatusDirectoryCapability {
         recoveryGate: (HelperStatusStore.RecoveryStage) -> Bool,
         _ body: () -> HelperStatusStore.WriteOutcome
     ) -> HelperStatusStore.WriteOutcome {
-        let descriptor: Int32
-        let created = openat(directoryFD, lockLeaf, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                             S_IRUSR | S_IWUSR)
-        if created >= 0 {
-            descriptor = created
-            guard fchmod(descriptor, S_IRUSR | S_IWUSR) == 0,
-                  validLock(descriptor), fsync(descriptor) == 0,
-                  fcntl(descriptor, F_FULLFSYNC) == 0,
-                  fsync(directoryFD) == 0,
-                  lockNameStillBinds(descriptor)
-            else { close(descriptor); return .indeterminate }
-        } else {
-            guard errno == EEXIST else { return .ioFailure }
-            descriptor = openat(directoryFD, lockLeaf, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
-            guard descriptor >= 0 else { return errno == ELOOP ? .unsafeExisting : .ioFailure }
-            guard validLock(descriptor), lockNameStillBinds(descriptor) else { close(descriptor); return .unsafeExisting }
+        var descriptor: Int32 = -1
+        var created = false
+        let opened = withDirectoryCommit { () -> HelperStatusStore.WriteOutcome in
+            let candidate = openat(directoryFD, lockLeaf, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                                   S_IRUSR | S_IWUSR)
+            if candidate >= 0 {
+                descriptor = candidate
+                created = true
+                guard fchmod(descriptor, S_IRUSR | S_IWUSR) == 0 else { return .indeterminate }
+            } else {
+                guard errno == EEXIST else { return .ioFailure }
+                descriptor = openat(directoryFD, lockLeaf, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+                guard descriptor >= 0 else { return errno == ELOOP ? .unsafeExisting : .ioFailure }
+            }
+            return validLock(descriptor) && lockNameStillBinds(descriptor) ? .written : .unsafeExisting
+        } ?? .indeterminate
+        guard opened == .written else {
+            if descriptor >= 0 { close(descriptor) }
+            return opened
         }
         defer { close(descriptor) }
+        if created {
+            guard fsync(descriptor) == 0, fcntl(descriptor, F_FULLFSYNC) == 0,
+                  fsync(directoryFD) == 0, lockNameStillBinds(descriptor)
+            else { return .indeterminate }
+        }
         guard flock(descriptor, LOCK_EX) == 0 else { return .ioFailure }
         defer { _ = flock(descriptor, LOCK_UN) }
         switch recoverTemporaryLeaf(recoveryGate: recoveryGate) {
@@ -313,21 +321,26 @@ fileprivate final class StatusDirectoryCapability {
                  stageGate: (HelperStatusStore.WriteStage) -> Bool) -> HelperStatusStore.WriteOutcome {
         guard payload.utf8.count <= Self.maximumBytes, stageGate(.open) else { return .indeterminate }
         let temporary = temporaryLeaf
-        let descriptor = openat(directoryFD, temporary, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+        let descriptor = withDirectoryCommit { () -> Int32 in
+            let candidate = openat(directoryFD, temporary, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                                   S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+            guard candidate >= 0 else { return -1 }
+            guard fchmod(candidate, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) == 0,
+                  validTemporaryDescriptor(candidate) else { close(candidate); return -1 }
+            return candidate
+        } ?? -1
         BenchmarkProbe.record("file_open")
         guard descriptor >= 0 else { return .ioFailure }
         var installed = false
         var descriptorClosed = false
         defer {
             if !descriptorClosed { close(descriptor) }
-            if !installed { _ = unlinkat(directoryFD, temporary, 0) }
+            if !installed { _ = withDirectoryCommit { unlinkat(directoryFD, temporary, 0) } }
         }
         // The fixed temp leaf is intentionally empty before its first write;
         // validating it as a final public projection here would reject every
         // new write because final projections require a nonzero payload.
-        guard fchmod(descriptor, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH) == 0,
-              validTemporaryDescriptor(descriptor), stageGate(.write),
+        guard validTemporaryDescriptor(descriptor), stageGate(.write),
               writeExactly(Array(payload.utf8), to: descriptor)
         else { return .ioFailure }
         BenchmarkProbe.record("decoded_bytes", count: payload.utf8.count)
@@ -344,7 +357,9 @@ fileprivate final class StatusDirectoryCapability {
             // Swap rather than blindly overwrite. The old leaf is unlinked
             // only after its exact pre-swap identity and public metadata are
             // revalidated under the same descriptor-held lock.
-            guard Darwin.renameatx_np(directoryFD, temporary, directoryFD, leaf, UInt32(RENAME_SWAP)) == 0 else { return .indeterminate }
+            guard withDirectoryCommit({
+                Darwin.renameatx_np(directoryFD, temporary, directoryFD, leaf, UInt32(RENAME_SWAP)) == 0
+            }) == true else { return .indeterminate }
             installed = true
             guard verifyDisplacedProjection(
                     expected.payload,
@@ -354,13 +369,18 @@ fileprivate final class StatusDirectoryCapability {
                   fsync(directoryFD) == 0,
                   verifyInstalled(payload, expectedTemporary: temporaryMetadata, stageGate: stageGate)
             else { return .indeterminate }
-            guard unlinkat(directoryFD, temporary, 0) == 0, fsync(directoryFD) == 0 else { return .indeterminate }
+            guard withDirectoryCommit({ unlinkat(directoryFD, temporary, 0) == 0 }) == true,
+                  fsync(directoryFD) == 0 else { return .indeterminate }
         } else {
             // A missing leaf is installed only with the kernel's exclusive
             // rename primitive; a racing creator is never overwritten.
-            guard Darwin.renameatx_np(directoryFD, temporary, directoryFD, leaf, UInt32(RENAME_EXCL)) == 0 else {
-                return errno == EEXIST ? .indeterminate : .ioFailure
-            }
+            let renamed = withDirectoryCommit { () -> HelperStatusStore.WriteOutcome in
+                guard Darwin.renameatx_np(directoryFD, temporary, directoryFD, leaf, UInt32(RENAME_EXCL)) == 0 else {
+                    return errno == EEXIST ? .indeterminate : .ioFailure
+                }
+                return .written
+            } ?? .indeterminate
+            guard renamed == .written else { return renamed }
             installed = true
             guard fsync(directoryFD) == 0,
                   verifyInstalled(payload, expectedTemporary: temporaryMetadata, stageGate: stageGate)
@@ -467,10 +487,12 @@ fileprivate final class StatusDirectoryCapability {
         // before unlink. A name replacement, link, or metadata change can
         // only yield indeterminate/unsafe recovery, never a broad cleanup.
         guard recoveryGate(.beforeRetire),
-              fstat(descriptor, &final) == 0, sameMetadata(initial, final),
-              fstatat(directoryFD, temporaryLeaf, &bound, AT_SYMLINK_NOFOLLOW) == 0,
-              sameMetadata(initial, bound),
-              unlinkat(directoryFD, temporaryLeaf, 0) == 0,
+              withDirectoryCommit({
+                  fstat(descriptor, &final) == 0 && sameMetadata(initial, final)
+                    && fstatat(directoryFD, temporaryLeaf, &bound, AT_SYMLINK_NOFOLLOW) == 0
+                    && sameMetadata(initial, bound)
+                    && unlinkat(directoryFD, temporaryLeaf, 0) == 0
+              }) == true,
               fsync(directoryFD) == 0,
               recoveryGate(.afterRetire)
         else { return .indeterminate }
@@ -479,6 +501,13 @@ fileprivate final class StatusDirectoryCapability {
             return .indeterminate
         }
         return .ready
+    }
+
+    /// Only directory-entry commits share the authority lock. Payload I/O,
+    /// durability barriers, projection-lock waits and fixture gates stay outside
+    /// it, so a slow diagnostic writer cannot hold up safety restoration.
+    private func withDirectoryCommit<T>(_ body: () -> T) -> T? {
+        RootStateLock.withExclusive(directory: directory, timeout: 1) { _ in body() }
     }
 
     private func validLock(_ descriptor: Int32) -> Bool {

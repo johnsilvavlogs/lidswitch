@@ -1155,7 +1155,7 @@ final class RawXPCSecurityTests: XCTestCase {
         EnrollmentPolicy(ownerUID: 501, profile: .manualExact, appIdentifier: "com.example.App",
                          appCDHash: Data(repeating: 1, count: 20), helperIdentifier: "com.example.Helper",
                          helperCDHash: Data(repeating: 2, count: 20), helperSHA256: Data(repeating: 3, count: 32),
-                         helperSize: 1234, qualifiedBuild: "25F84", teamIdentifier: nil)
+                         helperSize: 1234, qualifiedBuild: ReleaseIdentity.qualifiedSystemBuild, teamIdentifier: nil)
     }
 
     private func assertRollbackExhaustion(blockedByLock: Bool) throws {
@@ -1739,7 +1739,7 @@ private struct AuthorityFixture {
               ),
               store.provision() == .ready else { throw CocoaError(.fileWriteUnknown) }
         self.store = store
-        configuration = HelperServiceConfiguration(expectedOwnerUID: getuid(), qualifiedBuild: "25F84",
+        configuration = HelperServiceConfiguration(expectedOwnerUID: getuid(), qualifiedBuild: ReleaseIdentity.qualifiedSystemBuild,
                                                    supportDirectory: directory.path,
                                                    appliedStatePath: directory.appendingPathComponent("applied-state").path,
                                                    statusPath: directory.appendingPathComponent("helper-status").path,

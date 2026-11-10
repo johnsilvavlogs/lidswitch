@@ -124,6 +124,9 @@ final class HelperSessionAuthority: @unchecked Sendable {
     private let lock = NSLock()
     private let configuration: HelperServiceConfiguration
     private let power: HelperPowerSystem
+    // Compatibility never changes during this process, including after a
+    // successful RESTORE clears its mutable recovery-required state.
+    private let activationAllowed: Bool
     private let recoveryStoreFactory: (String) -> RecoveryAuthorityStore?
     private let statusProjectionWriter: StatusProjectionDispatcher.Writer
     private let appliedStatePublish: (
@@ -191,8 +194,10 @@ final class HelperSessionAuthority: @unchecked Sendable {
             return ls_peer_identity_is_live(&value)
          }, bootIdentity: @escaping () -> String? = BootIdentity.current,
          timerStarter: @escaping HelperTimerStarter = HelperSessionAuthority.startSystemTimer,
-         recoveryCoordinatorFactory: (() -> RecoveryCoordinator)? = nil) {
+         recoveryCoordinatorFactory: (() -> RecoveryCoordinator)? = nil,
+         activationAllowed: Bool = true) {
         self.configuration = configuration; self.power = power
+        self.activationAllowed = activationAllowed
         let resolvedStoreFactory: (String) -> RecoveryAuthorityStore? = recoveryStoreFactory ?? {
             RecoveryAuthorityStore(supportDirectory: $0)
         }
@@ -226,6 +231,16 @@ final class HelperSessionAuthority: @unchecked Sendable {
             lastPreparationStage = "compatibility-rejected"
 #endif
             return .transientFailure
+        }
+        guard activationAllowed else {
+            // An OS update is a permanent compatibility boundary, not a crash.
+            // Keep authenticated restore available without reconnecting an old
+            // generation, starting a timer, or changing durable state at launch.
+            recoveryRequired = true
+#if DEBUG
+            lastPreparationStage = "unqualified-build-recovery-listener"
+#endif
+            return .recoveryListenerOnly
         }
         // Startup may require a second transaction to bind a reconnectable
         // authority. Wake the projection-only worker after the complete
@@ -419,6 +434,12 @@ final class HelperSessionAuthority: @unchecked Sendable {
         // tick rechecks and terminalizes the original persisted owner.
         guard let peer = Peer(rawPeer), peer.euid == UInt32(configuration.expectedOwnerUID), peerIsLive(peer) else {
             return snapshot(result: 77, reason: "peer-process-unavailable", requested: sessionID)
+        }
+        if !activationAllowed,
+           operation == UInt32(LS_OPERATION_BEGIN.rawValue)
+            || operation == UInt32(LS_OPERATION_RECONNECT.rawValue)
+            || operation == UInt32(LS_OPERATION_RENEW.rawValue) {
+            return snapshot(result: 75, reason: "system-build-unqualified", requested: sessionID)
         }
         let snapshotOperation = operation == UInt32(LS_OPERATION_SNAPSHOT.rawValue)
         let detachedRestoreOperation = operation == UInt32(LS_OPERATION_RESTORE.rawValue)
@@ -1561,6 +1582,7 @@ struct HelperControlServiceOperations: @unchecked Sendable {
     let provision: (HelperServiceConfiguration) -> RecoveryProvisionOutcome
     let recover: (HelperServiceConfiguration, RecoveryIntent) -> RecoveryAssessment
     let daemon: (HelperServiceConfiguration) -> Int32
+    var finishOneShotProjection: (HelperServiceConfiguration) -> Bool = { _ in true }
 
     static let system = HelperControlServiceOperations(
         provision: { configuration in
@@ -1574,11 +1596,19 @@ struct HelperControlServiceOperations: @unchecked Sendable {
                     hydrateStatusProjection: intent != .uninstall
                 )
         },
-        daemon: { configuration in HelperControlService.runDaemon(configuration: configuration) }
+        daemon: { configuration in HelperControlService.runDaemon(configuration: configuration) },
+        finishOneShotProjection: { configuration in
+            StatusProjectionDispatcher.finishOneShot(configuration: configuration)
+        }
     )
 }
 
 enum HelperControlService {
+    static func activationAllowed(currentSystemBuild: String?, qualifiedBuild: String) -> Bool {
+        currentSystemBuild == qualifiedBuild
+            && CompatibilityPolicy.isQualified(systemBuild: qualifiedBuild)
+    }
+
     static func run(configuration: HelperServiceConfiguration) -> Int32 {
         execute(configuration: configuration, operations: .system).exitCode
     }
@@ -1603,34 +1633,46 @@ enum HelperControlService {
                 return .oneShot(.internalFailure(reason: reason))
             }
         case let .recoverOnce(intent):
+            let result: HelperOneShotResult
             switch operations.recover(configuration, intent) {
             case .pristineIdle:
-                return .oneShot(.pristineIdle)
+                result = .pristineIdle
             case let .migratedIdle(reason):
-                return .oneShot(.migratedIdle(reason: reason))
+                result = .migratedIdle(reason: reason)
             case .detachedIdle:
                 // This conclusion is produced only through the authenticated
                 // daemon XPC restore path, never an administrator one-shot.
-                return .oneShot(.internalFailure(reason: "unexpected-detached-idle"))
+                result = .internalFailure(reason: "unexpected-detached-idle")
             case let .terminalIdle(session, reason):
-                return .oneShot(.terminalIdle(sessionID: session, reason: reason))
+                result = .terminalIdle(sessionID: session, reason: reason)
             case let .recoveryRequired(reason):
-                return .oneShot(.recoveryRequired(reason: reason))
+                result = .recoveryRequired(reason: reason)
             case .legacyRestoreOnly, .reconnectCandidate:
-                return .oneShot(.internalFailure(reason: "invalid-one-shot-outcome"))
+                result = .internalFailure(reason: "invalid-one-shot-outcome")
             }
+            let projectionFinished = operations.finishOneShotProjection(configuration)
+            guard result.exitCode != 0 || projectionFinished else {
+                return .oneShot(.internalFailure(reason: "status-projection-unverified"))
+            }
+            return .oneShot(result)
         case .daemon:
             return .daemon(exitCode: operations.daemon(configuration))
         }
     }
 
     fileprivate static func runDaemon(configuration: HelperServiceConfiguration) -> Int32 {
-        guard SystemBuild.current() == configuration.qualifiedBuild,
-              let policy = loadPolicy(configuration), let current = HelperCodeIdentity.current(),
+        guard let policy = loadPolicy(configuration), let current = HelperCodeIdentity.current(),
               current.identifier == policy.helperIdentifier, current.cdhash == policy.helperCDHash,
               policy.ownerUID == configuration.expectedOwnerUID,
               policy.qualifiedBuild == configuration.qualifiedBuild else { return 78 }
-        let authority = HelperSessionAuthority(configuration: configuration, power: SystemPowerSystem())
+        let authority = HelperSessionAuthority(
+            configuration: configuration,
+            power: SystemPowerSystem(),
+            activationAllowed: activationAllowed(
+                currentSystemBuild: SystemBuild.current(),
+                qualifiedBuild: configuration.qualifiedBuild
+            )
+        )
         let clientPolicy = policy.appCDHash.withUnsafeBytes { buffer -> OpaquePointer? in
             if let team = policy.teamIdentifier {
                 return team.withCString {

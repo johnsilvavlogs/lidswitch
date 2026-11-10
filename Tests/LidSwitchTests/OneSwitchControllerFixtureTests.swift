@@ -113,12 +113,28 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
     @MainActor
     func testChangingSourcesWhileOnEndsOldPolicyBeforeSavingAndStartingNewGeneration() async throws {
         let state = SwitchFixtureBox(SwitchFixtureState())
-        let controller = makeController(state)
+        let terminalEntered = DispatchSemaphore(value: 0)
+        let releaseTerminal = DispatchSemaphore(value: 0)
+        let holdTerminal = SwitchFixtureBox(true)
+        defer { releaseTerminal.signal() }
+        let controller = makeController(state, beforeTerminal: {
+            if holdTerminal.read({ $0 }) {
+                terminalEntered.signal()
+                _ = releaseTerminal.wait(timeout: .now() + 2)
+            }
+        })
         controller.setKeepAwakeEnabled(true)
         assertTrue(await issued(controller))
         try await acknowledge(controller)
         let firstID = try XCTUnwrap(controller.activeSessionIDForTesting)
         controller.setAllowBatteryKeepAwake(true)
+        XCTAssertTrue(heldStartWasEntered(terminalEntered))
+        XCTAssertFalse(state.read { $0.events.contains("preferences") },
+                       "saving must wait while the old generation's END is held")
+        XCTAssertEqual(state.read { $0.policies }, [.pluggedInOnly])
+        XCTAssertFalse(controller.powerPreferences.allowBatteryKeepAwake)
+        holdTerminal.mutate { $0 = false }
+        releaseTerminal.signal()
         assertTrue(await eventually {
             controller.activeSessionIDForTesting != nil && controller.activeSessionIDForTesting != firstID
         })
@@ -680,18 +696,25 @@ final class OneSwitchControllerFixtureTests: XCTestCase {
     }
 
     @MainActor
-    private func makeController(_ state: SwitchFixtureBox<SwitchFixtureState>) -> PowerController {
+    private func makeController(
+        _ state: SwitchFixtureBox<SwitchFixtureState>,
+        beforeTerminal: @escaping @Sendable () -> Void = {}
+    ) -> PowerController {
         PowerController(bootstrap: false, snapshotProvider: { owned in state.read { $0.snapshot(owned: owned) } },
-                        sideEffects: effects(state),
+                        sideEffects: effects(state, beforeTerminal: beforeTerminal),
                         safeRollbackWaiter: { state.read { $0.snapshot(owned: nil) } },
                         restoreVerificationWaiter: { state.read { $0.snapshot(owned: nil) } },
                         announcementHandler: { _ in })
     }
 
-    private func effects(_ state: SwitchFixtureBox<SwitchFixtureState>) -> PowerControllerSideEffects {
+    private func effects(
+        _ state: SwitchFixtureBox<SwitchFixtureState>,
+        beforeTerminal: @escaping @Sendable () -> Void = {}
+    ) -> PowerControllerSideEffects {
         var effects = PowerControllerSideEffects.recordingFixture(
             { event in state.mutate { $0.events.append(event) } },
             terminalResolution: { sessionID, _ in
+                beforeTerminal()
                 state.mutate {
                     $0.events.append("terminate")
                     $0.restore(sessionID)

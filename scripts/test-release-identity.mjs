@@ -59,8 +59,8 @@ function makeFixture() {
     version: identity.appVersion,
     packages: { '': { version: identity.appVersion } }
   }, null, 2));
-  writeFileSync(join(root, 'site/index.html'), `macOS 26.5.2 build ${identity.qualifiedSystemBuild}`);
-  writeFileSync(join(root, 'site/download/index.html'), `macOS 26.5.2 build ${identity.qualifiedSystemBuild}`);
+  writeFileSync(join(root, 'site/index.html'), `macOS build ${identity.qualifiedSystemBuild}`);
+  writeFileSync(join(root, 'site/download/index.html'), `macOS build ${identity.qualifiedSystemBuild}`);
   writeFileSync(join(root, 'site/styles.css'), '');
   return root;
 }
@@ -119,10 +119,10 @@ expectRejected('package version drift', (root) => {
   writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '0.2.9' }));
 });
 expectRejected('site qualified-build drift', (root) => {
-  writeFileSync(join(root, 'site/index.html'), 'macOS 26.5.2 build 25F85');
+  writeFileSync(join(root, 'site/index.html'), 'macOS build 25F85');
 });
 expectRejected('site release-version drift', (root) => {
-  writeFileSync(join(root, 'site/download/index.html'), `macOS 26.5.2 build ${identity.qualifiedSystemBuild} ${identity.appVersion}`);
+  writeFileSync(join(root, 'site/download/index.html'), `macOS build ${identity.qualifiedSystemBuild} ${identity.appVersion}`);
 });
 expectRejected('retired panel asset return', (root) => {
   writeFileSync(join(root, 'site/assets/lidswitch-panel.png'), 'retired');
@@ -131,7 +131,7 @@ expectRejected('retired working screenshot return', (root) => {
   writeFileSync(join(root, 'screenshots/lidswitch-working.png'), 'retired');
 });
 expectRejected('retired working screenshot reference', (root) => {
-  writeFileSync(join(root, 'site/index.html'), `macOS 26.5.2 build ${identity.qualifiedSystemBuild} lidswitch-working.png`);
+  writeFileSync(join(root, 'site/index.html'), `macOS build ${identity.qualifiedSystemBuild} lidswitch-working.png`);
 });
 
 console.log('release identity adversarial fixtures passed');
