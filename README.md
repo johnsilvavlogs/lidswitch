@@ -4,6 +4,8 @@ LidSwitch is a native macOS menu bar app that keeps your Mac awake while its lid
 
 Version `0.3.1` build `13` runs one app instance per user and keeps Quit responsive while sleep restoration finishes. It saves both power-source choices. Battery operation starts disabled until you select it. Approve helper installation once; ordinary switching and quitting use the installed authenticated helper without confirmation dialogs. Updating, repairing, or removing that privileged installation can still require macOS authorization.
 
+Open LidSwitch again from Finder or Spotlight to show its controls in a standard window. Closing that window leaves the menu bar app running.
+
 ## Safety model
 
 - Protection is off after install, app launch, login, or reboot. Source choices persist; the master switch does not automatically turn on at launch.

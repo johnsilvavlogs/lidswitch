@@ -26,9 +26,11 @@ struct LidSwitchApp: App {
         }
         let client = try? RawHelperControlClient.production()
         let controller = PowerController(sideEffects: .production(client: client))
+        let confirmationPresenter = NativeConfirmationPresenter()
         _controller = StateObject(wrappedValue: controller)
-        _confirmationPresenter = StateObject(wrappedValue: NativeConfirmationPresenter())
+        _confirmationPresenter = StateObject(wrappedValue: confirmationPresenter)
         LidSwitchApplicationDelegate.controller = controller
+        LidSwitchApplicationDelegate.confirmationPresenter = confirmationPresenter
     }
 
     var body: some Scene {
@@ -46,6 +48,44 @@ struct LidSwitchApp: App {
 @MainActor
 final class LidSwitchApplicationDelegate: NSObject, NSApplicationDelegate {
     static weak var controller: PowerController?
+    static weak var confirmationPresenter: NativeConfirmationPresenter?
+
+    private var controlPanelWindow: NSWindowController?
+
+    // Finder, Spotlight and `open -a LidSwitch` send a normal reopen event to
+    // the existing owner. Provide access to the same controls without requiring
+    // a physical status-item click or creating another power controller.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard let controller = Self.controller,
+              let confirmationPresenter = Self.confirmationPresenter else {
+            return false
+        }
+        if controlPanelWindow == nil {
+            let hostingController = NSHostingController(
+                rootView: LidSwitchPanel(
+                    controller: controller,
+                    confirmationPresenter: confirmationPresenter
+                ).frame(width: 320)
+            )
+            let window = NSWindow(contentViewController: hostingController)
+            window.title = "LidSwitch"
+            window.identifier = NSUserInterfaceItemIdentifier("LidSwitchControlPanel")
+            window.styleMask = [.titled, .closable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            controlPanelWindow = NSWindowController(window: window)
+        }
+        controller.refresh()
+        controlPanelWindow?.showWindow(nil)
+        controlPanelWindow?.window?.deminiaturize(nil)
+        controlPanelWindow?.window?.makeKeyAndOrderFront(nil)
+        sender.activate(ignoringOtherApps: true)
+        return false
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let controller = Self.controller else {
